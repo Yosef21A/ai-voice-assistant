@@ -59,6 +59,7 @@ export function Inbox() {
   const [sending, setSending] = useState(false);
   const [text, setText] = useState('');
   const [panelOpen, setPanelOpen] = useState(false);
+  const [flags, setFlags] = useState({}); // conversationId -> 'emergency' | 'lead'
   const timerRef = useRef(null);
 
   const queryFor = useCallback((f) => {
@@ -144,11 +145,35 @@ export function Inbox() {
     }
   });
 
+  // Safety + revenue events: flash the conversation row and pop a toast so staff
+  // never miss them. Emergency wins over a lead flag on the same row.
+  useStreamEvent('emergency.detected', (data) => {
+    scheduleReload();
+    if (data?.conversationId) setFlags((f) => ({ ...f, [data.conversationId]: 'emergency' }));
+    toast.err(t('toast.emergencyAlert'), 8000);
+  });
+  useStreamEvent('lead.hot', (data) => {
+    scheduleReload();
+    if (data?.conversationId) {
+      setFlags((f) => (f[data.conversationId] === 'emergency' ? f : { ...f, [data.conversationId]: 'lead' }));
+    }
+    toast.warn(t('toast.leadAlert'), 6000);
+  });
+
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
   // ── actions ─────────────────────────────────────────────────────────────────
   const select = (id) => {
     setPanelOpen(false);
+    // Opening a flagged conversation acknowledges it (clears the row highlight).
+    if (id) {
+      setFlags((f) => {
+        if (!f[id]) return f;
+        const next = { ...f };
+        delete next[id];
+        return next;
+      });
+    }
     route.navigate(routeTo('inbox', id));
   };
   const convo = thread?.conversation;
@@ -210,7 +235,7 @@ export function Inbox() {
           <EmptyState icon={InboxIcon} title={t('inbox.empty')} />
         ) : (
           list.map((c) => (
-            <button key={c.id} className={`convo-item${c.id === activeId ? ' active' : ''}`} onClick={() => select(c.id)}>
+            <button key={c.id} className={`convo-item${c.id === activeId ? ' active' : ''}${flags[c.id] ? ` flag-${flags[c.id]}` : ''}`} onClick={() => select(c.id)}>
               <div className="grow">
                 <div className="who">
                   <span className="name" dir="ltr">{c.patientWaId || t('inbox.patient')}</span>
@@ -218,6 +243,11 @@ export function Inbox() {
                 </div>
                 <div className="preview row" style={{ gap: 6 }}>
                   <Badge kind={CONV_STATUS_KIND[c.status]}>{t(`convStatus.${c.status}`)}</Badge>
+                  {flags[c.id] === 'emergency' ? (
+                    <span className="tiny" title={t('inbox.flagEmergency')}>🚨</span>
+                  ) : flags[c.id] === 'lead' ? (
+                    <span className="tiny" title={t('inbox.flagLead')}>🔥</span>
+                  ) : null}
                   {c.lang ? <span className="tiny muted">{c.lang.toUpperCase()}</span> : null}
                   <span className="tiny" aria-hidden="true">{c.aiPaused ? '👤' : '🤖'}</span>
                 </div>

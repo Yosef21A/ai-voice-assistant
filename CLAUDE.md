@@ -5,13 +5,14 @@ A WhatsApp AI receptionist for medical clinics and medical-tourism facilitators 
 
 **`PRODUCT-SPEC.md` is the source of truth for WHAT to build. Read it before planning any feature work.** Business pricing/tiers live in `docs/pricing-and-packaging.md`. Production deployment + full Meta WhatsApp Cloud API onboarding: `deploy/RUNBOOK.md`.
 
-## Current state (working prototype — do not regress it)
-- Pure Node.js, ES Modules, single dependency (`express`). No build step. Runs fully offline in mock mode.
-- `npm install && npm run simulate` → scripted AR + FR conversations complete real bookings end-to-end.
-- `npm test` → 17/17 passing (node:test). Keep it green; add tests with every feature.
-- WhatsApp Cloud API webhook implemented but never connected to a real number yet.
-- LLM abstracted behind a provider interface: deterministic `mockProvider` (default) + `anthropicProvider` (fetch-based, untested against the live API — needs wiring + per-tenant KB prompt work).
-- Persistence = JSON files (`src/store/`). Fine for demo; Phase 1 migrates to Postgres.
+## Current state (Phase-1-complete pilot — do not regress it)
+- Node.js, ES Modules. Runtime deps: `express` + `pg` (Postgres is opt-in). The dashboard SPA (`web/`) is Vite/React, dev-deps only → `npm run web:build` emits static files served at `/`. Engine, CLI demo and tests run fully offline in mock mode.
+- `npm run simulate` → scripted AR + FR bookings complete end-to-end, PLUS an emergency-guardrail showcase (the detector overrides the engine reply and the bot steps back).
+- `npm test` → **89 passing / 0 fail / 1 skip** (node:test). The skip is `test/store.postgres.test.js` without `DATABASE_URL` (expected). Keep it green; add tests with every feature. `test/integration.e2e.test.js` proves the whole product: booking→owner alert, staff takeover, emergency override+alert+SSE, hot-lead alert+SSE.
+- **Phase-1 is wired end-to-end:** auth (scrypt + signed cookies) → tenant-scoped REST API → onboarding wizard → live inbox with human takeover → appointments → knowledge base → owner **WhatsApp notifications** (bookings/leads/handoffs/emergencies + daily/weekly digests via `npm run digest:*`, cron-driven) → **safety + hot-lead detectors** running beside the engine in the webhook/simulate/sandbox paths. Events flow over one in-process bus to SSE (dashboard) and the notification worker.
+- WhatsApp Cloud API webhook implemented and signature-verified; **not yet connected to a real number** (do it via `deploy/RUNBOOK.md` §E).
+- LLM abstracted behind a provider interface: deterministic `mockProvider` (default) + `anthropicProvider` (fetch-based, untested against the live API — needs wiring + per-tenant KB prompt work). Booking stays deterministic regardless.
+- Persistence: JSON files by default (`src/store/`, SINGLE PM2 instance). A Postgres adapter exists behind the same interface; the request path still calls the store synchronously, so **Postgres becomes primary in P1-G** (engine async migration). Until then keep `DATABASE_URL` unset for `server.js`/`simulate.js`/tests.
 
 ## Architecture map
 - `src/server.js` — Express: GET/POST `/webhook` (Meta verify + inbound), `POST /simulate`, `GET /health`. Inbound payloads normalized to a transport-agnostic shape.

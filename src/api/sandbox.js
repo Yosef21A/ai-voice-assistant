@@ -2,8 +2,14 @@
 // synthetic patient id `sandbox:<userId>` so it never collides with real WhatsApp
 // threads and is easy to reset. Replies are returned to the caller (no real send
 // and no bus events — this is a private preview, hidden from the live inbox).
+//
+// The safety detectors still run so an owner test-driving an emergency phrase
+// sees the exact guardrail behavior (bot steps back, emergency number shown) —
+// but WITHOUT a bus, so a test drive never fires an owner alert or leaks a
+// lead.hot / emergency.detected event into the live inbox.
 import express from 'express';
 import { asyncHandler } from './http.js';
+import { analyzeInbound } from '../notifications/index.js';
 
 export function sandboxRouter({ store, engine }) {
   const router = express.Router();
@@ -23,13 +29,30 @@ export function sandboxRouter({ store, engine }) {
         messageId: `sbx_${Date.now()}`,
         timestamp: Date.now(),
       });
+
+      // Detectors beside the engine — NO bus (private preview). On an emergency,
+      // return the localized override so the test drive shows the real guardrail.
+      const clinic =
+        typeof store.getClinicById === 'function'
+          ? store.getClinicById(req.tenantId)
+          : await store.tenants.getById(req.tenantId);
+      const analysis = analyzeInbound({
+        tenant: clinic,
+        text,
+        lang: out.lang,
+        engineResult: out,
+        waId,
+      });
+
       res.json({
-        reply: out.reply,
-        replies: out.replies,
+        reply: analysis.overrideReply || out.reply,
+        replies: analysis.overrideReply ? [analysis.overrideReply] : out.replies,
         intent: out.intent,
         lang: out.lang,
-        appointment: out.appointment,
+        appointment: analysis.overrideReply ? null : out.appointment,
         state: out.state,
+        emergency: analysis.emergency || undefined,
+        hotLead: analysis.hot || undefined,
       });
     })
   );

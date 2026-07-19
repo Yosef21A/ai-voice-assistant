@@ -9,6 +9,7 @@ import { createStore } from './store/index.js';
 import { createEngine } from './engine/index.js';
 import { getProvider } from './llm/index.js';
 import { isWithinWorkingHours } from './store/availability.js';
+import { analyzeInbound } from './notifications/index.js';
 
 const base = getConfig();
 const config = { ...base, runtimeDir: path.join(base.dataDir, 'runtime-sim') };
@@ -30,7 +31,9 @@ async function runFlow({ title, phoneNumberId, from, script }) {
   hr();
   line(`  ${title}`);
   hr();
+  const clinic = store.getClinicByPhoneNumberId(phoneNumberId);
   let booked = null;
+  let leadShown = false; // the live service dedupes; here we just show it once
   for (const msg of script) {
     const out = await engine.handleMessage(
       {
@@ -43,9 +46,26 @@ async function runFlow({ title, phoneNumberId, from, script }) {
       },
       { now: NOW }
     );
+    // Run the same safety + revenue detectors the live webhook runs (no bus here
+    // — this is an offline demo), so the guardrail is visible end-to-end: an
+    // emergency OVERRIDES the engine reply and the bot steps back.
+    const analysis = analyzeInbound({
+      tenant: clinic,
+      text: msg,
+      lang: out.lang,
+      engineResult: out,
+      waId: from,
+    });
+    const reply = analysis.overrideReply || out.reply;
     line(`\n👤  ${msg}`);
-    line(`🤖  ${out.reply.replace(/\n/g, '\n    ')}`);
-    if (out.appointment) booked = out.appointment;
+    line(`🤖  ${reply.replace(/\n/g, '\n    ')}`);
+    if (analysis.emergency) {
+      line('   🚨  emergency detected → bot stepped back, staff would be alerted');
+    } else if (analysis.hot && !leadShown) {
+      leadShown = true;
+      line(`   🔥  hot lead detected → ${analysis.lead?.reason} (owner would be pinged once)`);
+    }
+    if (!analysis.overrideReply && out.appointment) booked = out.appointment;
   }
   line('');
   return booked;
@@ -96,6 +116,16 @@ const englishShowcase = {
   ],
 };
 
+// Safety guardrail showcase: a booking that turns into an emergency mid-flow.
+// The detector OVERRIDES the engine reply with the localized emergency message
+// (numbers + "the bot is stepping back"), exactly as the live webhook does.
+const emergencyShowcase = {
+  title: '🚨  Safety guardrail · El Amen (emergency → bot steps back)',
+  phoneNumberId: '1000000001',
+  from: '218940000005',
+  script: ['نحب نحجز موعد', 'صدري يوجعني برشا وما نجمّش نتنفّس'],
+};
+
 async function main() {
   line('\n╔══════════════════════════════════════════════════════════════╗');
   line('║   omen-clinic-agent — offline conversation simulator          ║');
@@ -105,6 +135,7 @@ async function main() {
   const arAppt = await runFlow(arabicFlow);
   const frAppt = await runFlow(frenchFlow);
   await runFlow(englishShowcase);
+  await runFlow(emergencyShowcase);
 
   hr();
   line('  📋  STORED APPOINTMENTS');

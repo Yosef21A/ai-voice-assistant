@@ -72,11 +72,21 @@ fi
 printf '%s   rollback with: git reset --hard %s && ./deploy/deploy.sh%s\n' \
   "$C_DIM" "$PREV_SHA" "$C_RST"
 
-# ── 3. Install production dependencies ───────────────────────────────────────
-info "Installing dependencies (npm ci --omit=dev)"
-npm ci --omit=dev || die "npm ci failed" 3
+# ── 3. Install dependencies (FULL — the dashboard build needs the dev toolchain)
+info "Installing dependencies (npm ci)"
+npm ci || die "npm ci failed" 3
 mkdir -p logs data/runtime
 ok "Dependencies installed"
+
+# ── 3b. Build the dashboard SPA (Vite → web/dist, served at / by Express) ─────
+# web/dist is git-ignored, so it is (re)built on every deploy. Then prune the
+# dev-only build toolchain so the running process keeps a lean footprint.
+info "Building the dashboard SPA (npm run web:build)"
+npm run web:build || die "web:build failed (dashboard not built)" 3
+ok "Dashboard built (web/dist)"
+info "Pruning dev dependencies (npm prune --omit=dev)"
+npm prune --omit=dev || warn "npm prune failed — dev deps remain (not fatal)"
+ok "Runtime dependencies only"
 
 # ── 4. Syntax / config test ──────────────────────────────────────────────────
 info "Syntax-checking entry point"

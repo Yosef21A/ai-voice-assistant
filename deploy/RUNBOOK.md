@@ -31,8 +31,9 @@ step is copy-paste and shows the **expected output** so you know it worked.
 - §C PM2 (start, boot-persist, logs, log rotation)
 - §D Nginx + TLS (reverse proxy, Let's Encrypt, renewal)
 - §E **Meta WhatsApp Cloud API onboarding** (the critical path)
-- §F Go-live checklist (end-to-end test, signature, backups, rollback)
+- §F Go-live checklist (end-to-end test, signature, backups, rollback, digest crons)
 - §G Multi-tenant onboarding & scaling limits
+- §H Dashboard onboarding (first-owner setup + the onboarding wizard)
 
 ---
 
@@ -128,13 +129,20 @@ Expected: a short commit SHA (e.g. `a1b2c3d`). If you deploy from a tarball
 instead of git, unpack it here — but note `deploy/deploy.sh` uses
 `git fetch/reset`, so a git checkout is strongly preferred.
 
-### B3. Install production dependencies (the ONLY dep is express)
+### B3. Install dependencies + build the dashboard
+Runtime deps are `express` + `pg`. The dashboard SPA (`web/`) is compiled by the
+dev-only Vite toolchain into `web/dist` (git-ignored → built on the box), after
+which the dev deps are pruned so the running process stays lean:
 ```bash
-npm ci --omit=dev
+npm ci                     # full install (includes the Vite build toolchain)
+npm run web:build          # emit web/dist — the dashboard Express serves at /
+npm prune --omit=dev       # drop the build toolchain — runtime deps only
 ```
-Expected: `added 60-70 packages` then `found 0 vulnerabilities`. `npm ci` needs
-`package-lock.json` (present) and installs exactly what it pins. `--omit=dev`
-skips devDeps (there are none, but keep it for hygiene).
+Expected: `web:build` prints the bundled asset sizes then `✓ built`. **`deploy.sh`
+runs these three steps for you on every deploy** — do them by hand only for a
+first manual bring-up. `npm ci` needs `package-lock.json` (present) and installs
+exactly what it pins. If you skip the build, the server still boots but `/`
+returns a "Dashboard not built yet" notice until `web/dist` exists.
 
 ### B4. Create the runtime data + logs directories
 ```bash
@@ -161,8 +169,14 @@ WHATSAPP_TOKEN=<permanent System-User token from §E7>
 WHATSAPP_VERIFY_TOKEN=<the value from `openssl rand -hex 24`, also typed in §E8>
 WHATSAPP_PHONE_NUMBER_ID=<real phone_number_id from §E4/§E5, NOT the display #>
 WHATSAPP_APP_SECRET=<App secret from §E, App settings → Basic>
+APP_SECRET=<a SECOND `openssl rand -hex 24` — signs dashboard login cookies>
 ```
-Generate a strong verify token now and paste the SAME value here and into Meta:
+**`APP_SECRET` vs `WHATSAPP_APP_SECRET`** — two different secrets: `APP_SECRET`
+signs the dashboard's session cookies (`src/auth`); `WHATSAPP_APP_SECRET` verifies
+Meta's inbound webhook HMAC. `config.js` falls back to an INSECURE dev value for
+`APP_SECRET`, so setting a strong one is mandatory in prod (else every session
+cookie is forgeable). Generate a strong verify token now and paste the SAME value
+here and into Meta:
 ```bash
 openssl rand -hex 24
 ```
@@ -694,6 +708,25 @@ retries any webhook delivered during the blip, so nothing is lost. (The
 ecosystem's `cwd: /opt/omen-clinic-agent` resolves through the symlink; keep
 `data/` and `.env` symlinked in so `config.js` finds them.)
 
+### F7. Owner notification digests (cron — NOT an in-process scheduler)
+Instant owner alerts (new booking ✅, hot lead 🔥, handoff 🙋, emergency 🚨) fire
+live from the running app. The **daily / weekly digests** (the §3.4 "money line")
+are deliberately NOT scheduled inside the process — run them from cron so a
+reload never double-fires and a crash never drops one. Add two lines (clinic-local
+08:00; set `TZ` per clinic):
+```cron
+0 8 * * *  cd /opt/omen-clinic-agent && TZ=Africa/Tunis /usr/bin/npm run --silent digest:daily  >> logs/digest.log 2>&1
+0 8 * * 1  cd /opt/omen-clinic-agent && TZ=Africa/Tunis /usr/bin/npm run --silent digest:weekly >> logs/digest.log 2>&1
+```
+Each run iterates every tenant and sends via the same WhatsApp gateway, honoring
+per-recipient `notification_prefs` (language, per-event on/off, daily/weekly
+toggles); digests ignore quiet-hours since cron already picks the hour.
+Recipients default to the clinic's escalation/owner number when no prefs row
+exists, so digests work before any per-tenant setup. Owner alert preferences are
+edited under **Settings → Notifications** in the dashboard. Test once by hand:
+`npm run digest:daily` (offline it writes to the mock outbox; with `WHATSAPP_TOKEN`
+set it sends real messages). Use `scripts/run-digest.js` directly for ad-hoc runs.
+
 ---
 
 ## §G — Multi-tenant onboarding & scaling limits
@@ -786,6 +819,46 @@ raise `instances`, enable cluster mode, and add 2+ app hosts to the Nginx
 
 ---
 
-*End of runbook. Sections §A–§G cover a full single-VPS production deployment of
+## §H — Dashboard onboarding (first-owner setup)
+
+The admin dashboard is served by the **same** Express process: once §B3 built
+`web/dist` and §D put the app behind TLS, the Vite/React SPA is live at the site
+root (`/`). Bring the first clinic owner online like this:
+
+1. **Confirm the build is served.**
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/
+   ```
+   Expected `200`. If the page shows a *"Dashboard not built yet"* notice, the
+   server is up but `web/dist` is missing — re-run `npm run web:build` (§B3) and
+   `pm2 reload omen-clinic-agent`.
+
+2. **Create the first owner (one-time bootstrap).** Open `https://<your-domain>/`
+   in a browser → **First-time setup** → enter the clinic **id** exactly as in
+   `data/clinics.json` (e.g. `el-amen-sousse`), the owner's email, and a strong
+   password. This route is a bootstrap only: it is **refused once an owner already
+   exists** for that tenant, so there is no open self-registration to disable
+   afterwards. Session cookies are signed with **`APP_SECRET`** — set a strong one
+   in §B or every session is forgeable.
+
+3. **Run the onboarding wizard.** The new owner lands in the wizard: profile →
+   persona → knowledge base → medical-tourism → **escalation number** (where the
+   owner alerts of §F7 are delivered) → **test drive** → go-live. The test drive
+   (and later Settings → sandbox) talk to the live engine with the clinic's own
+   data — **including the emergency guardrail** — without writing to the live
+   inbox or firing owner alerts. Finishing the wizard flips the clinic live; from
+   then the **live inbox** (with human takeover), **appointments**, **knowledge
+   base**, and **notification preferences** (Settings → Notifications) are all in
+   the dashboard.
+
+Repeat step 2 for each clinic. Every account is **tenant-scoped**: an owner sees
+only their own clinic's data (resolution stays keyed on `phone_number_id` →
+tenant; enforced end-to-end and covered by `test/api.isolation.test.js`). During
+`web/` development, `npm run web:dev` serves the SPA on `:5173` and proxies the
+API to `:3000` so cookies + SSE stay same-origin.
+
+---
+
+*End of runbook. Sections §A–§H cover a full single-VPS production deployment of
 omen-clinic-agent. Keep this file in the repo (`deploy/RUNBOOK.md`) so it
 versions alongside the code and configs it references.*

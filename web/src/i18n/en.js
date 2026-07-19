@@ -132,6 +132,7 @@ export default {
     panelPatient: 'Patient info', panelAppt: 'Linked appointment', noAppt: 'No linked appointment.',
     waId: 'WhatsApp number', lang: 'Language', status: 'Status', started: 'Since',
     backList: 'Conversations', details: 'Details',
+    flagEmergency: 'Emergency detected — the bot stepped back', flagLead: 'Hot lead — reply fast',
   },
   convStatus: { open: 'Open', needs_human: 'Needs human', closed: 'Closed' },
   appt: {
@@ -163,5 +164,7 @@ export default {
     kbSaved: 'Knowledge base updated.', kbDeleted: 'Entry deleted.',
     templateAdded: 'Template {name} added.', copied: 'Copied to clipboard.',
     sandboxReset: 'Test drive reset.', welcome: 'Welcome! Let’s set up your bot.',
+    emergencyAlert: '🚨 Emergency detected — the bot stepped back. Step in now.',
+    leadAlert: '🔥 Hot lead — reply fast, speed wins the booking.',
   },
 };

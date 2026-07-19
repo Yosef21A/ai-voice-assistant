@@ -325,6 +325,9 @@ select.control { appearance: none; cursor: pointer;
   border-inline-start: 3px solid transparent; transition: background 0.12s; width: 100%; background: none; text-align: start; }
 .convo-item:hover { background: var(--surface); }
 .convo-item.active { background: var(--surface); border-inline-start-color: var(--brass); }
+/* live safety / revenue flags on the row (cleared when the thread is opened) */
+.convo-item.flag-emergency { background: var(--danger-soft); border-inline-start-color: var(--danger); }
+.convo-item.flag-lead { background: var(--warn-soft); border-inline-start-color: var(--warn); }
 .convo-item .who { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .convo-item .name { font-weight: 600; font-size: 0.9rem; }
 .convo-item .time { font-size: 0.7rem; color: var(--text-mute); flex: none; }
@@ -427,6 +430,7 @@ select.control { appearance: none; cursor: pointer;
   animation: slidein 0.2s ease; }
 .toast.ok { border-inline-start-color: var(--ok); }
 .toast.err { border-inline-start-color: var(--danger); }
+.toast.warn { border-inline-start-color: var(--warn); }
 .toast.info { border-inline-start-color: var(--info); }
 .toast svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
 

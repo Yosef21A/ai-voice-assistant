@@ -25,6 +25,7 @@ import { createAuth } from './auth/index.js';
 import { createApiRouter } from './api/index.js';
 import { createOutboundRecorder } from './api/outbound.js';
 import { ingestInbound } from './api/ingest.js';
+import { analyzeInbound, createNotificationService } from './notifications/index.js';
 
 /**
  * Verify Meta's X-Hub-Signature-256 header (HMAC-SHA256 of the raw body with the
@@ -108,6 +109,12 @@ export function createApp(opts = {}) {
     });
   const auth = createAuth({ store, config });
 
+  // Owner-notification worker (P1-E, wired here in P1-F): one subscriber on the
+  // shared bus turns appointment.created / lead.hot / handoff.requested /
+  // emergency.detected into WhatsApp alerts on the owner's phone. It never throws
+  // back into a bus handler. Stopped on shutdown; tests await notifier.settled().
+  const notifier = opts.notifier || createNotificationService({ bus, sender, store });
+
   const app = express();
   // Capture the raw body so we can verify Meta's HMAC signature.
   app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
@@ -153,7 +160,32 @@ export function createApp(opts = {}) {
         timestamp: Date.now(),
       };
       const out = await engine.handleMessage(inbound, { now: body.now });
-      res.json(out);
+
+      // Same detectors as the webhook path, so /simulate honors emergencies and
+      // hot-leads identically (it feeds the same normalized shape). Resolve the
+      // tenant the engine used so the override + owner alert localize correctly.
+      const clinic =
+        store.getClinicByPhoneNumberId(inbound.phoneNumberId) ||
+        store.getClinicById(inbound.tenantId) ||
+        store.getDefaultClinic();
+      const analysis = analyzeInbound({
+        tenant: clinic,
+        text: inbound.text,
+        lang: out.lang,
+        engineResult: out,
+        waId: inbound.from,
+        bus,
+      });
+      if (analysis.overrideReply) {
+        return res.json({
+          ...out,
+          reply: analysis.overrideReply,
+          replies: [analysis.overrideReply],
+          appointment: null,
+          emergency: analysis.emergency,
+        });
+      }
+      res.json({ ...out, hotLead: analysis.hot, lead: analysis.lead || null });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -225,20 +257,38 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, auth };
+  return { app, config, store, provider, engine, bus, sender, auth, notifier };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.
 const composed = createApp();
-export const { app, config, store, provider, engine, bus, sender, auth } = composed;
+export const { app, config, store, provider, engine, bus, sender, auth, notifier } = composed;
 
 // Only listen when run directly (not when imported by tests).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     console.log(`omen-clinic-agent listening on http://localhost:${config.port}`);
     console.log(`  provider: ${provider.name}   store: ${store.name}   tenants: ${
       typeof store.listClinics === 'function' ? store.listClinics().length : '?'
     }`);
     console.log(`  try: curl -s localhost:${config.port}/health | jq`);
   });
+
+  // Graceful shutdown: unsubscribe the notification worker and drain the socket
+  // so PM2 reloads (deploy/RUNBOOK §C) don't drop in-flight alerts or SSE clients.
+  let shuttingDown = false;
+  const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n[server] ${signal} received — shutting down`);
+    try {
+      notifier.stop();
+    } catch {
+      /* best-effort */
+    }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref?.();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

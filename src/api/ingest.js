@@ -4,10 +4,19 @@
 //   1. resolve the tenant (still keyed on phone_number_id),
 //   2. persist the inbound message to the normalized transcript + emit,
 //   3. respect ai_paused (bot silent during human takeover),
-//   4. run the engine, dispatch replies through the ONE sender (onOutbound
-//      persists + emits each bubble), and emit appointment.created /
-//      handoff.requested derived from the engine result.
+//   4. run the engine, then run the detectors BESIDE it (analyzeInbound) so the
+//      engine stays transport-agnostic and never touches the bus,
+//   5. on an EMERGENCY, send the localized overrideReply INSTEAD of the engine
+//      output, pause the bot, and let the notification service alert staff
+//      (guardrail: PRODUCT-SPEC §5 / CLAUDE.md — the bot steps back),
+//   6. otherwise dispatch replies through the ONE sender (onOutbound persists +
+//      emits each bubble) and emit appointment.created / handoff.requested.
+//
+// lead.hot / emergency.detected are emitted by analyzeInbound itself (it holds
+// the classifiers); appointment.created / handoff.requested are emitted here
+// from the engine result. Both land on the shared bus → SSE + notifications.
 import { sendAs, publicMessage } from './outbound.js';
+import { analyzeInbound } from '../notifications/index.js';
 
 export async function ingestInbound({ store, engine, sender, bus }, inbound) {
   const clinic =
@@ -40,6 +49,35 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
 
   const out = await engine.handleMessage(inbound);
 
+  // Detectors run BESIDE the engine (which never touches the bus). analyzeInbound
+  // emits lead.hot / emergency.detected for the notification service and returns
+  // an overrideReply on emergencies so the bot steps back.
+  const analysis = analyzeInbound({
+    tenant: clinic,
+    text: inbound.text,
+    lang: out.lang,
+    engineResult: out,
+    waId: inbound.from,
+    bus,
+    conversationId,
+  });
+
+  if (analysis.overrideReply) {
+    // EMERGENCY: replace the engine reply with the safety message, persist it as
+    // a bot bubble, pause the bot, and flag the conversation for a human. The
+    // 🚨 owner alert is fired by the notification service off emergency.detected.
+    await sendAs('bot', conversationId, () =>
+      sender.sendText(clinic, inbound.from, analysis.overrideReply)
+    );
+    await store.conversations.update(tenantId, conversationId, { status: 'needs_human', aiPaused: true });
+    bus.publish('conversation.updated', {
+      tenantId,
+      conversationId,
+      patch: { status: 'needs_human', aiPaused: true },
+    });
+    return { tenantId, conversationId, emergency: analysis.emergency };
+  }
+
   if (out.replies && out.replies.length) {
     await sendAs('bot', conversationId, () => sender.sendEngineReply(clinic, inbound.from, out));
   }
@@ -51,7 +89,13 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
   if (out.handoff) {
     // Bot steps back: flag for a human and pause until staff hand control back.
     await store.conversations.update(tenantId, conversationId, { status: 'needs_human', aiPaused: true });
-    bus.publish('handoff.requested', { tenantId, conversationId, handoff: out.handoff });
+    bus.publish('handoff.requested', {
+      tenantId,
+      conversationId,
+      handoff: out.handoff,
+      lastMessage: inbound.text,
+      patientWaId: inbound.from,
+    });
     bus.publish('conversation.updated', {
       tenantId,
       conversationId,
@@ -59,5 +103,5 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
     });
   }
 
-  return { tenantId, conversationId, out };
+  return { tenantId, conversationId, out, lead: analysis.lead || null };
 }

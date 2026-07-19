@@ -132,6 +132,7 @@ export default {
     panelPatient: 'بطاقة المريض', panelAppt: 'الموعد المرتبط', noAppt: 'لا يوجد موعد مرتبط.',
     waId: 'رقم واتساب', lang: 'اللغة', status: 'الحالة', started: 'منذ',
     backList: 'المحادثات', details: 'التفاصيل',
+    flagEmergency: 'تم رصد حالة طوارئ — البوت توقّف', flagLead: 'عميل مهم — ردّ بسرعة',
   },
   convStatus: { open: 'مفتوحة', needs_human: 'تحتاج تدخّلاً', closed: 'مغلقة' },
   appt: {
@@ -163,5 +164,7 @@ export default {
     kbSaved: 'تم تحديث قاعدة المعرفة.', kbDeleted: 'تم حذف العنصر.',
     templateAdded: 'تمت إضافة قالب {name}.', copied: 'نُسخ إلى الحافظة.',
     sandboxReset: 'تمت إعادة ضبط التجربة.', welcome: 'مرحباً! لنجهّز بوتك.',
+    emergencyAlert: '🚨 تم رصد حالة طوارئ — البوت توقّف. تدخّل حالاً.',
+    leadAlert: '🔥 عميل مهم — ردّ بسرعة، السرعة تكسب الحجز.',
   },
 };

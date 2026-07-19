@@ -5,7 +5,7 @@ import { Check, Alert, Info } from '../components/icons.jsx';
 const ToastContext = createContext(null);
 let counter = 0;
 
-const ICONS = { ok: Check, err: Alert, info: Info };
+const ICONS = { ok: Check, err: Alert, warn: Alert, info: Info };
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
@@ -20,10 +20,13 @@ export function ToastProvider({ children }) {
     [remove]
   );
 
+  // ok / info are transient; err (emergency 🚨, red) and warn (hot lead 🔥, amber)
+  // accept an optional ttl so high-value alerts can linger a little longer.
   const toast = useMemo(
     () => ({
       ok: (m) => push(m, 'ok'),
-      err: (m) => push(m, 'err'),
+      err: (m, ttl) => push(m, 'err', ttl),
+      warn: (m, ttl) => push(m, 'warn', ttl),
       info: (m) => push(m, 'info'),
     }),
     [push]

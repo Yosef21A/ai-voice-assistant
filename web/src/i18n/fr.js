@@ -132,6 +132,7 @@ export default {
     panelPatient: 'Fiche patient', panelAppt: 'Rendez-vous lié', noAppt: 'Aucun rendez-vous lié.',
     waId: 'Numéro WhatsApp', lang: 'Langue', status: 'Statut', started: 'Depuis',
     backList: 'Conversations', details: 'Détails',
+    flagEmergency: 'Urgence détectée — le bot s’est retiré', flagLead: 'Lead à forte valeur — répondez vite',
   },
   convStatus: { open: 'Ouverte', needs_human: 'À traiter', closed: 'Fermée' },
   appt: {
@@ -163,5 +164,7 @@ export default {
     kbSaved: 'Base de connaissances mise à jour.', kbDeleted: 'Entrée supprimée.',
     templateAdded: 'Modèle {name} ajouté.', copied: 'Copié dans le presse-papiers.',
     sandboxReset: 'Essai réinitialisé.', welcome: 'Bienvenue ! Configurons votre bot.',
+    emergencyAlert: '🚨 Urgence détectée — le bot s’est retiré. Intervenez maintenant.',
+    leadAlert: '🔥 Lead à forte valeur — répondez vite, la vitesse gagne la réservation.',
   },
 };
