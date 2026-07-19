@@ -49,6 +49,21 @@ export function getConfig(overrides = {}) {
     appSecret: process.env.WHATSAPP_APP_SECRET || '',
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
     anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-latest',
+    // ── dashboard auth + API (Phase 1, Slice C) ─────────────────────────────
+    // APP_SECRET signs the HMAC session cookies (src/auth). It is DISTINCT from
+    // WHATSAPP_APP_SECRET (that one verifies Meta's inbound webhook signature).
+    // A dev default keeps the offline demo/tests working; production MUST set a
+    // strong value (see .env examples: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`).
+    sessionSecret: process.env.APP_SECRET || 'omen-dev-session-secret-change-me',
+    // Cookies are marked Secure automatically in production (behind Nginx TLS);
+    // force it on/off with COOKIE_SECURE=1|0 when needed.
+    cookieSecure:
+      process.env.COOKIE_SECURE != null
+        ? process.env.COOKIE_SECURE === '1' || process.env.COOKIE_SECURE === 'true'
+        : process.env.NODE_ENV === 'production',
+    // Session lifetime (sliding) and SSE heartbeat cadence, both in ms.
+    sessionTtlMs: Number(process.env.SESSION_TTL_MS) || 7 * 24 * 60 * 60 * 1000,
+    sseHeartbeatMs: Number(process.env.SSE_HEARTBEAT_MS) || 25000,
     // ── storage (Phase 1) ──────────────────────────────────────────────────
     // Zero-config default is the JSON file store (offline, single-process).
     // Set DATABASE_URL to target Postgres (migrate/seed scripts + the async

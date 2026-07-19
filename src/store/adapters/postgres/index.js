@@ -196,6 +196,14 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
       const { rows } = await q(sql, params);
       return rows2obj(rows);
     },
+    // Hard-delete a conversation (messages cascade via FK). Tenant-scoped.
+    async remove(tenantId, id) {
+      const { rows } = await q(
+        'DELETE FROM conversations WHERE tenant_id = $1 AND id = $2 RETURNING *',
+        [tenantId, id]
+      );
+      return row2obj(rows[0]);
+    },
   };
 
   const appointments = {
@@ -379,9 +387,52 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     },
   };
 
+  // ── users (dashboard logins) — added in P1-C ────────────────────────────────
+  const users = {
+    async create(tenantId, { email, passwordHash, role = 'owner', name = null, status = 'active' } = {}) {
+      if (!email) throw new Error('users.create: email required');
+      const { rows } = await q(
+        `INSERT INTO users (tenant_id, email, password_hash, role, name, status)
+         VALUES ($1,$2,$3,COALESCE($4,'owner'),$5,COALESCE($6,'active'))
+         RETURNING *`,
+        [tenantId, String(email), passwordHash || '', role ?? null, name ?? null, status ?? null]
+      );
+      return row2obj(rows[0]);
+    },
+    async getByEmail(email) {
+      if (!email) return null;
+      const { rows } = await q('SELECT * FROM users WHERE lower(email) = lower($1)', [String(email)]);
+      return row2obj(rows[0]);
+    },
+    async getById(tenantId, id) {
+      const { rows } = await q('SELECT * FROM users WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
+      return row2obj(rows[0]);
+    },
+    async list(tenantId) {
+      const { rows } = await q('SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at', [tenantId]);
+      return rows2obj(rows);
+    },
+    async countForTenant(tenantId) {
+      const { rows } = await q('SELECT count(*)::int AS n FROM users WHERE tenant_id = $1', [tenantId]);
+      return rows[0]?.n ?? 0;
+    },
+    async count() {
+      const { rows } = await q('SELECT count(*)::int AS n FROM users');
+      return rows[0]?.n ?? 0;
+    },
+    async touchLogin(tenantId, id) {
+      const { rows } = await q(
+        'UPDATE users SET last_login_at = now() WHERE tenant_id = $1 AND id = $2 RETURNING *',
+        [tenantId, id]
+      );
+      return row2obj(rows[0]);
+    },
+  };
+
   return {
     name: 'postgres',
     tenants,
+    users,
     patients,
     conversations,
     appointments,

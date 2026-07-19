@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 
 const COLLECTIONS = [
   'patients', 'conversations', 'messages', 'appointments',
-  'leads', 'kb_entries', 'events', 'notification_prefs', 'tenants',
+  'leads', 'kb_entries', 'events', 'notification_prefs', 'tenants', 'users',
 ];
 
 /**
@@ -248,6 +248,17 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {})
       if (limit) rows = rows.slice(-limit);
       return rows;
     },
+    // Hard-delete a conversation and its messages (sandbox reset + GDPR erase).
+    // Tenant-scoped: a cross-tenant id never matches, so it can't delete B's rows.
+    async remove(tenantId, id) {
+      const idx = db.conversations.findIndex((c) => c.id === id && c.clinicId === tenantId);
+      if (idx === -1) return null;
+      const [rec] = db.conversations.splice(idx, 1);
+      db.messages = db.messages.filter((m) => !(m.conversationId === id && m.tenantId === tenantId));
+      persist('conversations');
+      persist('messages');
+      return rec;
+    },
   };
 
   const appointments = {
@@ -418,6 +429,59 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {})
     },
   };
 
+  // ── users (dashboard logins) ──────────────────────────────────────────────
+  // Added in P1-C. Email is globally unique (lower-cased); every other read is
+  // tenant-scoped. Passwords are hashed by src/auth before they reach here.
+  const users = {
+    async create(tenantId, { email, passwordHash, role = 'owner', name = null, status = 'active' } = {}) {
+      if (!email) throw new Error('users.create: email required');
+      const emailLower = String(email).toLowerCase();
+      if (db.users.some((u) => u.emailLower === emailLower)) {
+        throw new Error('users.create: email already exists');
+      }
+      const rec = {
+        id: randomUUID(),
+        tenantId,
+        email: String(email),
+        emailLower,
+        passwordHash: passwordHash || null,
+        role,
+        name,
+        status,
+        lastLoginAt: null,
+        createdAt: now(),
+        updatedAt: now(),
+      };
+      db.users.push(rec);
+      persist('users');
+      return rec;
+    },
+    async getByEmail(email) {
+      if (!email) return null;
+      return db.users.find((u) => u.emailLower === String(email).toLowerCase()) || null;
+    },
+    async getById(tenantId, id) {
+      return db.users.find((u) => u.id === id && u.tenantId === tenantId) || null;
+    },
+    async list(tenantId) {
+      return db.users.filter((u) => u.tenantId === tenantId);
+    },
+    async countForTenant(tenantId) {
+      return db.users.filter((u) => u.tenantId === tenantId).length;
+    },
+    async count() {
+      return db.users.length;
+    },
+    async touchLogin(tenantId, id) {
+      const u = db.users.find((x) => x.id === id && x.tenantId === tenantId);
+      if (!u) return null;
+      u.lastLoginAt = now();
+      u.updatedAt = now();
+      persist('users');
+      return u;
+    },
+  };
+
   return {
     name: 'json',
     // legacy synchronous engine surface
@@ -433,6 +497,7 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {})
     listAppointments,
     // async collection interface
     tenants,
+    users,
     patients,
     conversations,
     appointments,

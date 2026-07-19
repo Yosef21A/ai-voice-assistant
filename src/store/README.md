@@ -61,6 +61,8 @@ store.close()                    release pool / resources
 
 tenants.getByPhoneNumberId(pnid) .getById(id) .list() .upsert({id, phoneNumberId, name, city,
                                  country, timezone, currency, languages[], config{}})
+users.create(tenantId, {email, passwordHash, role, name, status}) .getByEmail(email)  // P1-C
+     .getById(tenantId, id) .list(tenantId) .countForTenant(tenantId) .count() .touchLogin(tenantId, id)
 patients.upsert(tenantId, waId, patch) .get(tenantId, waId) .list(tenantId)
 conversations.get(tenantId, waId) .getById(tenantId, id)
              .create(tenantId, {patientWaId, lang, status, aiPaused, state})
@@ -69,6 +71,7 @@ conversations.get(tenantId, waId) .getById(tenantId, id)
              .setStatus(tenantId, id, status) .setAiPaused(tenantId, id, bool)
              .appendMessage(tenantId, convId, {direction, type, body, waMessageId, status, ts})
              .listMessages(tenantId, convId, {limit})      // chronological (ts, seq)
+             .remove(tenantId, id)                          // P1-C: hard-delete convo + its messages
 appointments.create(tenantId, data) .list(tenantId, {status, patientWaId, from, to})
             .get(tenantId, id) .updateStatus(tenantId, id, status)
 leads.create(tenantId, data) .list(tenantId, {status}) .get(tenantId, id)
@@ -104,7 +107,7 @@ notificationPrefs.list(tenantId) .get(tenantId, recipient, channel)
   adapters expose the same `appendMessage`/`listMessages` contract).
 
 ## Adding an adapter
-Implement the async interface above (name, health, close, and the eight
+Implement the async interface above (name, health, close, and the nine
 collections), export a `create<Kind>Store(opts)` factory, and wire it into
 `resolveKind`/`createStore` in `index.js`. Keep every query tenant-scoped and
 parameterized. Test parity by pointing a suite like

@@ -1,0 +1,29 @@
+// The tenant-scoped dashboard API router (P1-C). Mounted at /api by server.js,
+// AFTER the public /api/auth router. Every route here is behind requireAuth, so
+// each handler runs with { req.user, req.tenantId } and scopes every store call.
+import express from 'express';
+import { tenantRouter } from './tenant.js';
+import { kbRouter } from './kb.js';
+import { conversationsRouter } from './conversations.js';
+import { appointmentsRouter } from './appointments.js';
+import { sandboxRouter } from './sandbox.js';
+import { streamHandler } from './stream.js';
+
+export function createApiRouter({ store, engine, sender, bus, config, auth }) {
+  const { requireAuth, requireRole } = auth;
+  const router = express.Router();
+
+  // Gate the whole surface. /api/auth/{setup,login} stay public (mounted apart).
+  router.use(requireAuth);
+
+  router.get('/stream', streamHandler({ bus, config }));
+  router.use('/tenant', tenantRouter({ store, requireRole }));
+  router.use('/kb', kbRouter({ store }));
+  router.use('/conversations', conversationsRouter({ store, sender, bus }));
+  router.use('/appointments', appointmentsRouter({ store, bus }));
+  router.use('/sandbox', sandboxRouter({ store, engine }));
+
+  return router;
+}
+
+export default createApiRouter;
