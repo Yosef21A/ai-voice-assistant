@@ -12,8 +12,9 @@
 // JSON store for Postgres is a config change, not a code change (P1-G).
 import express from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { getConfig } from './config.js';
 import { createStore } from './store/index.js';
 import { createEngine } from './engine/index.js';
@@ -174,6 +175,47 @@ export function createApp(opts = {}) {
   // ── dashboard API (public auth bootstrap, then the gated tenant-scoped API) ───
   app.use('/api/auth', auth.router);
   app.use('/api', createApiRouter({ store, engine, sender, bus, config, auth }));
+
+  // ── dashboard SPA (web/dist) ──────────────────────────────────────────────────
+  // Serve the built Vite bundle at / with an SPA fallback so client-side (hash)
+  // routes resolve on a hard refresh. /api, /webhook, /simulate and /health are
+  // registered ABOVE and always win; this only catches other GET/HEAD requests.
+  // Tests can point webDistDir at a fixture via getConfig({ webDistDir }).
+  const webDistDir =
+    config.webDistDir ||
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'dist');
+  const indexHtmlPath = path.join(webDistDir, 'index.html');
+  const hasWebBuild = fs.existsSync(indexHtmlPath);
+  if (hasWebBuild) {
+    app.use(express.static(webDistDir, { index: false, maxAge: '1h' }));
+  }
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    const p = req.path;
+    if (
+      p.startsWith('/api') ||
+      p.startsWith('/webhook') ||
+      p.startsWith('/simulate') ||
+      p.startsWith('/health')
+    ) {
+      return next(); // never let the SPA shadow the API / webhook surfaces
+    }
+    if (!hasWebBuild) {
+      return res
+        .status(503)
+        .type('html')
+        .send(
+          '<!doctype html><meta charset="utf-8"><title>Omen Clinic Concierge</title>' +
+            '<body style="font-family:system-ui;background:#0d0f12;color:#edeef1;padding:3rem;line-height:1.7">' +
+            '<h1 style="color:#c9a86a">Dashboard not built yet</h1>' +
+            '<p>Run <code>npm run web:build</code> to generate <code>web/dist</code>, then reload.</p>' +
+            '<p>For development, run <code>npm run web:dev</code> (Vite on :5173, proxying the API here on :' +
+            config.port +
+            ').</p></body>'
+        );
+    }
+    return res.sendFile(indexHtmlPath);
+  });
 
   // Central JSON error handler — asyncHandler funnels rejected promises here.
   // eslint-disable-next-line no-unused-vars

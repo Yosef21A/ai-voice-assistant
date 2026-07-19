@@ -5,3 +5,5 @@ data/runtime-sim/
 *.log
 npm-debug.log*
 .DS_Store
+web/dist/
+web/.probe_sync

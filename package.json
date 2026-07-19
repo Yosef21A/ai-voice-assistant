@@ -12,7 +12,9 @@
     "simulate": "node src/simulate.js",
     "test": "node --test",
     "db:migrate": "node scripts/db-migrate.js",
-    "db:seed": "node scripts/db-seed.js"
+    "db:seed": "node scripts/db-seed.js",
+    "web:dev": "vite --config web/vite.config.js",
+    "web:build": "vite build --config web/vite.config.js"
   },
   "keywords": [
     "whatsapp",
@@ -27,5 +29,11 @@
   "dependencies": {
     "express": "^4.19.2",
     "pg": "8.22.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "vite": "^8.1.5"
   }
 }
