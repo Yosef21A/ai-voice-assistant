@@ -1,0 +1,208 @@
+{
+  "clinics": [
+    {
+      "id": "el-amen-sousse",
+      "name": "Clinique El Amen — Sousse",
+      "city": "Sousse",
+      "country": "Tunisia",
+      "timezone": "Africa/Tunis",
+      "currency": "EUR",
+      "whatsapp": {
+        "phoneNumberId": "1000000001",
+        "displayPhone": "+216 73 000 111"
+      },
+      "handoff": {
+        "name": "Coordination patients internationaux",
+        "phone": "+216 20 111 222"
+      },
+      "languages": ["ar", "fr", "en"],
+      "specialties": [
+        {
+          "id": "cardiology",
+          "labels": { "ar": "أمراض القلب", "fr": "Cardiologie", "en": "Cardiology" },
+          "synonyms": ["heart", "cardio", "cardiaque", "قلب", "cardiologie"]
+        },
+        {
+          "id": "orthopedics",
+          "labels": { "ar": "جراحة العظام", "fr": "Orthopédie", "en": "Orthopedics" },
+          "synonyms": ["ortho", "bones", "knee", "hip", "عظام", "orthopedie", "prothese"]
+        },
+        {
+          "id": "cosmetic_surgery",
+          "labels": { "ar": "جراحة التجميل", "fr": "Chirurgie esthétique", "en": "Cosmetic surgery" },
+          "synonyms": ["cosmetic", "plastic", "esthetique", "esthetic", "تجميل", "rhinoplastie", "liposuccion"]
+        },
+        {
+          "id": "dental",
+          "labels": { "ar": "طب الأسنان", "fr": "Dentaire", "en": "Dental" },
+          "synonyms": ["teeth", "tooth", "dentist", "dentaire", "أسنان", "implant", "hollywood smile"]
+        },
+        {
+          "id": "fertility",
+          "labels": { "ar": "علاج العقم", "fr": "Fertilité (PMA)", "en": "Fertility (IVF)" },
+          "synonyms": ["ivf", "fiv", "pma", "fertilite", "عقم", "أطفال الأنابيب", "insemination"]
+        }
+      ],
+      "workingHours": {
+        "sun": null,
+        "mon": ["08:30", "17:30"],
+        "tue": ["08:30", "17:30"],
+        "wed": ["08:30", "17:30"],
+        "thu": ["08:30", "17:30"],
+        "fri": ["08:30", "13:00"],
+        "sat": ["09:00", "13:00"]
+      },
+      "pricing": {
+        "cardiology": { "consultation_eur": 40, "estimate_eur": [900, 3500] },
+        "orthopedics": { "consultation_eur": 45, "estimate_eur": [2500, 6500] },
+        "cosmetic_surgery": { "consultation_eur": 50, "estimate_eur": [1500, 4500] },
+        "dental": { "consultation_eur": 30, "estimate_eur": [300, 4000] },
+        "fertility": { "consultation_eur": 60, "estimate_eur": [2800, 5000] }
+      },
+      "travel": {
+        "airports": "Enfidha–Hammamet (NBE, ~45 min) or Monastir (MIR, ~30 min)",
+        "transfer": "Airport pickup and clinic shuttle arranged on request",
+        "accommodation": "Partner hotels 3–5★ and recovery apartments within 10 min of the clinic",
+        "companion": "One companion accommodated; assistance with local SIM and transport",
+        "visa": "Libyan nationals: short medical stays in Tunisia are generally visa-free; the clinic issues an official invitation letter to support border entry."
+      },
+      "faq": [
+        {
+          "id": "visa_invitation",
+          "keywords": ["visa", "تأشيرة", "فيزا", "invitation", "دعوة", "passport", "passeport", "جواز", "border", "حدود"],
+          "answer": {
+            "ar": "المرضى الليبيون يقدروا يدخلوا تونس للعلاج القصير بدون تأشيرة في أغلب الحالات. نحنا نجهزولك رسالة دعوة رسمية من العيادة تسهّل عليك الدخول من الحدود أو المطار.",
+            "fr": "Les patients libyens peuvent en général entrer en Tunisie sans visa pour un séjour médical court. Nous vous délivrons une lettre d'invitation officielle de la clinique pour faciliter le passage à la frontière ou à l'aéroport.",
+            "en": "Libyan patients can usually enter Tunisia visa-free for a short medical stay. We issue an official clinic invitation letter to smooth your entry at the border or airport."
+          }
+        },
+        {
+          "id": "hours",
+          "keywords": ["hours", "horaires", "ouvert", "open", "ساعات", "وقت", "متى", "quand ouvert", "when open", "دوام"],
+          "answer": {
+            "ar": "أوقات العمل: من الاثنين للخميس من 8:30 للـ17:30، الجمعة من 8:30 للـ13:00، والسبت من 9:00 للـ13:00. الأحد مغلق.",
+            "fr": "Horaires : lundi à jeudi 8h30–17h30, vendredi 8h30–13h00, samedi 9h00–13h00. Fermé le dimanche.",
+            "en": "Opening hours: Monday–Thursday 8:30–17:30, Friday 8:30–13:00, Saturday 9:00–13:00. Closed Sunday."
+          }
+        },
+        {
+          "id": "payment",
+          "keywords": ["payment", "paiement", "pay", "cash", "carte", "card", "دفع", "خلاص", "بطاقة", "دينار", "euro", "devise", "currency"],
+          "answer": {
+            "ar": "نقبلوا الكاش (دينار تونسي أو أورو)، البطاقة البنكية، والتحويل البنكي. الفاتورة النهائية تتحدد بعد الفحص الطبي.",
+            "fr": "Nous acceptons les espèces (dinar tunisien ou euro), la carte bancaire et le virement. Le montant final est fixé après l'examen médical.",
+            "en": "We accept cash (Tunisian dinar or euro), bank card, and wire transfer. The final amount is set after the medical assessment."
+          }
+        },
+        {
+          "id": "stay_duration",
+          "keywords": ["how long", "duree", "durée", "stay", "séjour", "sejour", "المدة", "قداش نقعد", "كم يوم", "days", "combien de jours"],
+          "answer": {
+            "ar": "المدة تتوقف على العلاج: الفحص والأسنان غالباً 1–3 أيام، جراحة القلب أو العظام من 5 لـ10 أيام مع فترة نقاهة. الفريق يعطيك برنامج دقيق بعد التشخيص.",
+            "fr": "La durée dépend du traitement : bilan et soins dentaires 1–3 jours ; chirurgie cardiaque ou orthopédique 5–10 jours avec convalescence. L'équipe vous remet un programme précis après le diagnostic.",
+            "en": "Length of stay depends on the treatment: check-ups and dental usually 1–3 days; cardiac or orthopedic surgery 5–10 days with recovery. The team gives you a precise plan after diagnosis."
+          }
+        },
+        {
+          "id": "languages_staff",
+          "keywords": ["language", "langue", "arabic", "arabe", "french", "francais", "english", "anglais", "لغة", "عربي", "بالعربي", "translator", "traducteur"],
+          "answer": {
+            "ar": "طاقمنا يتكلم العربية والفرنسية والإنجليزية، ونوفرولك مرافق يتكلم لهجتك طوال فترة العلاج.",
+            "fr": "Notre équipe parle arabe, français et anglais, et un accompagnant parlant votre dialecte reste avec vous pendant tout le séjour.",
+            "en": "Our team speaks Arabic, French and English, and a companion who speaks your dialect stays with you throughout the treatment."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ennour-sfax",
+      "name": "Polyclinique Ennour — Sfax",
+      "city": "Sfax",
+      "country": "Tunisia",
+      "timezone": "Africa/Tunis",
+      "currency": "EUR",
+      "whatsapp": {
+        "phoneNumberId": "1000000002",
+        "displayPhone": "+216 74 000 222"
+      },
+      "handoff": {
+        "name": "Bureau des patients étrangers",
+        "phone": "+216 22 333 444"
+      },
+      "languages": ["ar", "fr", "en"],
+      "specialties": [
+        {
+          "id": "dental",
+          "labels": { "ar": "طب الأسنان", "fr": "Dentaire", "en": "Dental" },
+          "synonyms": ["teeth", "tooth", "dentist", "dentaire", "أسنان", "implant", "couronne", "hollywood smile"]
+        },
+        {
+          "id": "cosmetic_surgery",
+          "labels": { "ar": "جراحة التجميل", "fr": "Chirurgie esthétique", "en": "Cosmetic surgery" },
+          "synonyms": ["cosmetic", "plastic", "esthetique", "esthetic", "تجميل", "rhinoplastie", "lifting"]
+        },
+        {
+          "id": "ophthalmology",
+          "labels": { "ar": "طب العيون", "fr": "Ophtalmologie", "en": "Ophthalmology" },
+          "synonyms": ["eye", "eyes", "yeux", "vision", "lasik", "عيون", "عين", "cataracte", "cataract"]
+        },
+        {
+          "id": "orthopedics",
+          "labels": { "ar": "جراحة العظام", "fr": "Orthopédie", "en": "Orthopedics" },
+          "synonyms": ["ortho", "bones", "knee", "hip", "عظام", "orthopedie", "prothese"]
+        }
+      ],
+      "workingHours": {
+        "sun": null,
+        "mon": ["09:00", "18:00"],
+        "tue": ["09:00", "18:00"],
+        "wed": ["09:00", "18:00"],
+        "thu": ["09:00", "18:00"],
+        "fri": ["09:00", "13:00"],
+        "sat": ["09:00", "13:00"]
+      },
+      "pricing": {
+        "dental": { "consultation_eur": 25, "estimate_eur": [250, 4500] },
+        "cosmetic_surgery": { "consultation_eur": 45, "estimate_eur": [1400, 4200] },
+        "ophthalmology": { "consultation_eur": 35, "estimate_eur": [600, 2200] },
+        "orthopedics": { "consultation_eur": 45, "estimate_eur": [2400, 6000] }
+      },
+      "travel": {
+        "airports": "Sfax–Thyna (SFA, ~15 min) or Enfidha (NBE, ~1h45)",
+        "transfer": "Complimentary airport pickup for surgical patients",
+        "accommodation": "Partner 4★ hotels and serviced apartments near the clinic",
+        "companion": "Companion room available; help with local transport and SIM",
+        "visa": "Libyan nationals normally enter Tunisia visa-free for short medical stays; the clinic provides an official invitation letter."
+      },
+      "faq": [
+        {
+          "id": "visa_invitation",
+          "keywords": ["visa", "تأشيرة", "فيزا", "invitation", "دعوة", "passport", "passeport", "جواز"],
+          "answer": {
+            "ar": "المرضى الليبيون في العادة يدخلوا تونس بدون تأشيرة للعلاج القصير، ونحنا نصدرولك رسالة دعوة رسمية من العيادة.",
+            "fr": "Les patients libyens entrent normalement en Tunisie sans visa pour un séjour médical court ; nous émettons une lettre d'invitation officielle.",
+            "en": "Libyan patients normally enter Tunisia visa-free for a short medical stay; we issue an official invitation letter."
+          }
+        },
+        {
+          "id": "hours",
+          "keywords": ["hours", "horaires", "ouvert", "open", "ساعات", "وقت", "متى", "دوام"],
+          "answer": {
+            "ar": "أوقات العمل: من الاثنين للخميس من 9:00 للـ18:00، الجمعة والسبت من 9:00 للـ13:00. الأحد مغلق.",
+            "fr": "Horaires : lundi à jeudi 9h00–18h00, vendredi et samedi 9h00–13h00. Fermé le dimanche.",
+            "en": "Opening hours: Monday–Thursday 9:00–18:00, Friday and Saturday 9:00–13:00. Closed Sunday."
+          }
+        },
+        {
+          "id": "payment",
+          "keywords": ["payment", "paiement", "pay", "cash", "carte", "card", "دفع", "خلاص", "بطاقة", "euro", "currency"],
+          "answer": {
+            "ar": "نقبلوا الكاش (دينار أو أورو)، البطاقة، والتحويل البنكي. الفاتورة تتأكد بعد الاستشارة.",
+            "fr": "Espèces (dinar ou euro), carte bancaire et virement acceptés. Le montant est confirmé après la consultation.",
+            "en": "We accept cash (dinar or euro), card, and wire transfer. The amount is confirmed after the consultation."
+          }
+        }
+      ]
+    }
+  ]
+}

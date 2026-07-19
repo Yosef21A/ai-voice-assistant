@@ -1,0 +1,31 @@
+{
+  "name": "omen-clinic-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WhatsApp AI agent for medical-tourism clinics in Tunisia (Sousse/Sfax). Multi-tenant, conversational in Arabic / French / English. Runs fully offline in mock mode.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "simulate": "node src/simulate.js",
+    "test": "node --test",
+    "db:migrate": "node scripts/db-migrate.js",
+    "db:seed": "node scripts/db-seed.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "medical-tourism",
+    "clinic",
+    "chatbot",
+    "tunisia",
+    "multilingual"
+  ],
+  "author": "OmenLabz",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "8.22.0"
+  }
+}
