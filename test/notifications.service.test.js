@@ -128,7 +128,7 @@ test('booking event → default recipient gets a formatted alert + audit event',
 
   assert.equal(sender.sent.length, 1);
   assert.equal(sender.sent[0].to, '21620111222');
-  assert.equal(sender.sent[0].from, '1000000001'); // sent FROM the clinic number
+  assert.equal(sender.sent[0].from, EL.whatsapp.phoneNumberId); // sent FROM the clinic number
   assert.match(sender.sent[0].text, /Nouvelle réservation/);
   assert.match(sender.sent[0].text, /EAS-001/);
   assert.equal(store.records.some((e) => e.type === 'notification.sent'), true);

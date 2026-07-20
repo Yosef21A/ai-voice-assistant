@@ -10,7 +10,10 @@ import { makeTestApp, listen, request, setupOwner } from '../test-helpers/client
 import { ingestInbound } from '../src/api/ingest.js';
 
 const A = 'el-amen-sousse';
-const PNID = '1000000001';
+// Derived, not hard-coded: the registry re-keys this tenant to the real Meta
+// phone_number_id when a live number is wired (see 2b92c67).
+const PNID = JSON.parse(fs.readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8'))
+  .clinics.find((c) => c.id === A).whatsapp.phoneNumberId;
 
 function waPayload({ from, text, id }) {
   return {

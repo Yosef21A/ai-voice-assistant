@@ -104,6 +104,7 @@ export function createApp(opts = {}) {
   const sender =
     opts.sender ||
     createSender({
+      transport: config.whatsappTransport || undefined,
       onOutbound: createOutboundRecorder({ store, bus }),
       outboxFile: path.join(config.runtimeDir, 'outbox.json'),
     });

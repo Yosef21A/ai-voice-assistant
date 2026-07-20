@@ -49,6 +49,9 @@ export function getConfig(overrides = {}) {
     appSecret: process.env.WHATSAPP_APP_SECRET || '',
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
     anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-latest',
+    // Outbound WhatsApp transport: 'real' | 'mock' | '' (auto: token ⇒ real).
+    // Tests pin 'mock' so a developer's .env token can never leak network calls.
+    whatsappTransport: process.env.WHATSAPP_TRANSPORT || '',
     // ── dashboard auth + API (Phase 1, Slice C) ─────────────────────────────
     // APP_SECRET signs the HMAC session cookies (src/auth). It is DISTINCT from
     // WHATSAPP_APP_SECRET (that one verifies Meta's inbound webhook signature).

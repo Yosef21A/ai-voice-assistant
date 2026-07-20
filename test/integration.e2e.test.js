@@ -27,7 +27,10 @@ import { ingestInbound } from '../src/api/ingest.js';
 import { normalizeWhatsApp } from '../src/server.js';
 
 const A = 'el-amen-sousse';
-const PNID = '1000000001'; // el-amen-sousse whatsapp.phoneNumberId
+// Derived, not hard-coded: the registry re-keys this tenant to the real Meta
+// phone_number_id when a live number is wired (see 2b92c67).
+const PNID = JSON.parse(fs.readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8'))
+  .clinics.find((c) => c.id === A).whatsapp.phoneNumberId;
 const OWNER = '21620111222'; // normalized handoff.phone (+216 20 111 222)
 
 // ── helpers ──────────────────────────────────────────────────────────────────

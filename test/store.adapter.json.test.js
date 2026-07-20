@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '../src/config.js';
 import { createStore } from '../src/store/index.js';
@@ -16,11 +17,15 @@ function freshStore() {
 }
 const A = 'el-amen-sousse';
 const B = 'ennour-sfax';
+// Derive the pnid from the registry: the contract under test is the SEEDING +
+// MAPPING, not a hard-coded id (the registry re-keys when a real number lands).
+const CLINICS = JSON.parse(readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8')).clinics;
+const A_PNID = CLINICS.find((c) => c.id === A).whatsapp.phoneNumberId;
 
 test('json adapter — is the default and seeds tenants from clinics.json', async () => {
   const s = freshStore();
   assert.equal(s.name, 'json');
-  const t = await s.tenants.getByPhoneNumberId('1000000001');
+  const t = await s.tenants.getByPhoneNumberId(A_PNID);
   assert.equal(t.id, A);
   assert.ok(Array.isArray(t.languages));
   assert.ok(t.config.specialties?.length);

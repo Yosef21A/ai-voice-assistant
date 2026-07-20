@@ -19,6 +19,11 @@ export function makeTestApp(overrides = {}) {
     sessionSecret: `test-secret-${randomUUID()}`,
     cookieSecure: false,
     sseHeartbeatMs: 40,
+    // Hermetic by construction: never let a developer's .env WHATSAPP_TOKEN or
+    // LLM keys flip a test app onto real transports/providers.
+    whatsappTransport: 'mock',
+    anthropicApiKey: '',
+    geminiApiKey: '',
     ...overrides,
   });
   const bus = createBus();
