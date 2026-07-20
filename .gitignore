@@ -7,3 +7,7 @@ npm-debug.log*
 .DS_Store
 web/dist/
 web/.probe_sync
+
+claudechat.md
+cloudflare_terminal.md
+data/media/

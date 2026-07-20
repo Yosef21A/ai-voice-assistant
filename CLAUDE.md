@@ -51,3 +51,6 @@ A WhatsApp AI receptionist for medical clinics and medical-tourism facilitators 
 - `docs/pricing-and-packaging.md` — tiers, founding-clinic offer (do NOT invent new prices)
 - `deploy/RUNBOOK.md` — VPS + Meta onboarding, §E is the real-number connection guide
 - `README.md` — original prototype docs
+
+## Phase 2
+Detailed, ordered Phase-2 build plan (analytics, media/X-ray, training loop, leads, hardening, PG cutover, dialect, reminders): **docs/PHASE2-WORKPLAN.md** — execute in its stated order.
