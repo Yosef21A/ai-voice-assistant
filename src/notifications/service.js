@@ -12,6 +12,18 @@
 // helper so the aggregation is unit-testable without a live store, and thin
 // `runDailyDigest` / `runWeeklyDigest` methods a cron can call (see README.md).
 import { formatAlert, formatDailyDigest, formatWeeklyDigest, resolveOwnerLang } from './formatter.js';
+import {
+  computeDigestStats,
+  collectDigestStats,
+  isAfterHours,
+  minutesInTz,
+  weekdayInTz,
+  parseHM,
+} from '../stats/index.js';
+
+// The aggregation moved to src/stats (P2-A) so the dashboard /api/stats and the
+// digests share ONE source of numbers. Re-exported here for back-compat.
+export { computeDigestStats, isAfterHours, minutesInTz, weekdayInTz };
 
 const DEFAULT_DEDUPE_MS = 10 * 60 * 1000; // 10 minutes, same conversation + type
 
@@ -206,16 +218,8 @@ export function createNotificationService({
     const from = opts.from ? new Date(opts.from) : new Date(to.getTime() - spanMs);
     const tz = opts.tz || tenant.timezone || cfgOf(tenant).timezone || 'Africa/Tunis';
 
-    const [conversations, appointments, leads] = await Promise.all([
-      safeList(() => store.conversations.list(tenantId)),
-      safeList(() => store.appointments.list(tenantId)),
-      safeList(() => store.leads.list(tenantId)),
-    ]);
-
-    const stats = computeDigestStats(
-      { tenant, conversations, appointments, leads },
-      { from, to, tz, avgValue: opts.avgValue }
-    );
+    // Shared fetch+aggregate (src/stats) — the same numbers /api/stats serves.
+    const stats = await collectDigestStats(store, tenant, { from, to, tz, avgValue: opts.avgValue });
 
     const meta =
       kind === 'weekly'
@@ -330,43 +334,7 @@ export function isEventEnabled(events, aliases) {
   return seen ? decided : true;
 }
 
-// ── quiet hours ───────────────────────────────────────────────────────────────
-function parseHM(hm) {
-  if (hm == null) return null;
-  if (typeof hm === 'number') return Math.max(0, Math.min(1439, Math.round(hm * 60)));
-  const m = String(hm).match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  return Number(m[1]) * 60 + Number(m[2]);
-}
-
-/** Minutes-since-midnight of `date` in `tz` (Intl-based; falls back to local). */
-export function minutesInTz(date, tz) {
-  try {
-    const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone: tz,
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).formatToParts(date);
-    const h = Number(parts.find((p) => p.type === 'hour')?.value);
-    const mi = Number(parts.find((p) => p.type === 'minute')?.value);
-    if (Number.isFinite(h) && Number.isFinite(mi)) return (h % 24) * 60 + mi;
-  } catch {
-    /* fall through */
-  }
-  return date.getHours() * 60 + date.getMinutes();
-}
-
-/** Weekday key ('mon'…'sun') of `date` in `tz`. */
-export function weekdayInTz(date, tz) {
-  try {
-    const wd = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(date);
-    return wd.toLowerCase().slice(0, 3);
-  } catch {
-    return ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][date.getDay()];
-  }
-}
-
+// ── quiet hours (parseHM/minutesInTz shared via src/stats) ────────────────────
 /** True when `date` falls inside the recipient's quiet-hours window. */
 export function inQuietHours(date, quietHours, tz) {
   if (!quietHours) return false;
@@ -375,89 +343,6 @@ export function inQuietHours(date, quietHours, tz) {
   if (s == null || e == null || s === e) return false;
   const mins = minutesInTz(date, quietHours.tz || tz);
   return s < e ? mins >= s && mins < e : mins >= s || mins < e;
-}
-
-// ── digest aggregation (PURE) ──────────────────────────────────────────────────
-/**
- * Aggregate a tenant's raw collections into digest numbers. No I/O, no clock —
- * everything is derived from the passed data + range, so it is fully testable.
- *
- * @param {object} storeData { tenant, conversations[], appointments[], leads[] }
- * @param {object} range     { from, to, tz?, avgValue? }
- * @returns {{conversations:number, bookings:number, leads:number, afterHours:number,
- *           afterHoursShare:number, afterHoursPct:number, money:(number|null),
- *           avgValue:(number|null), currency:(string|null), clinicName:(string|null),
- *           from:string, to:string}}
- */
-export function computeDigestStats(storeData = {}, range = {}) {
-  const tenant = storeData.tenant || {};
-  const cfg = cfgOf(tenant);
-  const tz = range.tz || tenant.timezone || cfg.timezone || 'Africa/Tunis';
-  const from = new Date(range.from).getTime();
-  const to = new Date(range.to).getTime();
-  const inRange = (ts) => {
-    if (!ts) return false;
-    const t = new Date(ts).getTime();
-    return Number.isFinite(t) && t >= from && t < to;
-  };
-
-  const workingHours = cfg.workingHours || null;
-
-  // Conversations active in the window + their after-hours share.
-  let convoCount = 0;
-  let afterHours = 0;
-  for (const c of storeData.conversations || []) {
-    const ts = c.lastMessageAt || c.updatedAt || c.createdAt;
-    if (!inRange(ts)) continue;
-    convoCount += 1;
-    if (isAfterHours(ts, workingHours, tz)) afterHours += 1;
-  }
-
-  const bookings = (storeData.appointments || []).filter(
-    (a) => inRange(a.createdAt) && a.status !== 'cancelled'
-  ).length;
-
-  const leads = (storeData.leads || []).filter((l) => inRange(l.createdAt)).length;
-
-  const avgValue =
-    range.avgValue != null
-      ? Number(range.avgValue)
-      : cfg?.notifications?.avgProcedureValue != null
-        ? Number(cfg.notifications.avgProcedureValue)
-        : cfg?.avgProcedureValue != null
-          ? Number(cfg.avgProcedureValue)
-          : null;
-
-  const money = avgValue != null && Number.isFinite(avgValue) ? bookings * avgValue : null;
-  const afterHoursShare = convoCount > 0 ? afterHours / convoCount : 0;
-
-  return {
-    conversations: convoCount,
-    bookings,
-    leads,
-    afterHours,
-    afterHoursShare,
-    afterHoursPct: Math.round(afterHoursShare * 100),
-    money,
-    avgValue,
-    currency: tenant.currency || cfg.currency || null,
-    clinicName: tenant.name || cfg.name || null,
-    from: new Date(range.from).toISOString(),
-    to: new Date(range.to).toISOString(),
-  };
-}
-
-/** Whether a timestamp is outside the clinic's working hours (closed day ⇒ true). */
-export function isAfterHours(ts, workingHours, tz) {
-  if (!workingHours) return false; // unknown schedule ⇒ don't overstate
-  const day = weekdayInTz(new Date(ts), tz);
-  const wh = workingHours[day];
-  if (!Array.isArray(wh) || wh.length < 2) return true; // null / closed day
-  const open = parseHM(wh[0]);
-  const close = parseHM(wh[1]);
-  if (open == null || close == null) return true;
-  const mins = minutesInTz(new Date(ts), tz);
-  return !(mins >= open && mins < close);
 }
 
 // ── tiny internals ─────────────────────────────────────────────────────────────
@@ -489,15 +374,6 @@ function safe(fn) {
     return fn();
   } catch {
     return null;
-  }
-}
-
-async function safeList(fn) {
-  try {
-    const rows = await fn();
-    return Array.isArray(rows) ? rows : [];
-  } catch {
-    return [];
   }
 }
 

@@ -49,6 +49,24 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
 
   const out = await engine.handleMessage(inbound);
 
+  // Persist the engine's per-turn analysis (P2-A, additive): intent + language
+  // + a short snippet power the analytics screen (topIntents / topQuestions /
+  // funnel) and the P2-B training loop. Analytics must never break the reply.
+  try {
+    await store.events.append(tenantId, {
+      type: 'message.analyzed',
+      actor: 'engine',
+      conversationId,
+      payload: {
+        intent: out.intent || 'unknown',
+        lang: out.lang || null,
+        snippet: String(inbound.text || '').slice(0, 160),
+      },
+    });
+  } catch {
+    /* best-effort audit trail */
+  }
+
   // Detectors run BESIDE the engine (which never touches the bus). analyzeInbound
   // emits lead.hot / emergency.detected for the notification service and returns
   // an overrideReply on emergencies so the bot steps back.

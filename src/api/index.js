@@ -7,6 +7,7 @@ import { kbRouter } from './kb.js';
 import { conversationsRouter } from './conversations.js';
 import { appointmentsRouter } from './appointments.js';
 import { sandboxRouter } from './sandbox.js';
+import { statsRouter } from './stats.js';
 import { streamHandler } from './stream.js';
 
 export function createApiRouter({ store, engine, sender, bus, config, auth }) {
@@ -22,6 +23,7 @@ export function createApiRouter({ store, engine, sender, bus, config, auth }) {
   router.use('/conversations', conversationsRouter({ store, sender, bus }));
   router.use('/appointments', appointmentsRouter({ store, bus }));
   router.use('/sandbox', sandboxRouter({ store, engine }));
+  router.use('/stats', statsRouter({ store }));
 
   return router;
 }
