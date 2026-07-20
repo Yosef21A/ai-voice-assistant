@@ -196,8 +196,12 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
       const { rows } = await q(sql, params);
       return rows2obj(rows);
     },
-    // Hard-delete a conversation (messages cascade via FK). Tenant-scoped.
+    // Hard-delete a conversation (messages cascade via FK). Events must be
+    // deleted EXPLICITLY: their FK is ON DELETE SET NULL, and message.analyzed
+    // rows carry raw patient snippets — a GDPR erase must take them too.
+    // Tenant-scoped.
     async remove(tenantId, id) {
+      await q('DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2', [tenantId, id]);
       const { rows } = await q(
         'DELETE FROM conversations WHERE tenant_id = $1 AND id = $2 RETURNING *',
         [tenantId, id]

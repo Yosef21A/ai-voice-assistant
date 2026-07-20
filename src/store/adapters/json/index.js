@@ -25,8 +25,9 @@ const COLLECTIONS = [
  * @param {string} opts.clinicsFile  path to data/clinics.json (read-only seed)
  * @param {string} opts.runtimeDir   directory for persisted collections
  * @param {boolean} [opts.reset]     wipe the runtime dir first (tests/simulate)
+ * @param {number} [opts.eventsMax]  ring-buffer cap on the events audit log
  */
-export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {}) {
+export function createJsonStore({ clinicsFile, runtimeDir, reset = false, eventsMax = 10000 } = {}) {
   if (!runtimeDir) throw new Error('createJsonStore: runtimeDir is required');
   mkdirSync(runtimeDir, { recursive: true });
 
@@ -59,7 +60,13 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {})
       : [];
   const read = (f) => (existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : []);
   const db = Object.fromEntries(COLLECTIONS.map((c) => [c, read(files[c])]));
-  const persist = (name) => writeFileSync(files[name], JSON.stringify(db[name], null, 2));
+  // events is the high-churn collection (one row per patient message since
+  // P2-A) — written compact; everything else stays pretty for debuggability.
+  const persist = (name) =>
+    writeFileSync(
+      files[name],
+      name === 'events' ? JSON.stringify(db[name]) : JSON.stringify(db[name], null, 2)
+    );
   const now = () => new Date().toISOString();
   const fallbackRef = () =>
     `REF-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
@@ -248,15 +255,19 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {})
       if (limit) rows = rows.slice(-limit);
       return rows;
     },
-    // Hard-delete a conversation and its messages (sandbox reset + GDPR erase).
+    // Hard-delete a conversation, its messages AND its events (sandbox reset +
+    // GDPR erase — message.analyzed events carry raw patient snippets, so an
+    // erase that leaves them behind is not an erase).
     // Tenant-scoped: a cross-tenant id never matches, so it can't delete B's rows.
     async remove(tenantId, id) {
       const idx = db.conversations.findIndex((c) => c.id === id && c.clinicId === tenantId);
       if (idx === -1) return null;
       const [rec] = db.conversations.splice(idx, 1);
       db.messages = db.messages.filter((m) => !(m.conversationId === id && m.tenantId === tenantId));
+      db.events = db.events.filter((e) => !(e.conversationId === id && e.tenantId === tenantId));
       persist('conversations');
       persist('messages');
+      persist('events');
       return rec;
     },
   };
@@ -379,6 +390,10 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false } = {})
         createdAt: now(),
       };
       db.events.push(rec);
+      // Ring buffer: P2-A appends one event per patient message and persist()
+      // rewrites the whole file synchronously — without a cap the reply path
+      // slows down forever. Postgres keeps full history (no cap there).
+      if (db.events.length > eventsMax) db.events.splice(0, db.events.length - eventsMax);
       persist('events');
       return rec;
     },

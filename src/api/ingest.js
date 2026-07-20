@@ -49,23 +49,27 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
 
   const out = await engine.handleMessage(inbound);
 
-  // Persist the engine's per-turn analysis (P2-A, additive): intent + language
-  // + a short snippet power the analytics screen (topIntents / topQuestions /
-  // funnel) and the P2-B training loop. Analytics must never break the reply.
-  try {
-    await store.events.append(tenantId, {
-      type: 'message.analyzed',
-      actor: 'engine',
-      conversationId,
-      payload: {
-        intent: out.intent || 'unknown',
-        lang: out.lang || null,
-        snippet: String(inbound.text || '').slice(0, 160),
-      },
-    });
-  } catch {
-    /* best-effort audit trail */
-  }
+  // Per-turn analysis event (P2-A): intent + language + a short snippet power
+  // the analytics screen (topIntents / topQuestions / funnel) and the P2-B
+  // training loop. Called only AFTER the patient-facing send in each branch so
+  // the audit write can never delay a reply — least of all the emergency
+  // override (medical guardrail: the override goes out first).
+  const logAnalyzed = async () => {
+    try {
+      await store.events.append(tenantId, {
+        type: 'message.analyzed',
+        actor: 'engine',
+        conversationId,
+        payload: {
+          intent: out.intent || 'unknown',
+          lang: out.lang || null,
+          snippet: String(inbound.text || '').slice(0, 160),
+        },
+      });
+    } catch {
+      /* best-effort audit trail */
+    }
+  };
 
   // Detectors run BESIDE the engine (which never touches the bus). analyzeInbound
   // emits lead.hot / emergency.detected for the notification service and returns
@@ -93,12 +97,14 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
       conversationId,
       patch: { status: 'needs_human', aiPaused: true },
     });
+    await logAnalyzed();
     return { tenantId, conversationId, emergency: analysis.emergency };
   }
 
   if (out.replies && out.replies.length) {
     await sendAs('bot', conversationId, () => sender.sendEngineReply(clinic, inbound.from, out));
   }
+  await logAnalyzed();
 
   if (out.appointment) {
     bus.publish('appointment.created', { tenantId, conversationId, appointment: out.appointment });

@@ -18,12 +18,18 @@ export function statsRouter({ store }) {
       const tenant = await store.tenants.getById(req.tenantId);
       if (!tenant) return res.status(404).json({ error: 'tenant not found' });
 
+      const MAX_WINDOW_MS = 366 * 24 * 3600 * 1000;
       const to = req.query.to ? new Date(String(req.query.to)) : new Date();
       const days = intParam(req.query.days, 30, 365);
       const from = req.query.from
         ? new Date(String(req.query.from))
         : new Date(to.getTime() - days * 24 * 3600 * 1000);
-      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+      if (
+        Number.isNaN(from.getTime()) ||
+        Number.isNaN(to.getTime()) ||
+        from >= to ||
+        to.getTime() - from.getTime() > MAX_WINDOW_MS // explicit from/to can't bypass the days cap
+      ) {
         return res.status(400).json({ error: 'invalid date range' });
       }
 

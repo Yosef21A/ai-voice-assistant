@@ -74,20 +74,36 @@ export function weekdayInTz(date, tz) {
 
 /**
  * Whether a timestamp is outside the clinic's working hours (closed day ⇒ true).
- * Handles overnight windows (e.g. ['20:00','02:00']) the same way quiet hours
- * do: the window wraps past midnight.
+ * A window belongs to the day it OPENS on; an overnight window (close < open,
+ * e.g. fri ['20:00','02:00']) spills its 00:00→close tail into the NEXT
+ * calendar day. So Sat 01:00 during a Friday night shift is IN hours, while
+ * Fri 01:00 (nothing open since Thursday evening) is after hours.
  */
 export function isAfterHours(ts, workingHours, tz) {
   if (!workingHours) return false; // unknown schedule ⇒ don't overstate
-  const day = weekdayInTz(new Date(ts), tz);
-  const wh = workingHours[day];
-  if (!Array.isArray(wh) || wh.length < 2) return true; // null / closed day
-  const open = parseHM(wh[0]);
-  const close = parseHM(wh[1]);
-  if (open == null || close == null) return true;
-  const mins = minutesInTz(new Date(ts), tz);
-  const within = open <= close ? mins >= open && mins < close : mins >= open || mins < close;
-  return !within;
+  const date = new Date(ts);
+  const mins = minutesInTz(date, tz);
+  const today = weekdayInTz(date, tz);
+
+  const winOf = (day) => {
+    const wh = workingHours[day];
+    if (!Array.isArray(wh) || wh.length < 2) return null; // null / closed day
+    const open = parseHM(wh[0]);
+    const close = parseHM(wh[1]);
+    return open == null || close == null ? null : [open, close];
+  };
+
+  const t = winOf(today);
+  if (t) {
+    const [open, close] = t;
+    // Overnight window: today covers open→midnight; the rest belongs to tomorrow.
+    if (open <= close ? mins >= open && mins < close : mins >= open) return false;
+  }
+  // Yesterday's overnight tail (its window wrapped past midnight into today).
+  const yesterday = DAY_KEYS[(DAY_KEYS.indexOf(today) + 6) % 7];
+  const y = winOf(yesterday);
+  if (y && y[1] < y[0] && mins < y[1]) return false;
+  return true;
 }
 
 // ── shared row predicates ─────────────────────────────────────────────────────
@@ -326,6 +342,12 @@ export async function collectDigestStats(store, tenant, range = {}) {
   return computeDigestStats({ tenant, conversations, appointments, leads }, range);
 }
 
+// Fetch bounds: analytics is a dashboard read that must stay cheap no matter
+// how big a tenant's history grows (any authenticated user can hit it).
+const EVENTS_FETCH_LIMIT = 20000; // last N analyzed events (JSON store also ring-caps)
+const TRANSCRIPT_CONVOS_MAX = 1000; // messageCount/responseTime sample over the most recent N
+const TRANSCRIPT_CHUNK = 20; // listMessages concurrency bound (no unbounded fan-out)
+
 /** Fetch + aggregate the full dashboard analytics. */
 export async function collectAnalytics(store, tenant, range = {}) {
   const tenantId = tenant.id;
@@ -333,18 +355,26 @@ export async function collectAnalytics(store, tenant, range = {}) {
     safeList(() => store.conversations.list(tenantId)),
     safeList(() => store.appointments.list(tenantId)),
     safeList(() => store.leads.list(tenantId)),
-    safeList(() => store.events.list(tenantId, { type: 'message.analyzed' })),
+    safeList(() => store.events.list(tenantId, { type: 'message.analyzed', limit: EVENTS_FETCH_LIMIT })),
   ]);
 
-  // Transcripts only for conversations active in the window (bounded work).
+  // Transcripts only for conversations active in the window; most recent first,
+  // capped and fetched in bounded chunks. Beyond the cap, messageCount and
+  // responseTime become a most-recent-N sample (counts above never bind at
+  // pilot scale); conversation/funnel/afterHours numbers don't use transcripts.
   const inRange = rangePredicate(range);
-  const active = conversations.filter((c) => realConvo(c) && inRange(activityTs(c)));
+  const active = conversations
+    .filter((c) => realConvo(c) && inRange(activityTs(c)))
+    .sort((a, b) => String(activityTs(b)).localeCompare(String(activityTs(a))))
+    .slice(0, TRANSCRIPT_CONVOS_MAX);
   const messagesByConvo = new Map();
-  await Promise.all(
-    active.map(async (c) => {
-      messagesByConvo.set(c.id, await safeList(() => store.conversations.listMessages(tenantId, c.id, {})));
-    })
-  );
+  for (let i = 0; i < active.length; i += TRANSCRIPT_CHUNK) {
+    await Promise.all(
+      active.slice(i, i + TRANSCRIPT_CHUNK).map(async (c) => {
+        messagesByConvo.set(c.id, await safeList(() => store.conversations.listMessages(tenantId, c.id, {})));
+      })
+    );
+  }
 
   return computeAnalytics(
     { tenant, conversations, appointments, leads, events, messagesByConvo },

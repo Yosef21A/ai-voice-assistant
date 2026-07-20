@@ -39,19 +39,24 @@ export function Stats() {
   const [stats, setStats] = useState(null);
   const [error, setError] = useState(false);
   const timerRef = useRef(null);
+  const reqRef = useRef(0); // request token: stale responses never win a race
 
   const reload = useCallback(async () => {
+    const id = ++reqRef.current;
     try {
       const { stats: s } = await api.getStats({ days });
+      if (reqRef.current !== id) return; // a newer range/request superseded us
       setStats(s);
       setError(false);
     } catch {
+      if (reqRef.current !== id) return;
       setStats(null);
       setError(true);
     }
   }, [days]);
 
   useEffect(() => {
+    clearTimeout(timerRef.current); // drop any pending refresh for the old range
     setStats(null);
     setError(false);
     reload();

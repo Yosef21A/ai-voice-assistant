@@ -133,14 +133,17 @@ test('stats — isAfterHours: normal day, closed day, and overnight window', () 
   assert.equal(isAfterHours('2026-08-03T07:00:00.000Z', WORKING_HOURS, TZ), false); // 08:00 local
   assert.equal(isAfterHours('2026-08-03T16:00:00.000Z', WORKING_HOURS, TZ), true); // 17:00 local
 
-  // Overnight window: Friday 20:00 → 02:00 (night clinic).
+  // Overnight window: Friday 20:00 → 02:00 (night shift). The window belongs to
+  // the day it OPENS on; its past-midnight tail spills into Saturday.
   const overnight = { ...WORKING_HOURS, fri: ['20:00', '02:00'] };
-  // Fri 2026-08-07 21:00 local (20:00Z) — inside the overnight window.
+  // Fri 21:00 local — inside the shift.
   assert.equal(isAfterHours('2026-08-07T20:00:00.000Z', overnight, TZ), false);
-  // Fri 2026-08-07 01:00 local (00:00Z Fri) — before 02:00, same weekday ⇒ inside.
-  assert.equal(isAfterHours('2026-08-07T00:00:00.000Z', overnight, TZ), false);
-  // Fri 2026-08-07 03:00 local — between close and open ⇒ after hours.
-  assert.equal(isAfterHours('2026-08-07T02:00:00.000Z', overnight, TZ), true);
+  // Sat 01:00 local — the tail of FRIDAY's shift ⇒ still open.
+  assert.equal(isAfterHours('2026-08-08T00:00:00.000Z', overnight, TZ), false);
+  // Sat 03:00 local — past the tail, before Saturday's own 09:00 ⇒ after hours.
+  assert.equal(isAfterHours('2026-08-08T02:00:00.000Z', overnight, TZ), true);
+  // Fri 01:00 local — nothing has been open since Thursday 17:00 ⇒ after hours.
+  assert.equal(isAfterHours('2026-08-07T00:00:00.000Z', overnight, TZ), true);
   // No schedule at all ⇒ never overstate.
   assert.equal(isAfterHours(MON_NIGHT, null, TZ), false);
 });
@@ -284,7 +287,7 @@ test('stats — GET /api/stats: 401 unauth, correct shape, tenant scoping, 400 o
   assert.equal(other.status, 200);
   assert.equal(other.body.stats.conversations, 0);
 
-  // Invalid range → 400.
+  // Invalid range → 400; explicit from/to can't bypass the days cap either.
   const bad = await request(
     server,
     'GET',
@@ -292,4 +295,56 @@ test('stats — GET /api/stats: 401 unauth, correct shape, tenant scoping, 400 o
     { cookie }
   );
   assert.equal(bad.status, 400);
+  const tooWide = await request(
+    server,
+    'GET',
+    '/api/stats?from=2020-01-01T00:00:00Z&to=2026-08-01T00:00:00Z',
+    { cookie }
+  );
+  assert.equal(tooWide.status, 400);
+});
+
+// ── review fixes: GDPR erase takes analytics events; JSON events ring cap ────
+test('stats — conversation removal also erases its message.analyzed events (GDPR)', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  const from = '218917778899';
+  await ingestInbound(
+    { store: app.store, engine: app.engine, sender: app.sender, bus: app.bus },
+    { channel: 'whatsapp', from, text: 'نحب نحجز موعد', phoneNumberId: PNID, messageId: `m_${randomUUID()}`, timestamp: Date.now() }
+  );
+  await app.notifier.settled();
+  const convoId = `${A}:${from}`;
+  assert.equal((await app.store.events.list(A, { type: 'message.analyzed' })).length, 1);
+
+  await app.store.conversations.remove(A, convoId);
+
+  // The patient's snippet is gone from the audit log and therefore from stats.
+  assert.equal((await app.store.events.list(A, { type: 'message.analyzed' })).length, 0);
+  const stats = await (await import('../src/stats/index.js')).collectAnalytics(
+    app.store,
+    await app.store.tenants.getById(A),
+    { from: new Date(Date.now() - 86400e3), to: new Date(Date.now() + 1000) }
+  );
+  assert.equal(stats.topQuestions.length, 0);
+});
+
+test('stats — JSON events collection is ring-capped (oldest dropped, newest kept)', async () => {
+  const { createStore } = await import('../src/store/index.js');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { getConfig } = await import('../src/config.js');
+  const store = createStore({
+    clinicsFile: getConfig().clinicsFile,
+    runtimeDir: path.join(os.tmpdir(), `omen-events-cap-${randomUUID()}`),
+    reset: true,
+    eventsMax: 5,
+  });
+  for (let i = 1; i <= 8; i += 1) {
+    await store.events.append(A, { type: 'message.analyzed', payload: { intent: 'faq', snippet: `q${i}` } });
+  }
+  const rows = await store.events.list(A, { type: 'message.analyzed' });
+  assert.equal(rows.length, 5);
+  assert.deepEqual(rows.map((e) => e.payload.snippet), ['q4', 'q5', 'q6', 'q7', 'q8']);
+  await store.close();
 });
