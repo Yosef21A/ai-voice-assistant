@@ -196,6 +196,14 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
       const { rows } = await q(sql, params);
       return rows2obj(rows);
     },
+    // Single message by id (P2-D: the auth-gated media route). Tenant-scoped.
+    async getMessage(tenantId, messageId) {
+      const { rows } = await q('SELECT * FROM messages WHERE tenant_id = $1 AND id = $2', [
+        tenantId,
+        messageId,
+      ]);
+      return row2obj(rows[0]);
+    },
     // Hard-delete a conversation (messages cascade via FK). Events must be
     // deleted EXPLICITLY: their FK is ON DELETE SET NULL, and message.analyzed
     // rows carry raw patient snippets — a GDPR erase must take them too.

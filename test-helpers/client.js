@@ -16,6 +16,7 @@ export function makeTestApp(overrides = {}) {
   const runtimeDir = path.join(os.tmpdir(), `omen-api-${randomUUID()}`);
   const config = getConfig({
     runtimeDir,
+    mediaDir: path.join(runtimeDir, 'media'), // isolated — never the repo's data/media
     sessionSecret: `test-secret-${randomUUID()}`,
     cookieSecure: false,
     sseHeartbeatMs: 40,

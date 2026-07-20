@@ -18,7 +18,19 @@
 import { sendAs, publicMessage } from './outbound.js';
 import { analyzeInbound } from '../notifications/index.js';
 
-export async function ingestInbound({ store, engine, sender, bus }, inbound) {
+// Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
+// interprets media medically — it confirms receipt and promises a human.
+const MEDIA_ACK = {
+  ar: 'وصلتنا 📎 الطبيب يطّلع عليها ويردّ عليك في أقرب وقت.',
+  fr: 'Bien reçu 📎 Le médecin va l’examiner et revient vers vous rapidement.',
+  en: 'Received 📎 The doctor will review it and get back to you shortly.',
+};
+
+// Display-only filename: never used for paths, stripped of anything path-like.
+const safeFilename = (name) =>
+  String(name || '').replace(/[\\/\u0000-\u001f]/g, '').slice(0, 120) || null;
+
+export async function ingestInbound({ store, engine, sender, bus, mediaClient }, inbound) {
   const clinic =
     store.getClinicByPhoneNumberId(inbound.phoneNumberId) ||
     store.getClinicById(inbound.tenantId) ||
@@ -33,11 +45,33 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
   }
   const conversationId = convo.id;
 
+  // Media turn (P2-D): download the bytes BEFORE persisting — Graph's lookaside
+  // URL expires in minutes, so intake is synchronous. A failed download still
+  // persists the metadata (available:false) so staff see that something arrived.
+  let mediaMeta = null;
+  if (inbound.media) {
+    const dl = mediaClient
+      ? await mediaClient.fetchMedia(clinic, inbound.media)
+      : { ok: false, error: { message: 'no media client configured' } };
+    mediaMeta = {
+      kind: inbound.media.kind,
+      mediaId: inbound.media.id ?? null,
+      mimeType: dl.ok ? dl.mimeType : inbound.media.mimeType ?? null,
+      filename: safeFilename(inbound.media.filename),
+      caption: inbound.media.caption || '',
+      size: dl.ok ? dl.size : null,
+      file: dl.ok ? dl.file : null,
+      error: dl.ok ? null : dl.error?.message || 'download failed',
+    };
+  }
+
   // Persist inbound + fan out (staff see the patient even while the bot is paused).
   const inMsg = await store.conversations.appendMessage(tenantId, conversationId, {
     direction: 'inbound',
-    type: 'text',
-    body: { text: inbound.text, by: 'patient' },
+    type: mediaMeta ? mediaMeta.kind : 'text',
+    body: mediaMeta
+      ? { text: inbound.text, by: 'patient', media: mediaMeta }
+      : { text: inbound.text, by: 'patient' },
     waMessageId: inbound.messageId ?? null,
     ts: new Date(inbound.timestamp || Date.now()).toISOString(),
   });
@@ -46,6 +80,30 @@ export async function ingestInbound({ store, engine, sender, bus }, inbound) {
 
   // Human takeover: the bot stays silent while a staff member is driving.
   if (convo.aiPaused) return { tenantId, conversationId, paused: true };
+
+  // Media turn (P2-D): the owner gets a 📎 alert either way; without a caption
+  // there is nothing for the engine to parse, so the bot only acknowledges
+  // receipt — GUARDRAIL: media is routed to a human, never interpreted.
+  if (mediaMeta) {
+    bus.publish('media.received', {
+      tenantId,
+      conversationId,
+      patientWaId: inbound.from,
+      media: {
+        kind: mediaMeta.kind,
+        mimeType: mediaMeta.mimeType,
+        filename: mediaMeta.filename,
+        caption: mediaMeta.caption,
+      },
+    });
+    if (!inbound.text) {
+      const lang = ['ar', 'fr', 'en'].includes(convo.lang) ? convo.lang : 'ar';
+      await sendAs('bot', conversationId, () => sender.sendText(clinic, inbound.from, MEDIA_ACK[lang]));
+      return { tenantId, conversationId, media: mediaMeta };
+    }
+    // A caption rides along: fall through — the engine and the emergency/lead
+    // detectors treat it as the turn's text (guardrails stay active).
+  }
 
   const out = await engine.handleMessage(inbound);
 

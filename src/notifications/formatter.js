@@ -209,6 +209,30 @@ export function formatEmergency({ tenant, keyword, patientWaId, lang } = {}) {
   return withClinicTag(body, tenant);
 }
 
+const MEDIA_KIND_LABEL = {
+  image: { ar: 'صورة / أشعة', fr: 'Photo / radio', en: 'Photo / X-ray' },
+  document: { ar: 'ملف', fr: 'Document', en: 'Document' },
+  audio: { ar: 'رسالة صوتية', fr: 'Note vocale', en: 'Voice note' },
+};
+
+const MEDIA = {
+  ar: (v) => `📎 وصل ${v.kind}\n👤 ${v.who}${v.caption ? `\n💬 "${v.caption}"` : ''}\nتلقّى المريض تأكيد الاستلام؛ الملف في لوحة التحكم.`,
+  fr: (v) => `📎 ${v.kind} reçu(e)\n👤 ${v.who}${v.caption ? `\n💬 "${v.caption}"` : ''}\nLe patient a reçu un accusé ; le fichier est dans le tableau de bord.`,
+  en: (v) => `📎 ${v.kind} received\n👤 ${v.who}${v.caption ? `\n💬 "${v.caption}"` : ''}\nThe patient got a receipt; the file is in the dashboard.`,
+};
+
+/** Media-received alert (kind + who + optional caption). */
+export function formatMedia({ tenant, media = {}, patientWaId, lang } = {}) {
+  const L = lang || resolveOwnerLang(tenant);
+  const kindTable = MEDIA_KIND_LABEL[media.kind] || MEDIA_KIND_LABEL.document;
+  const body = pick(L, MEDIA)({
+    kind: kindTable[L] || kindTable.fr,
+    who: val(patientWaId),
+    caption: media.caption ? String(media.caption).slice(0, 120) : '',
+  });
+  return withClinicTag(body, tenant);
+}
+
 function withClinicTag(body, tenant) {
   const name = tenantName(tenant);
   return name ? `${body}\n🏥 ${name}` : body;
@@ -231,6 +255,8 @@ export function formatAlert(type, data = {}) {
       return formatHandoff(data);
     case 'emergency.detected':
       return formatEmergency(data);
+    case 'media.received':
+      return formatMedia(data);
     default:
       return '';
   }

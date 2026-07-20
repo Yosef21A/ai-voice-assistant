@@ -8,6 +8,7 @@ import { conversationsRouter } from './conversations.js';
 import { appointmentsRouter } from './appointments.js';
 import { sandboxRouter } from './sandbox.js';
 import { statsRouter } from './stats.js';
+import { mediaRouter } from './media.js';
 import { streamHandler } from './stream.js';
 
 export function createApiRouter({ store, engine, sender, bus, config, auth }) {
@@ -24,6 +25,7 @@ export function createApiRouter({ store, engine, sender, bus, config, auth }) {
   router.use('/appointments', appointmentsRouter({ store, bus }));
   router.use('/sandbox', sandboxRouter({ store, engine }));
   router.use('/stats', statsRouter({ store }));
+  router.use('/media', mediaRouter({ store, config }));
 
   return router;
 }

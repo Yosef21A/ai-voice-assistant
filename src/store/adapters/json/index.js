@@ -255,6 +255,10 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
       if (limit) rows = rows.slice(-limit);
       return rows;
     },
+    // Single message by id (P2-D: the auth-gated media route). Tenant-scoped.
+    async getMessage(tenantId, messageId) {
+      return db.messages.find((m) => m.id === messageId && m.tenantId === tenantId) || null;
+    },
     // Hard-delete a conversation, its messages AND its events (sandbox reset +
     // GDPR erase — message.analyzed events carry raw patient snippets, so an
     // erase that leaves them behind is not an erase).

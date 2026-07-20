@@ -55,6 +55,12 @@ const EVENT_META = {
     emergency: true,
     subject: (e) => e.conversationId || e.waId || e.patientWaId || 'emergency',
   },
+  'media.received': {
+    key: 'media',
+    aliases: ['media', 'mediaReceived'],
+    emergency: false,
+    subject: (e) => e.conversationId || e.patientWaId || 'media',
+  },
 };
 
 function refOf(appt) {
@@ -145,6 +151,7 @@ export function createNotificationService({
           lead: envelope.lead,
           handoff: envelope.handoff,
           keyword: envelope.keyword,
+          media: envelope.media,
           patientWaId: patientOf(type, envelope),
           lastMessage: lastMessageOf(envelope),
         })
@@ -350,6 +357,7 @@ function patientOf(type, e) {
   if (type === 'emergency.detected') return e.patientWaId || e.waId || subjectWaId(e.conversationId);
   if (type === 'lead.hot') return e.lead?.patientWaId || subjectWaId(e.conversationId);
   if (type === 'handoff.requested') return e.handoff?.patientWaId || e.patientWaId || subjectWaId(e.conversationId);
+  if (type === 'media.received') return e.patientWaId || subjectWaId(e.conversationId);
   return e.patientWaId || null;
 }
 

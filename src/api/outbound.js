@@ -20,6 +20,18 @@ export function sendAs(actor, conversationId, fn) {
 export function publicMessage(m) {
   if (!m) return null;
   const body = m.body || {};
+  // Media metadata (P2-D): expose display fields + a fetch URL keyed by the
+  // MESSAGE id — the on-disk path never leaves the server.
+  const media = body.media
+    ? {
+        kind: body.media.kind,
+        mimeType: body.media.mimeType ?? null,
+        filename: body.media.filename ?? null,
+        size: body.media.size ?? null,
+        available: !!body.media.file,
+        url: body.media.file ? `/api/media/${encodeURIComponent(m.id)}` : null,
+      }
+    : null;
   return {
     id: m.id,
     conversationId: m.conversationId,
@@ -27,6 +39,7 @@ export function publicMessage(m) {
     type: m.type,
     text: body.text ?? '',
     by: body.by ?? (m.direction === 'inbound' ? 'patient' : 'bot'),
+    media,
     waMessageId: m.waMessageId ?? null,
     status: m.status ?? null,
     ts: m.ts,

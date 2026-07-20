@@ -20,6 +20,7 @@ import { createStore } from './store/index.js';
 import { createEngine } from './engine/index.js';
 import { getProvider } from './llm/index.js';
 import { createSender } from './whatsapp/index.js';
+import { createMediaClient } from './whatsapp/media.js';
 import { createBus } from './events/bus.js';
 import { createAuth } from './auth/index.js';
 import { createApiRouter } from './api/index.js';
@@ -61,10 +62,24 @@ export function normalizeWhatsApp(body) {
           m.interactive?.list_reply?.title ??
           m.interactive?.button_reply?.title ??
           '';
+        // Media (P2-D): image / document / audio (voice notes). The caption
+        // doubles as the turn's text so guardrails/intents still see it.
+        const mediaObj = ['image', 'document', 'audio'].includes(m.type) ? m[m.type] : null;
+        const media = mediaObj
+          ? {
+              kind: m.type,
+              id: mediaObj.id,
+              mimeType: mediaObj.mime_type || null,
+              sha256: mediaObj.sha256 || null,
+              caption: mediaObj.caption || '',
+              filename: mediaObj.filename || null,
+            }
+          : null;
         out.push({
           channel: 'whatsapp',
           from: m.from,
-          text,
+          text: text || media?.caption || '',
+          media,
           phoneNumberId,
           messageId: m.id,
           timestamp: Number(m.timestamp) * 1000 || Date.now(),
@@ -108,6 +123,15 @@ export function createApp(opts = {}) {
       onOutbound: createOutboundRecorder({ store, bus }),
       outboxFile: path.join(config.runtimeDir, 'outbox.json'),
     });
+  // Inbound media downloader (P2-D) — same transport gating as the sender, so
+  // tests/simulate stay offline while production pulls real bytes from Graph.
+  const mediaClient =
+    opts.mediaClient ||
+    createMediaClient({
+      transport: config.whatsappTransport || undefined,
+      mediaDir: config.mediaDir,
+      maxBytes: config.mediaMaxBytes,
+    });
   const auth = createAuth({ store, config });
 
   // Owner-notification worker (P1-E, wired here in P1-F): one subscriber on the
@@ -138,9 +162,9 @@ export function createApp(opts = {}) {
     res.sendStatus(200); // acknowledge fast; process asynchronously
     try {
       for (const inbound of normalizeWhatsApp(req.body)) {
-        if (!inbound.text) continue;
+        if (!inbound.text && !inbound.media) continue; // statuses / unsupported types
         // Persist + reply via the ONE sender + emit bus events; respects ai_paused.
-        await ingestInbound({ store, engine, sender, bus }, inbound);
+        await ingestInbound({ store, engine, sender, bus, mediaClient }, inbound);
       }
     } catch (err) {
       console.error('[webhook] processing error:', err);
@@ -207,7 +231,7 @@ export function createApp(opts = {}) {
 
   // ── dashboard API (public auth bootstrap, then the gated tenant-scoped API) ───
   app.use('/api/auth', auth.router);
-  app.use('/api', createApiRouter({ store, engine, sender, bus, config, auth }));
+  app.use('/api', createApiRouter({ store, engine, sender, bus, config, auth, mediaClient }));
 
   // ── dashboard SPA (web/dist) ──────────────────────────────────────────────────
   // Serve the built Vite bundle at / with an SPA fallback so client-side (hash)
@@ -258,12 +282,12 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, auth, notifier };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, auth, notifier };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.
 const composed = createApp();
-export const { app, config, store, provider, engine, bus, sender, auth, notifier } = composed;
+export const { app, config, store, provider, engine, bus, sender, mediaClient, auth, notifier } = composed;
 
 // Only listen when run directly (not when imported by tests).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

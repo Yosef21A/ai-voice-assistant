@@ -40,6 +40,7 @@ export const EVENT_TYPES = Object.freeze([
   'handoff.requested',
   'lead.hot',
   'emergency.detected',
+  'media.received',
 ]);
 
 const FIREHOSE = 'event'; // single channel the SSE layer listens on

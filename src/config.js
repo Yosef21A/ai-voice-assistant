@@ -78,6 +78,13 @@ export function getConfig(overrides = {}) {
     // the factory itself selects only from EXPLICIT opts (see src/store/README.md).
     databaseUrl: process.env.DATABASE_URL || '',
     store: process.env.STORE || '',
+    // ── inbound media (P2-D) ───────────────────────────────────────────────
+    // X-rays/documents/voice notes land under mediaDir/{tenantId}/{yyyymm}/.
+    // The cap is a product decision (10MB default); retention feeds the purge
+    // script (scripts/purge-media.js) — patient data must be erasable.
+    mediaDir: process.env.MEDIA_DIR || path.join(DATA_DIR, 'media'),
+    mediaMaxBytes: Number(process.env.MEDIA_MAX_BYTES) || 10 * 1024 * 1024,
+    mediaRetentionDays: Number(process.env.MEDIA_RETENTION_DAYS) || 90,
     dataDir: DATA_DIR,
     runtimeDir: RUNTIME_DIR,
     clinicsFile: CLINICS_FILE,

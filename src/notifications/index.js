@@ -26,6 +26,7 @@ export {
   formatHotLead,
   formatHandoff,
   formatEmergency,
+  formatMedia,
   formatAlert,
   formatDailyDigest,
   formatWeeklyDigest,
