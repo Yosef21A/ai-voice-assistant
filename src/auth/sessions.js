@@ -44,8 +44,12 @@ export function verifySession(token, secret) {
     if (dot <= 0) return null;
     const payloadB64 = token.slice(0, dot);
     const sigB64 = token.slice(dot + 1);
-    const expected = sign(payloadB64, secret);
-    const got = fromB64url(sigB64);
+    // Compare the CANONICAL base64url strings, not decoded bytes: a 32-byte HMAC
+    // encodes to 43 chars whose last char carries only 4 meaningful bits, so
+    // decode-then-compare would accept ~4 spellings of the same signature
+    // (base64 malleability). Canonical string compare is strict + constant-time.
+    const expected = Buffer.from(b64url(sign(payloadB64, secret)));
+    const got = Buffer.from(sigB64);
     if (got.length !== expected.length || !timingSafeEqual(got, expected)) return null;
     const claims = JSON.parse(fromB64url(payloadB64).toString('utf8'));
     if (!claims || typeof claims !== 'object') return null;
