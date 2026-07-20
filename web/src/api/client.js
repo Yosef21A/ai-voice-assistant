@@ -77,6 +77,8 @@ export const api = {
   getConversation: (id) => request('GET', `/api/conversations/${encodeURIComponent(id)}`),
   takeover: (id, paused) => request('POST', `/api/conversations/${encodeURIComponent(id)}/takeover`, { paused }),
   sendMessage: (id, text) => request('POST', `/api/conversations/${encodeURIComponent(id)}/send`, { text }),
+  // ── analytics (P2-A) ───────────────────────────────────────────────────────
+  getStats: (params) => request('GET', `/api/stats${qs(params)}`),
   // ── appointments ────────────────────────────────────────────────────────────
   listAppointments: (params) => request('GET', `/api/appointments${qs(params)}`),
   setAppointmentStatus: (id, status) => request('POST', `/api/appointments/${encodeURIComponent(id)}/status`, { status }),

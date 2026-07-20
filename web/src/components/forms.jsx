@@ -46,8 +46,10 @@ export function configToDraft(config = {}) {
         booking: true, lead: true, handoff: true, emergency: true, media: true,
         morning: false, weekly: true, ...(notif.events || {}),
       },
-      recipients: notif.recipients || [], 
+      recipients: notif.recipients || [],
       quietHours: { enabled: false, from: '21:00', to: '08:00', ...(notif.quietHours || {}) },
+      // Money line (P2-A): average booking value; '' in the draft = not set.
+      avgProcedureValue: notif.avgProcedureValue ?? '',
     },
   };
 }
@@ -62,7 +64,16 @@ export const profilePatch = (d) => ({
 export const personaPatch = (d) => ({ languages: d.persona.spoken, persona: d.persona });
 export const tourismPatch = (d) => ({ tourism: d.tourism });
 export const escalationPatch = (d) => ({ escalation: d.escalation });
-export const notificationsPatch = (d) => ({ notifications: d.notifications });
+export const notificationsPatch = (d) => ({
+  notifications: {
+    ...d.notifications,
+    // '' (unset) persists as null so the stats/digest money line stays hidden.
+    avgProcedureValue:
+      d.notifications.avgProcedureValue === '' || d.notifications.avgProcedureValue == null
+        ? null
+        : Number(d.notifications.avgProcedureValue),
+  },
+});
 
 // ── Profile ─────────────────────────────────────────────────────────────────
 export function ProfileForm({ value, onChange }) {
@@ -341,6 +352,9 @@ export function NotificationsForm({ value, onChange }) {
       </Field>
       <Field label={t('settings.recipients')} hint={t('settings.recipientsHint')} htmlFor="n-rcpt">
         <input id="n-rcpt" className="control" inputMode="tel" value={csvList(n.recipients)} onChange={(e) => set({ recipients: parseList(e.target.value) })} placeholder="+216 20 111 222, +216 …" />
+      </Field>
+      <Field label={t('settings.avgValue')} hint={t('settings.avgValueHint')} htmlFor="n-avg">
+        <input id="n-avg" className="control" type="number" min="0" step="50" style={{ maxWidth: 200 }} dir="ltr" value={n.avgProcedureValue} onChange={(e) => set({ avgProcedureValue: e.target.value })} placeholder="3000" />
       </Field>
       <Field label={t('settings.quietHours')}>
         <div className="row-wrap" style={{ gap: 'var(--sp-4)' }}>

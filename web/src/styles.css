@@ -474,6 +474,29 @@ select.control { appearance: none; cursor: pointer;
   .inbox { grid-template-columns: 1fr; }
 }
 
+/* ── statistics (P2-A) ─────────────────────────────────────────────────────── */
+.statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-3); }
+.stat .num { font-size: 1.6rem; font-weight: 700; color: var(--text); line-height: 1.2; }
+.money-line .num { font-size: 2rem; font-weight: 700; color: var(--brass-bright); line-height: 1.25; margin-top: var(--sp-2); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+.hourbars { display: flex; align-items: stretch; gap: 3px; height: 130px; margin-top: var(--sp-3); }
+.hourbars .hb { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.hourbars .hb .fill { background: var(--brass); border-radius: 2px 2px 0 0; transition: height 0.3s ease; }
+.hourbars .hb.closed .fill { background: var(--warn); }
+.hourbars .hb .hlabel { height: 14px; font-size: 0.6rem; color: var(--text-mute); text-align: center; margin-top: 2px; }
+
+.donut-wrap { display: flex; gap: var(--sp-5); align-items: center; flex-wrap: wrap; margin-top: var(--sp-3); }
+
+.funnel .frow { display: grid; grid-template-columns: minmax(120px, 160px) 1fr 40px; gap: var(--sp-3); align-items: center; }
+.funnel .fbar { background: var(--surface-3); border-radius: var(--r-sm); height: 18px; overflow: hidden; }
+.funnel .fbar .fill { background: var(--brass); height: 100%; border-radius: var(--r-sm); min-width: 2px; transition: width 0.3s ease; }
+.funnel .frow .mono { text-align: end; }
+
+.qlist { list-style: none; margin: var(--sp-3) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.qlist li { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: var(--r-md); padding: var(--sp-2) var(--sp-3); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
