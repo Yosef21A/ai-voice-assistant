@@ -14,14 +14,18 @@
 // fully offline and reproducible.
 import { MockProvider } from './mockProvider.js';
 import { AnthropicProvider } from './anthropicProvider.js';
+import { GeminiProvider } from './geminiProvider.js';
 
 /**
- * Returns AnthropicProvider only when a key is present, otherwise the
- * deterministic MockProvider (the default).
+ * Selection order: Gemini → Anthropic → deterministic MockProvider.
+ * Gemini deliberately wins over Anthropic: dev machines may export a global
+ * ANTHROPIC_API_KEY (e.g. an OpenRouter key with the wrong base URL) that must
+ * not hijack the provider when GEMINI_API_KEY is configured for this app.
  */
 export function getProvider(config = {}) {
+  if (config.geminiApiKey) return new GeminiProvider(config);
   if (config.anthropicApiKey) return new AnthropicProvider(config);
   return new MockProvider();
 }
 
-export { MockProvider, AnthropicProvider };
+export { MockProvider, AnthropicProvider, GeminiProvider };

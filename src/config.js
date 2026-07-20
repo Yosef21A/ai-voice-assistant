@@ -49,6 +49,9 @@ export function getConfig(overrides = {}) {
     appSecret: process.env.WHATSAPP_APP_SECRET || '',
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
     anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-latest',
+    geminiApiKey: process.env.GEMINI_API_KEY || '',
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    geminiTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 8000,
     // Outbound WhatsApp transport: 'real' | 'mock' | '' (auto: token ⇒ real).
     // Tests pin 'mock' so a developer's .env token can never leak network calls.
     whatsappTransport: process.env.WHATSAPP_TRANSPORT || '',
