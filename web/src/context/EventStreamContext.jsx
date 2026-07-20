@@ -13,6 +13,7 @@ const TYPES = [
   'handoff.requested',
   'lead.hot',
   'emergency.detected',
+  'media.received',
 ];
 
 const EventStreamContext = createContext(null);

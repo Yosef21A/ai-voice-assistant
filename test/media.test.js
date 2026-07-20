@@ -211,6 +211,28 @@ test('media — GET /api/media/:id: 401 anon, 200 owner with bytes, 404 cross-te
 });
 
 // ── failed download degrades gracefully ───────────────────────────────────────
+// ── retention purge ───────────────────────────────────────────────────────────
+test('media — purge removes files past retention, keeps fresh ones, prunes empty dirs', async () => {
+  const { purgeMediaDir } = await import('../scripts/purge-media.js');
+  const dir = tmpMediaDir();
+  const oldDir = path.join(dir, A, '202601');
+  const newDir = path.join(dir, A, '202607');
+  fs.mkdirSync(oldDir, { recursive: true });
+  fs.mkdirSync(newDir, { recursive: true });
+  const oldFile = path.join(oldDir, 'old.jpg');
+  const newFile = path.join(newDir, 'new.jpg');
+  fs.writeFileSync(oldFile, 'x');
+  fs.writeFileSync(newFile, 'y');
+  const old = new Date('2026-01-10T00:00:00Z');
+  fs.utimesSync(oldFile, old, old);
+
+  const res = purgeMediaDir(dir, 90, new Date('2026-07-20T00:00:00Z'));
+  assert.deepEqual(res, { removed: 1, kept: 1 });
+  assert.equal(fs.existsSync(oldFile), false);
+  assert.equal(fs.existsSync(oldDir), false, 'empty month dir pruned');
+  assert.equal(fs.existsSync(newFile), true);
+});
+
 test('media — failed download persists metadata (available:false), ack still sent', async (t) => {
   const app = makeTestApp();
   t.after(() => app.notifier.stop());

@@ -15,7 +15,33 @@ import { fmtAgo, fmtTime, fmtDay, dayKey, dirOf, specialtyLabel } from '../lib.j
 const authorOf = (m) =>
   m.direction === 'inbound' ? 'patient' : String(m.by || '').startsWith('staff') ? 'staff' : 'bot';
 
-function ThreadBody({ messages, lang }) {
+// Attachment block inside a bubble (P2-D): image thumbnail, file chip or audio
+// player. Same-origin <img>/<audio> URLs carry the session cookie; a purged or
+// failed download renders the "unavailable" note instead.
+function MediaBlock({ media, t }) {
+  if (!media) return null;
+  if (!media.available) {
+    return <div className="media-unavailable">📎 {t('inbox.mediaUnavailable')}</div>;
+  }
+  if (media.kind === 'image') {
+    return (
+      <a href={media.url} target="_blank" rel="noreferrer">
+        <img className="msg-media" src={media.url} alt={media.filename || t('inbox.mediaImage')} loading="lazy" />
+      </a>
+    );
+  }
+  if (media.kind === 'audio') {
+    return <audio className="msg-audio" controls src={media.url} preload="none" />;
+  }
+  return (
+    <a className="file-chip" href={media.url} target="_blank" rel="noreferrer" dir="ltr">
+      📄 <span className="truncate">{media.filename || t('inbox.mediaDocument')}</span>
+      {media.size ? <span className="tiny muted">{Math.max(1, Math.round(media.size / 1024))} KB</span> : null}
+    </a>
+  );
+}
+
+function ThreadBody({ messages, lang, t }) {
   const scrollRef = useRef(null);
   useEffect(() => {
     const el = scrollRef.current;
@@ -35,6 +61,7 @@ function ThreadBody({ messages, lang }) {
             <div className={`bubble-row ${out ? 'out' : 'in'}${who === 'staff' ? ' staff' : ''}`}>
               <div className={`bubble author-${who}`} dir={dirOf(m.text)}>
                 {who !== 'patient' ? <span className={`by ${who}`}>{who === 'bot' ? '🤖' : '👤'} </span> : null}
+                {m.media ? <MediaBlock media={m.media} t={t} /> : null}
                 {m.text}
                 <span className="meta"><span>{fmtTime(m.ts, lang)}</span></span>
               </div>
@@ -285,7 +312,7 @@ export function Inbox() {
               {paused ? <><Bot />{t('inbox.handBack')}</> : <><User />{t('inbox.takeControl')}</>}
             </button>
           </div>
-          <ThreadBody messages={thread.messages} lang={lang} />
+          <ThreadBody messages={thread.messages} lang={lang} t={t} />
           <div className="composer">
             <div className="comp-row">
               <textarea

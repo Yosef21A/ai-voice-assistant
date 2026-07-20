@@ -497,6 +497,16 @@ select.control { appearance: none; cursor: pointer;
 .qlist li { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
   background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: var(--r-md); padding: var(--sp-2) var(--sp-3); }
 
+/* ── inbox media attachments (P2-D) ────────────────────────────────────────── */
+.msg-media { display: block; max-width: 260px; max-height: 260px; border-radius: var(--r-md);
+  border: 1px solid var(--border-soft); margin-block-end: var(--sp-2); object-fit: cover; }
+.msg-audio { display: block; max-width: 260px; margin-block-end: var(--sp-2); }
+.file-chip { display: inline-flex; align-items: center; gap: var(--sp-2); max-width: 260px;
+  background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3); margin-block-end: var(--sp-2); color: var(--text); text-decoration: none; }
+.file-chip:hover { border-color: var(--brass-dim); }
+.media-unavailable { color: var(--text-mute); font-size: 0.82rem; font-style: italic; margin-block-end: var(--sp-2); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }

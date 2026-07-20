@@ -134,6 +134,8 @@ export default {
     waId: 'WhatsApp number', lang: 'Language', status: 'Status', started: 'Since',
     backList: 'Conversations', details: 'Details',
     flagEmergency: 'Emergency detected — the bot stepped back', flagLead: 'Hot lead — reply fast',
+    mediaImage: 'Photo / X-ray', mediaDocument: 'Document', mediaAudio: 'Voice note',
+    mediaUnavailable: 'File unavailable (expired or deleted)',
   },
   convStatus: { open: 'Open', needs_human: 'Needs human', closed: 'Closed' },
   appt: {

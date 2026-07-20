@@ -134,6 +134,8 @@ export default {
     waId: 'رقم واتساب', lang: 'اللغة', status: 'الحالة', started: 'منذ',
     backList: 'المحادثات', details: 'التفاصيل',
     flagEmergency: 'تم رصد حالة طوارئ — البوت توقّف', flagLead: 'عميل مهم — ردّ بسرعة',
+    mediaImage: 'صورة / أشعة', mediaDocument: 'ملف', mediaAudio: 'رسالة صوتية',
+    mediaUnavailable: 'الملف غير متوفر (انتهت مدته أو حُذف)',
   },
   convStatus: { open: 'مفتوحة', needs_human: 'تحتاج تدخّلاً', closed: 'مغلقة' },
   appt: {
