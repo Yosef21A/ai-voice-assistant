@@ -16,25 +16,50 @@ const authorOf = (m) =>
   m.direction === 'inbound' ? 'patient' : String(m.by || '').startsWith('staff') ? 'staff' : 'bot';
 
 // Attachment block inside a bubble (P2-D): image thumbnail, file chip or audio
-// player. Same-origin <img>/<audio> URLs carry the session cookie; a purged or
-// failed download renders the "unavailable" note instead.
+// player. Same-origin <img>/<audio> URLs carry the session cookie. `available`
+// only says the file was stored at ingest — the retention purge deletes bytes
+// without touching message rows, so load errors (404 'gone') downgrade the
+// block to the localized "unavailable" note at render time.
 function MediaBlock({ media, t }) {
+  const [broken, setBroken] = useState(false);
   if (!media) return null;
-  if (!media.available) {
+  if (!media.available || broken) {
     return <div className="media-unavailable">📎 {t('inbox.mediaUnavailable')}</div>;
   }
   if (media.kind === 'image') {
     return (
       <a href={media.url} target="_blank" rel="noreferrer">
-        <img className="msg-media" src={media.url} alt={media.filename || t('inbox.mediaImage')} loading="lazy" />
+        <img
+          className="msg-media"
+          src={media.url}
+          alt={media.filename || t('inbox.mediaImage')}
+          loading="lazy"
+          onError={() => setBroken(true)}
+        />
       </a>
     );
   }
   if (media.kind === 'audio') {
-    return <audio className="msg-audio" controls src={media.url} preload="none" />;
+    return <audio className="msg-audio" controls src={media.url} preload="metadata" onError={() => setBroken(true)} />;
   }
+  // Documents have no load event — probe on click so a purged file becomes the
+  // note instead of a dead tab.
+  const openDoc = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await fetch(media.url, { credentials: 'include' });
+      if (!r.ok) {
+        setBroken(true);
+        return;
+      }
+      const w = window.open(media.url, '_blank', 'noopener');
+      if (!w) window.location.assign(media.url);
+    } catch {
+      setBroken(true);
+    }
+  };
   return (
-    <a className="file-chip" href={media.url} target="_blank" rel="noreferrer" dir="ltr">
+    <a className="file-chip" href={media.url} onClick={openDoc} dir="ltr">
       📄 <span className="truncate">{media.filename || t('inbox.mediaDocument')}</span>
       {media.size ? <span className="tiny muted">{Math.max(1, Math.round(media.size / 1024))} KB</span> : null}
     </a>

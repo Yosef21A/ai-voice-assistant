@@ -145,12 +145,16 @@ export class WhatsAppMediaClient {
       const mime = bareMime(metaMime || media.mimeType);
       if (!url) return this._fail('graph media metadata carried no url');
       if (!allowedMime(mime)) return this._fail(`mime type not allowed: ${mime}`);
-      if (Number(fileSize) > this.maxBytes) {
-        return this._fail(`media too large: ${fileSize} > ${this.maxBytes}`);
+      // FAIL CLOSED: a missing/non-numeric file_size must not slip past the cap.
+      const declared = Number(fileSize);
+      if (!Number.isFinite(declared) || declared > this.maxBytes) {
+        return this._fail(`media too large or size unknown: ${fileSize} (cap ${this.maxBytes})`);
       }
 
-      // 2. binary from the lookaside CDN (same Bearer token; url expires fast)
-      const bin = await this._get(url, token, 'bytes');
+      // 2. binary from the lookaside CDN (same Bearer token; url expires fast).
+      // The read itself is byte-budgeted — a body larger than the declared size
+      // (or gzip-inflated) aborts mid-stream instead of ballooning RAM.
+      const bin = await this._get(url, token, 'bytes', this.maxBytes);
       if (!bin.ok) return { ok: false, error: bin.error };
       if (bin.data.length > this.maxBytes) {
         return this._fail(`media too large: ${bin.data.length} > ${this.maxBytes}`);
@@ -175,7 +179,11 @@ export class WhatsAppMediaClient {
   }
 
   // Single bounded GET (one retry on retriable failures) returning json|bytes.
-  async _get(url, token, kind) {
+  // For 'bytes', `maxBytes` budgets the BODY READ itself: Content-Length is
+  // checked first when present, then the stream is consumed chunk-by-chunk and
+  // aborted the moment the budget trips — peak memory stays capped even if the
+  // server lies about (or omits) the size, or the body inflates.
+  async _get(url, token, kind, maxBytes = Infinity) {
     for (let attempt = 0; ; attempt += 1) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -217,6 +225,41 @@ export class WhatsAppMediaClient {
           return { ok: false, error: toPlainError(new WhatsAppError('graph media metadata was not JSON')) };
         }
       }
+
+      const tooLarge = (n) => ({
+        ok: false,
+        error: toPlainError(
+          new WhatsAppError(`media too large: body exceeded ${n}`, { code: 'invalid_media', retriable: false })
+        ),
+      });
+      const contentLength = Number(res.headers?.get?.('content-length'));
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        controller.abort();
+        return tooLarge(maxBytes);
+      }
+      if (res.body && typeof res.body.getReader === 'function') {
+        const reader = res.body.getReader();
+        const chunks = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength ?? value.length ?? 0;
+          if (total > maxBytes) {
+            try {
+              await reader.cancel();
+            } catch {
+              /* stream already dead */
+            }
+            controller.abort();
+            return tooLarge(maxBytes);
+          }
+          chunks.push(Buffer.from(value));
+        }
+        return { ok: true, data: Buffer.concat(chunks) };
+      }
+      // Injected test stubs may not expose a web stream — fall back, the
+      // caller's post-read length check still applies.
       return { ok: true, data: Buffer.from(await res.arrayBuffer()) };
     }
   }

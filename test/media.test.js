@@ -101,6 +101,60 @@ test('media client — refuses oversize (before downloading) and foreign mime ty
   assert.match(exe.error.message, /not allowed/);
 });
 
+test('media client — missing/NaN file_size fails CLOSED; oversized stream aborts within budget', async () => {
+  const dir = tmpMediaDir();
+  let binaryFetched = false;
+
+  // (a) metadata without file_size → refused before any byte moves.
+  const noSize = createMediaClient({
+    transport: 'real',
+    token: 'T',
+    mediaDir: dir,
+    fetchImpl: async (url) => {
+      if (/MEDIA-NOSIZE$/.test(url)) {
+        return { ok: true, status: 200, json: async () => ({ url: 'https://cdn/x', mime_type: 'image/jpeg' }) };
+      }
+      binaryFetched = true;
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.alloc(10) };
+    },
+  });
+  const res = await noSize.fetchMedia(TENANT, { id: 'MEDIA-NOSIZE', mimeType: 'image/jpeg' });
+  assert.equal(res.ok, false);
+  assert.match(res.error.message, /too large or size unknown/);
+  assert.equal(binaryFetched, false);
+
+  // (b) declared size lies: the streamed body blows the budget → aborted
+  // mid-read, never fully buffered.
+  let chunksServed = 0;
+  const liar = createMediaClient({
+    transport: 'real',
+    token: 'T',
+    mediaDir: dir,
+    maxBytes: 1000,
+    fetchImpl: async (url) => {
+      if (/MEDIA-LIAR$/.test(url)) {
+        return { ok: true, status: 200, json: async () => ({ url: 'https://cdn/liar', mime_type: 'image/jpeg', file_size: 500 }) };
+      }
+      const chunk = new Uint8Array(600);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null }, // no content-length — the stream budget must catch it
+        body: {
+          getReader: () => ({
+            read: async () => (chunksServed < 5 ? (chunksServed += 1, { done: false, value: chunk }) : { done: true }),
+            cancel: async () => {},
+          }),
+        },
+      };
+    },
+  });
+  const lied = await liar.fetchMedia(TENANT, { id: 'MEDIA-LIAR', mimeType: 'image/jpeg' });
+  assert.equal(lied.ok, false);
+  assert.match(lied.error.message, /body exceeded/);
+  assert.ok(chunksServed <= 2, `aborted early (served ${chunksServed} chunks, not the whole body)`);
+});
+
 test('media client — mock transport writes a placeholder (offline pipeline works)', async () => {
   const dir = tmpMediaDir();
   const client = createMediaClient({ transport: 'mock', mediaDir: dir });
@@ -211,6 +265,31 @@ test('media — GET /api/media/:id: 401 anon, 200 owner with bytes, 404 cross-te
 });
 
 // ── failed download degrades gracefully ───────────────────────────────────────
+// ── paused conversation still alerts the owner ────────────────────────────────
+test('media — paused conversation: 📎 media.received still fires, bot stays silent', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  const from = '218935558888';
+  const convo = await app.store.conversations.create(A, { patientWaId: from, status: 'open' });
+  await app.store.conversations.update(A, convo.id, { aiPaused: true });
+
+  const events = [];
+  app.bus.subscribe((e) => events.push(e));
+  const [inbound] = normalizeWhatsApp(imagePayload({ from }));
+  const res = await ingestInbound(
+    { store: app.store, engine: app.engine, sender: app.sender, bus: app.bus, mediaClient: app.mediaClient },
+    inbound
+  );
+  await app.notifier.settled();
+
+  assert.equal(res.paused, true);
+  assert.ok(events.some((e) => e.type === 'media.received'), 'owner alert event fired despite pause');
+  const ownerAlerts = readOutbox(app).filter((r) => r.ok && r.to === OWNER).map((r) => r.payload.text.body);
+  assert.ok(ownerAlerts.some((tx) => tx.includes('📎')), '📎 WhatsApp alert sent');
+  const msgs = await app.store.conversations.listMessages(A, convo.id, {});
+  assert.equal(msgs.filter((m) => m.direction === 'outbound').length, 0, 'bot stayed silent (no ack) while paused');
+});
+
 // ── retention purge ───────────────────────────────────────────────────────────
 test('media — purge removes files past retention, keeps fresh ones, prunes empty dirs', async () => {
   const { purgeMediaDir } = await import('../scripts/purge-media.js');
@@ -225,9 +304,11 @@ test('media — purge removes files past retention, keeps fresh ones, prunes emp
   fs.writeFileSync(newFile, 'y');
   const old = new Date('2026-01-10T00:00:00Z');
   fs.utimesSync(oldFile, old, old);
+  // A stray nested directory must be skipped, not abort the sweep.
+  fs.mkdirSync(path.join(newDir, 'stray-subdir'));
 
   const res = purgeMediaDir(dir, 90, new Date('2026-07-20T00:00:00Z'));
-  assert.deepEqual(res, { removed: 1, kept: 1 });
+  assert.deepEqual(res, { removed: 1, kept: 1, skipped: 1 });
   assert.equal(fs.existsSync(oldFile), false);
   assert.equal(fs.existsSync(oldDir), false, 'empty month dir pruned');
   assert.equal(fs.existsSync(newFile), true);

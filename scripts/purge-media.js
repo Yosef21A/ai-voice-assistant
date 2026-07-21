@@ -19,37 +19,64 @@ export function purgeMediaDir(mediaDir, retentionDays, now = new Date()) {
   const cutoff = now.getTime() - retentionDays * 24 * 3600 * 1000;
   let removed = 0;
   let kept = 0;
-  if (!fs.existsSync(mediaDir)) return { removed, kept };
+  let skipped = 0;
+  if (!fs.existsSync(mediaDir)) return { removed, kept, skipped };
+
+  // lstat (never follow symlinks — a link can't drag the sweep outside
+  // mediaDir) + per-entry try/catch (one dangling entry must not abort the
+  // whole retention run).
+  const safeLstat = (p) => {
+    try {
+      return fs.lstatSync(p);
+    } catch {
+      return null;
+    }
+  };
 
   for (const tenant of fs.readdirSync(mediaDir)) {
     const tenantDir = path.join(mediaDir, tenant);
-    if (!fs.statSync(tenantDir).isDirectory()) continue;
+    if (!safeLstat(tenantDir)?.isDirectory()) continue;
     for (const month of fs.readdirSync(tenantDir)) {
       const monthDir = path.join(tenantDir, month);
-      if (!fs.statSync(monthDir).isDirectory()) continue;
+      if (!safeLstat(monthDir)?.isDirectory()) continue;
       for (const f of fs.readdirSync(monthDir)) {
         const abs = path.join(monthDir, f);
-        const st = fs.statSync(abs);
-        if (!st.isFile()) continue;
-        if (st.mtimeMs < cutoff) {
-          fs.unlinkSync(abs);
-          removed += 1;
-        } else {
-          kept += 1;
+        try {
+          const st = safeLstat(abs);
+          if (!st?.isFile()) {
+            skipped += 1; // symlink / stray dir / vanished entry
+            continue;
+          }
+          if (st.mtimeMs < cutoff) {
+            fs.unlinkSync(abs);
+            removed += 1;
+          } else {
+            kept += 1;
+          }
+        } catch {
+          skipped += 1;
         }
       }
-      if (fs.readdirSync(monthDir).length === 0) fs.rmdirSync(monthDir);
+      try {
+        if (fs.readdirSync(monthDir).length === 0) fs.rmdirSync(monthDir);
+      } catch {
+        /* non-empty or busy — leave it */
+      }
     }
-    if (fs.readdirSync(tenantDir).length === 0) fs.rmdirSync(tenantDir);
+    try {
+      if (fs.readdirSync(tenantDir).length === 0) fs.rmdirSync(tenantDir);
+    } catch {
+      /* non-empty or busy — leave it */
+    }
   }
-  return { removed, kept };
+  return { removed, kept, skipped };
 }
 
 // CLI entrypoint (skipped when imported by tests).
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const config = getConfig();
-  const { removed, kept } = purgeMediaDir(config.mediaDir, config.mediaRetentionDays);
+  const { removed, kept, skipped } = purgeMediaDir(config.mediaDir, config.mediaRetentionDays);
   console.log(
-    `[media:purge] retention=${config.mediaRetentionDays}d dir=${config.mediaDir} removed=${removed} kept=${kept}`
+    `[media:purge] retention=${config.mediaRetentionDays}d dir=${config.mediaDir} removed=${removed} kept=${kept} skipped=${skipped}`
   );
 }

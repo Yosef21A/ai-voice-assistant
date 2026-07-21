@@ -78,12 +78,9 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   bus.publish('message.in', { tenantId, conversationId, actor: 'patient', message: publicMessage(inMsg) });
   bus.publish('conversation.updated', { tenantId, conversationId, patch: { lastMessageAt: inMsg.ts } });
 
-  // Human takeover: the bot stays silent while a staff member is driving.
-  if (convo.aiPaused) return { tenantId, conversationId, paused: true };
-
-  // Media turn (P2-D): the owner gets a 📎 alert either way; without a caption
-  // there is nothing for the engine to parse, so the bot only acknowledges
-  // receipt — GUARDRAIL: media is routed to a human, never interpreted.
+  // Media turn (P2-D): the 📎 owner alert + SSE fire for EVERY stored media —
+  // INCLUDING paused conversations (a post-emergency X-ray is exactly when
+  // staff must be pinged). Only the bot's own replies respect the pause.
   if (mediaMeta) {
     bus.publish('media.received', {
       tenantId,
@@ -96,14 +93,20 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
         caption: mediaMeta.caption,
       },
     });
-    if (!inbound.text) {
-      const lang = ['ar', 'fr', 'en'].includes(convo.lang) ? convo.lang : 'ar';
-      await sendAs('bot', conversationId, () => sender.sendText(clinic, inbound.from, MEDIA_ACK[lang]));
-      return { tenantId, conversationId, media: mediaMeta };
-    }
-    // A caption rides along: fall through — the engine and the emergency/lead
-    // detectors treat it as the turn's text (guardrails stay active).
   }
+
+  // Human takeover: the bot stays silent while a staff member is driving.
+  if (convo.aiPaused) return { tenantId, conversationId, paused: true };
+
+  // Captionless media: nothing for the engine to parse — acknowledge receipt
+  // and stop. GUARDRAIL: media is routed to a human, never interpreted.
+  if (mediaMeta && !inbound.text) {
+    const lang = ['ar', 'fr', 'en'].includes(convo.lang) ? convo.lang : 'ar';
+    await sendAs('bot', conversationId, () => sender.sendText(clinic, inbound.from, MEDIA_ACK[lang]));
+    return { tenantId, conversationId, media: mediaMeta };
+  }
+  // A caption rides along: fall through — the engine and the emergency/lead
+  // detectors treat it as the turn's text (guardrails stay active).
 
   const out = await engine.handleMessage(inbound);
 
