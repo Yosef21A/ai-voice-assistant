@@ -28,22 +28,31 @@ const publicLead = (l, waitingSince = null) =>
 export function leadsRouter({ store, bus }) {
   const router = express.Router();
 
+    // Bound the waiting-timer derivation: it does one listMessages per open
+    // lead, so cap how many we resolve and fetch them in parallel chunks — the
+    // board endpoint must stay cheap however long the pipeline grows.
+  const WAITING_MAX = 200;
+  const WAITING_CHUNK = 20;
+
   router.get(
     '/',
     asyncHandler(async (req, res) => {
       const rows = (await store.leads.list(req.tenantId, {})).filter((l) => !isSandbox(l.patientWaId));
-      const out = [];
-      for (const l of rows) {
-        let waitingSince = null;
-        // Only OPEN leads show a timer — bound the per-lead message read to them.
-        if (LEAD_OPEN.has(l.status) && l.conversationId) {
-          const msgs = await store.conversations.listMessages(req.tenantId, l.conversationId, { limit: 1 });
-          const last = msgs[msgs.length - 1];
-          if (last && last.direction === 'inbound') waitingSince = last.ts;
-        }
-        out.push(publicLead(l, waitingSince));
+      // Newest-updated first so the capped set is the leads staff are working.
+      rows.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+      const openWithConvo = rows.filter((l) => LEAD_OPEN.has(l.status) && l.conversationId).slice(0, WAITING_MAX);
+      const waiting = new Map();
+      for (let i = 0; i < openWithConvo.length; i += WAITING_CHUNK) {
+        await Promise.all(
+          openWithConvo.slice(i, i + WAITING_CHUNK).map(async (l) => {
+            const msgs = await store.conversations.listMessages(req.tenantId, l.conversationId, { limit: 1 });
+            const last = msgs[msgs.length - 1];
+            if (last && last.direction === 'inbound') waiting.set(l.id, last.ts);
+          })
+        );
       }
-      res.json({ leads: out });
+      res.json({ leads: rows.map((l) => publicLead(l, waiting.get(l.id) ?? null)) });
     })
   );
 

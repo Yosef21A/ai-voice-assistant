@@ -157,6 +157,45 @@ test('leads — status transitions validated + lead.updated emitted; PATCH assig
   assert.equal((await request(server, 'POST', `/api/leads/${randomUUID()}/status`, { cookie, body: { status: 'lost' } })).status, 404);
 });
 
+// ── review hardening regressions ──────────────────────────────────────────────
+test('leads — conversation removal erases the lead (GDPR: snippet + wa id gone)', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  await app.kbReady;
+
+  const from = '218955000009';
+  await feed(app, from, 'How much does cosmetic surgery cost?');
+  const convoId = `${A}:${from}`;
+  assert.equal((await app.store.leads.list(A, {})).length, 1);
+
+  await app.store.conversations.remove(A, convoId);
+  assert.equal((await app.store.leads.list(A, {})).length, 0, 'lead PII erased with the conversation');
+});
+
+test('leads — JSON ring cap evicts oldest terminal leads first', async () => {
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { createStore } = await import('../src/store/index.js');
+  const { getConfig } = await import('../src/config.js');
+  const store = createStore({
+    clinicsFile: getConfig().clinicsFile,
+    runtimeDir: path.join(os.tmpdir(), `omen-leads-cap-${randomUUID()}`),
+    reset: true,
+    leadsMax: 2,
+  });
+  // Two terminal (older), then two OPEN leads push past the cap of 2: both
+  // terminals must be evicted before either open lead.
+  const l1 = await store.leads.create(A, { conversationId: `${A}:c1`, patientWaId: 'c1', status: 'lost' });
+  const l2 = await store.leads.create(A, { conversationId: `${A}:c2`, patientWaId: 'c2', status: 'booked' });
+  const o3 = await store.leads.create(A, { conversationId: `${A}:c3`, patientWaId: 'c3' });
+  const o4 = await store.leads.create(A, { conversationId: `${A}:c4`, patientWaId: 'c4' });
+  const rows = await store.leads.list(A, {});
+  assert.equal(rows.length, 2, 'capped at leadsMax');
+  assert.ok(!rows.some((r) => r.id === l1.id || r.id === l2.id), 'terminal leads evicted first');
+  assert.ok(rows.some((r) => r.id === o3.id) && rows.some((r) => r.id === o4.id), 'open leads kept');
+  await store.close();
+});
+
 // ── pipeline stats ────────────────────────────────────────────────────────────
 test('leads — pipeline stats: by-status counts, value sum, conversion (sandbox excluded)', () => {
   const tenant = { id: A, timezone: 'Africa/Tunis', config: {} };

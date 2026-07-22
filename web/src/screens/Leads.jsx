@@ -1,8 +1,13 @@
 // Leads pipeline (P2-C) — the medical-tourism money board. Hot leads captured
 // at ingest are shown as kanban lanes (new → … → lost). Each card carries the
 // "waiting on you" timer (red past 30 min), a one-tap WhatsApp open, a stage
-// selector, an estimated value, an owner, and a note log. Live via lead.hot +
-// lead.updated SSE. RTL-safe (logical CSS + dir=auto on patient text).
+// selector, an estimated value, an owner, and a note log.
+//
+// Draft state (typed note + value) lives in THIS parent, keyed by lead id, so a
+// stage change (which remounts the card into another lane) or a background
+// reload never wipes half-typed input. Live via lead.hot + lead.updated SSE
+// plus a bounded poll; a display ticker keeps the relative timers advancing
+// WITHOUT re-fetching (no per-inbound reload amplification).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import { useI18n } from '../context/I18nContext.jsx';
@@ -14,42 +19,21 @@ import { Plane, Send } from '../components/icons.jsx';
 import { fmtAgo, dirOf, specialtyLabel } from '../lib.js';
 
 const STAGES = ['new', 'contacted', 'quoted', 'negotiating', 'booked', 'arrived', 'lost'];
+const TERMINAL = new Set(['booked', 'arrived', 'lost']);
 const WAITING_RED_MS = 30 * 60 * 1000;
+const RELOAD_MS = 60000; // bounded background refresh (O(1) requests, not per-message)
+const TICK_MS = 30000; // re-render relative timers without a fetch
 
 function groupThousands(n) {
   return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 }
 
-function LeadCard({ lead, lang, currency, onStatus, onPatch }) {
+function LeadCard({ lead, lang, currency, note, value, savingNote, savingValue, on }) {
   const { t } = useI18n();
-  const [note, setNote] = useState('');
-  const [value, setValue] = useState(lead.value ?? '');
-  const [busy, setBusy] = useState(false);
-
   const waitingMs = lead.waitingSince ? Date.now() - new Date(lead.waitingSince).getTime() : null;
   const proc = lead.procedure ? specialtyLabel(lead.procedure, lang) : t('leads.unknownProcedure');
   const reason = lead.reason ? t(`leads.reason.${lead.reason}`) : null;
   const waNumber = String(lead.patientWaId || '').replace(/[^\d]/g, '');
-
-  const saveNote = async () => {
-    if (!note.trim() || busy) return;
-    setBusy(true);
-    try {
-      await onPatch(lead.id, { note });
-      setNote('');
-    } finally {
-      setBusy(false);
-    }
-  };
-  const saveValue = async () => {
-    if (busy || String(value) === String(lead.value ?? '')) return;
-    setBusy(true);
-    try {
-      await onPatch(lead.id, { value: value === '' ? null : Number(value) });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div className="lead-card">
@@ -73,7 +57,8 @@ function LeadCard({ lead, lang, currency, onStatus, onPatch }) {
         <input
           className="control" type="number" min="0" inputMode="numeric" dir="ltr"
           style={{ width: 96 }} placeholder={t('leads.value')} value={value}
-          onChange={(e) => setValue(e.target.value)} onBlur={saveValue}
+          onChange={(e) => on.valueChange(lead.id, e.target.value)}
+          onBlur={() => on.saveValue(lead)}
         />
         {lead.value ? <span className="small mono">{groupThousands(lead.value)} {currency}</span> : null}
         {waNumber ? (
@@ -85,8 +70,7 @@ function LeadCard({ lead, lang, currency, onStatus, onPatch }) {
 
       <select
         className="control" style={{ marginTop: 'var(--sp-2)' }} value={lead.status}
-        aria-label={t('leads.move')} disabled={busy}
-        onChange={(e) => onStatus(lead.id, e.target.value)}
+        aria-label={t('leads.move')} onChange={(e) => on.status(lead.id, e.target.value)}
       >
         {STAGES.map((s) => <option key={s} value={s}>{t(`leads.status.${s}`)}</option>)}
       </select>
@@ -94,17 +78,17 @@ function LeadCard({ lead, lang, currency, onStatus, onPatch }) {
       {lead.notes?.length ? (
         <ul className="lead-notes">
           {lead.notes.slice(-3).map((n, i) => (
-            <li key={i}><span className="tiny muted">{n.by}</span> {n.text}</li>
+            <li key={i} dir={dirOf(n.text)}><span className="tiny muted">{n.by}</span> {n.text}</li>
           ))}
         </ul>
       ) : null}
       <div className="row" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
         <input
-          className="control grow" placeholder={t('leads.addNote')} value={note}
-          dir={dirOf(note)} onChange={(e) => setNote(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') saveNote(); }}
+          className="control grow" placeholder={t('leads.addNote')} value={note} dir={dirOf(note)}
+          onChange={(e) => on.noteChange(lead.id, e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') on.saveNote(lead); }}
         />
-        <button className="btn outline sm" onClick={saveNote} disabled={busy || !note.trim()}>+</button>
+        <button className="btn outline sm" onClick={() => on.saveNote(lead)} disabled={savingNote || !note.trim()}>+</button>
       </div>
     </div>
   );
@@ -116,44 +100,87 @@ export function Leads() {
   const toast = useToast();
   const currency = config?.currency || 'EUR';
   const [leads, setLeads] = useState(null);
-  const timerRef = useRef(null);
+  const [notes, setNotes] = useState({}); // id -> draft note
+  const [values, setValues] = useState({}); // id -> draft value (string)
+  const [saving, setSaving] = useState({}); // id -> { note?:bool, value?:bool }
+  const [, setTick] = useState(0);
+  const reloadTimer = useRef(null);
 
   const reload = useCallback(async () => {
     try {
       const { leads: rows } = await api.listLeads();
       setLeads(rows);
+      // Seed value drafts for leads we haven't seen (don't clobber active edits).
+      setValues((v) => {
+        const next = { ...v };
+        for (const l of rows) if (!(l.id in next)) next[l.id] = l.value ?? '';
+        return next;
+      });
     } catch {
-      setLeads([]);
+      setLeads((cur) => cur ?? []);
     }
   }, []);
   useEffect(() => { reload(); }, [reload]);
 
+  // Immediate on lead events; bounded background poll for freshness; a display
+  // tick advances the relative timers between fetches (no request).
   const schedule = useCallback(() => {
-    clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(reload, 400);
+    clearTimeout(reloadTimer.current);
+    reloadTimer.current = setTimeout(reload, 400);
   }, [reload]);
   useStreamEvent('lead.hot', schedule);
   useStreamEvent('lead.updated', schedule);
-  useStreamEvent('message.in', schedule); // refreshes the waiting timers
-  useEffect(() => () => clearTimeout(timerRef.current), []);
+  useEffect(() => {
+    const poll = setInterval(reload, RELOAD_MS);
+    const tick = setInterval(() => setTick((n) => n + 1), TICK_MS);
+    return () => { clearInterval(poll); clearInterval(tick); clearTimeout(reloadTimer.current); };
+  }, [reload]);
 
-  const onStatus = async (id, status) => {
-    try {
-      const { lead } = await api.setLeadStatus(id, status);
-      setLeads((rows) => (rows || []).map((l) => (l.id === id ? lead : l)));
-    } catch {
-      toast.err(t('toast.error'));
-    }
-  };
-  const onPatch = async (id, patch) => {
-    try {
-      const { lead } = await api.updateLead(id, patch);
-      setLeads((rows) => (rows || []).map((l) => (l.id === id ? lead : l)));
-    } catch {
-      toast.err(t('toast.error'));
-      throw new Error('patch failed');
-    }
-  };
+  const setSave = (id, key, val) => setSaving((s) => ({ ...s, [id]: { ...(s[id] || {}), [key]: val } }));
+
+  const on = useMemo(
+    () => ({
+      noteChange: (id, v) => setNotes((n) => ({ ...n, [id]: v })),
+      valueChange: (id, v) => setValues((m) => ({ ...m, [id]: v })),
+      status: async (id, status) => {
+        try {
+          const { lead } = await api.setLeadStatus(id, status);
+          setLeads((rows) => (rows || []).map((l) => (l.id === id ? lead : l)));
+        } catch {
+          toast.err(t('toast.error'));
+        }
+      },
+      saveValue: async (lead) => {
+        const raw = values[lead.id];
+        if (raw === undefined || String(raw) === String(lead.value ?? '')) return;
+        setSave(lead.id, 'value', true);
+        try {
+          const { lead: updated } = await api.updateLead(lead.id, { value: raw === '' ? null : Number(raw) });
+          setLeads((rows) => (rows || []).map((l) => (l.id === lead.id ? updated : l)));
+          setValues((m) => ({ ...m, [lead.id]: updated.value ?? '' }));
+        } catch {
+          toast.err(t('toast.error'));
+        } finally {
+          setSave(lead.id, 'value', false);
+        }
+      },
+      saveNote: async (lead) => {
+        const text = (notes[lead.id] || '').trim();
+        if (!text || saving[lead.id]?.note) return;
+        setSave(lead.id, 'note', true);
+        try {
+          const { lead: updated } = await api.updateLead(lead.id, { note: text });
+          setLeads((rows) => (rows || []).map((l) => (l.id === lead.id ? updated : l)));
+          setNotes((n) => ({ ...n, [lead.id]: '' }));
+        } catch {
+          toast.err(t('toast.error'));
+        } finally {
+          setSave(lead.id, 'note', false);
+        }
+      },
+    }),
+    [values, notes, saving, toast, t]
+  );
 
   const { lanes, pipelineValue, openCount } = useMemo(() => {
     const byStatus = Object.fromEntries(STAGES.map((s) => [s, []]));
@@ -162,12 +189,9 @@ export function Leads() {
     for (const l of leads || []) {
       (byStatus[l.status] || (byStatus[l.status] = [])).push(l);
       if (Number.isFinite(Number(l.value))) value += Number(l.value);
-      if (!['booked', 'arrived', 'lost'].includes(l.status)) open += 1;
+      if (!TERMINAL.has(l.status)) open += 1;
     }
-    // Waiting-first within each lane.
-    for (const s of STAGES) {
-      byStatus[s].sort((a, b) => (b.waitingSince ? 1 : 0) - (a.waitingSince ? 1 : 0));
-    }
+    for (const s of STAGES) byStatus[s].sort((a, b) => (b.waitingSince ? 1 : 0) - (a.waitingSince ? 1 : 0));
     return { lanes: byStatus, pipelineValue: value, openCount: open };
   }, [leads]);
 
@@ -207,7 +231,11 @@ export function Leads() {
               </div>
               <div className="lane-body">
                 {lanes[s].map((l) => (
-                  <LeadCard key={l.id} lead={l} lang={lang} currency={currency} onStatus={onStatus} onPatch={onPatch} />
+                  <LeadCard
+                    key={l.id} lead={l} lang={lang} currency={currency}
+                    note={notes[l.id] || ''} value={values[l.id] ?? (l.value ?? '')}
+                    savingNote={!!saving[l.id]?.note} savingValue={!!saving[l.id]?.value} on={on}
+                  />
                 ))}
               </div>
             </div>

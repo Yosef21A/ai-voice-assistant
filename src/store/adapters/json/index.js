@@ -35,6 +35,7 @@ export function createJsonStore({
   reset = false,
   eventsMax = 10000,
   unansweredMax = 500,
+  leadsMax = 2000,
 } = {}) {
   if (!runtimeDir) throw new Error('createJsonStore: runtimeDir is required');
   mkdirSync(runtimeDir, { recursive: true });
@@ -278,10 +279,14 @@ export function createJsonStore({
       db.messages = db.messages.filter((m) => !(m.conversationId === id && m.tenantId === tenantId));
       db.events = db.events.filter((e) => !(e.conversationId === id && e.tenantId === tenantId));
       db.unanswered = db.unanswered.filter((u) => !(u.conversationId === id && u.tenantId === tenantId));
+      // Leads carry patient PII too (wa id, origin, verbatim snippet) — a GDPR
+      // erase must take them, exactly like events/unanswered.
+      db.leads = db.leads.filter((l) => !(l.conversationId === id && l.tenantId === tenantId));
       persist('conversations');
       persist('messages');
       persist('events');
       persist('unanswered');
+      persist('leads');
       return rec;
     },
   };
@@ -326,6 +331,23 @@ export function createJsonStore({
     },
   };
 
+  // Ring cap per tenant (like events/unanswered): every capture re-serializes
+  // leads.json synchronously on the reply path, and distinct hot numbers are
+  // unbounded. Evict oldest TERMINAL leads first (booked/arrived/lost — the
+  // owner is done with them); only then the oldest open ones.
+  function capLeads(tenantId) {
+    const mine = db.leads.filter((l) => l.tenantId === tenantId);
+    if (mine.length <= leadsMax) return;
+    const byAge = mine.slice().sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
+    const terminal = (l) => !LEAD_OPEN_STATUS.has(l.status);
+    const victims = [...byAge.filter(terminal), ...byAge.filter((l) => !terminal(l))].slice(
+      0,
+      mine.length - leadsMax
+    );
+    const ids = new Set(victims.map((v) => v.id));
+    db.leads = db.leads.filter((l) => !ids.has(l.id));
+  }
+
   const leads = {
     async create(tenantId, data = {}) {
       const lead = {
@@ -338,6 +360,7 @@ export function createJsonStore({
         updatedAt: now(),
       };
       db.leads.push(lead);
+      capLeads(tenantId);
       persist('leads');
       return lead;
     },
@@ -384,6 +407,7 @@ export function createJsonStore({
         updatedAt: now(),
       };
       db.leads.push(lead);
+      capLeads(tenantId);
       persist('leads');
       return lead;
     },

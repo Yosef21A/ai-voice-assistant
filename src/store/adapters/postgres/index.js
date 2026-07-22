@@ -211,6 +211,9 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     async remove(tenantId, id) {
       await q('DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2', [tenantId, id]);
       await q('DELETE FROM unanswered WHERE tenant_id = $1 AND conversation_id = $2', [tenantId, id]);
+      // Leads carry patient PII and their FK is ON DELETE SET NULL (would merely
+      // orphan the row) — delete them explicitly so a GDPR erase is complete.
+      await q('DELETE FROM leads WHERE tenant_id = $1 AND conversation_id = $2', [tenantId, id]);
       const { rows } = await q(
         'DELETE FROM conversations WHERE tenant_id = $1 AND id = $2 RETURNING *',
         [tenantId, id]
@@ -300,28 +303,28 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
       return row2obj(rows[0]);
     },
     // Deduped hot-lead capture (P2-C): at most ONE open lead per conversation.
+    // Race-safe via the partial-unique index leads_open_conversation_uniq +
+    // INSERT..ON CONFLICT (two concurrent webhook redeliveries can't create
+    // duplicate open leads). A null conversationId can't dedupe → plain create.
     async upsertOpen(tenantId, data = {}) {
       const conv = data.conversationId ?? null;
-      if (conv) {
-        const { rows: ex } = await q(
-          `SELECT * FROM leads WHERE tenant_id = $1 AND conversation_id = $2
-             AND status IN ('new','contacted','quoted','negotiating')
-           ORDER BY created_at DESC LIMIT 1`,
-          [tenantId, conv]
-        );
-        if (ex[0]) {
-          const cur = row2obj(ex[0]);
-          const details = { ...(cur.details || {}), ...(data.details || {}) };
-          const { rows } = await q(
-            `UPDATE leads SET procedure = COALESCE($3, procedure),
-               origin_country = COALESCE($4, origin_country), details = $5::jsonb
-             WHERE tenant_id = $1 AND id = $2 RETURNING *`,
-            [tenantId, cur.id, data.procedure ?? null, data.originCountry ?? null, JSON.stringify(details)]
-          );
-          return row2obj(rows[0]);
-        }
-      }
-      return this.create(tenantId, data);
+      if (!conv) return this.create(tenantId, data);
+      const { rows } = await q(
+        `INSERT INTO leads (tenant_id, conversation_id, patient_wa_id, procedure, origin_country, details, status)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,'new')
+         ON CONFLICT (tenant_id, conversation_id)
+           WHERE status IN ('new','contacted','quoted','negotiating') AND conversation_id IS NOT NULL
+         DO UPDATE SET
+           procedure = COALESCE(EXCLUDED.procedure, leads.procedure),
+           origin_country = COALESCE(EXCLUDED.origin_country, leads.origin_country),
+           details = leads.details || EXCLUDED.details
+         RETURNING *`,
+        [
+          tenantId, conv, data.patientWaId ?? null, data.procedure ?? null,
+          data.originCountry ?? null, JSON.stringify(data.details ?? {}),
+        ]
+      );
+      return row2obj(rows[0]);
     },
     // Staff edits (assignee/value/notes/status/details).
     async update(tenantId, id, patch = {}) {
