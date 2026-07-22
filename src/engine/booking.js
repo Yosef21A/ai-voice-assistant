@@ -106,7 +106,10 @@ function genRef(clinic, store, now) {
 // ── entry points ────────────────────────────────────────────────────────────
 export function startBooking(ctx) {
   const { convo, text, clinic } = ctx;
-  convo.state = { flow: 'booking', step: null, data: {} };
+  // Keep already-collected slots when a stale flow restarts (P2-HUMANIZE F9:
+  // state decay drops the "expected answer" lock but never the data).
+  const prior = convo.state?.flow === 'booking' ? convo.state.data || {} : {};
+  convo.state = { flow: 'booking', step: null, data: { ...prior } };
   // Pre-fill the specialty if the opening message already named one
   // ("I want to book cardiology" -> skip the specialty question).
   const sp = extractSpecialty(text, clinic);
@@ -225,4 +228,4 @@ export function cancelBooking(ctx) {
   return { intent: 'cancel', replies: [t(ctx.lang, 'cancelled')] };
 }
 
-export { STEPS, specialtyLabel, specialtyList, buildSummary };
+export { STEPS, specialtyLabel, specialtyList, buildSummary, nextStep };

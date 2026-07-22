@@ -9,6 +9,11 @@ import { extractSpecialty } from './slots.js';
 import { matchFaq, faqAnswer } from './faq.js';
 import { t } from './responses.js';
 import { normalizeDigits } from './text.js';
+import { handleLlmTurn } from './humanize/index.js';
+
+// F9 state decay: a booking flow idle longer than this keeps its slots but
+// drops the "expected answer" lock — the next message is evaluated fresh.
+const STALE_FLOW_MS = 2 * 60 * 60 * 1000;
 
 /**
  * @param {object} deps
@@ -51,25 +56,64 @@ export function createEngine({ store, provider, config }) {
       provider,
       config,
       now,
+      // F9: mark a stale booking flow so route() releases the step lock.
+      staleFlow:
+        convo.state?.flow === 'booking' &&
+        convo.updatedAt &&
+        now.getTime() - new Date(convo.updatedAt).getTime() > STALE_FLOW_MS,
     };
 
-    const result = await route(ctx);
+    // ── mode dispatch (P2-HUMANIZE) ──────────────────────────────────────────
+    // llm: the provider plans the turn, the deterministic executor writes.
+    // Any LLM failure (timeout, quota, malformed output) falls back to the
+    // classic state machine — THE BOT NEVER GOES SILENT.
+    const tenantMode = clinic.conversationMode || config.conversationMode;
+    const useLlm = tenantMode === 'llm' && typeof provider.generateStructured === 'function';
+    let result = null;
+    if (useLlm) {
+      try {
+        result = await handleLlmTurn(ctx);
+      } catch (err) {
+        result = null; // classic fallback below
+        try {
+          store.events
+            ?.append?.(clinic.id, {
+              type: 'llm.fallback',
+              actor: 'engine',
+              conversationId: convo.id,
+              payload: { error: String(err?.message || err).slice(0, 200) },
+            })
+            ?.catch?.(() => {});
+        } catch {
+          /* audit is best-effort */
+        }
+      }
+    }
+    if (!result) result = await route(ctx);
 
     const replies = result.replies || [];
     for (const r of replies) convo.messages.push({ role: 'assistant', text: r, ts: now.toISOString() });
+    // The llm executor may re-detect the language (Arabizi → 'ar').
+    const finalLang = result.lang || lang;
+    convo.lang = finalLang;
     convo.updatedAt = now.toISOString();
     store.saveConversation(convo);
     if (result.appointment) {
-      store.upsertPatient(clinic.id, inbound.from, {
-        name: result.appointment.patientName,
-        lastAppointmentRef: result.appointment.ref,
-      });
+      const a = result.appointment;
+      // Patient memory (P2-HUMANIZE §2.10): only defined fields — the JSON
+      // adapter Object.assigns the patch, so nulls would clobber stored facts.
+      const patch = { name: a.patientName, lastAppointmentRef: a.ref };
+      if (a.originCity) patch.originCity = a.originCity;
+      if (a.originCountry) patch.originCountry = a.originCountry;
+      if (a.contact) patch.contact = a.contact;
+      if (finalLang) patch.lang = finalLang;
+      store.upsertPatient(clinic.id, inbound.from, patch);
     }
 
     return {
       clinicId: clinic.id,
       clinicName: clinic.name,
-      lang,
+      lang: finalLang,
       intent: result.intent,
       reply: replies.join('\n\n'),
       replies,
@@ -79,6 +123,12 @@ export function createEngine({ store, provider, config }) {
       // P2-B: false only when the bot had NO real answer (unknown intent, or a
       // FAQ ask that matched nothing) — feeds the "bot didn't know" queue.
       knew: result.knew !== false,
+      // P2-HUMANIZE pass-throughs for the ingest layer (lead capture / owner
+      // alerts). Absent in classic mode.
+      gap: result.gap || null,
+      adminNotify: result.adminNotify || null,
+      kbQuestion: result.kbQuestion || null,
+      guardrailViolations: result.guardrailViolations || null,
     };
   }
 
@@ -91,10 +141,17 @@ async function route(ctx) {
   const gi = detectIntent(text);
 
   // An active booking flow captures the turn, except for explicit interrupts.
-  if (convo.state?.flow === 'booking') {
+  // A STALE flow (idle >2h, F9) no longer captures: the message routes fresh
+  // by intent; collected slots survive via startBooking's data carry-over.
+  if (convo.state?.flow === 'booking' && !ctx.staleFlow) {
     if (gi.intent === 'cancel') return cancelBooking(ctx);
     if (gi.intent === 'human_handoff') return handleHandoff(ctx);
     return continueBooking(ctx);
+  }
+  if (convo.state?.flow === 'booking' && ctx.staleFlow && gi.intent === 'unknown') {
+    // Fresh evaluation of an unknown message against a stale flow: fall through
+    // to the FAQ/fallback handlers instead of force-feeding the old step.
+    return handleFallback(ctx);
   }
 
   switch (gi.intent) {

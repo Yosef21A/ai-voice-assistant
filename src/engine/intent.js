@@ -8,17 +8,19 @@ const KEYWORDS = {
     en: ['human', 'agent', 'representative', 'real person', 'someone', 'staff', 'call me', 'operator'],
   },
   cancel: {
-    ar: ['الغاء', 'إلغاء', 'ألغي', 'الغي', 'نلغي', 'نلغيو', 'بطل', 'نبطل', 'ما نحبش', 'سامحني'],
-    fr: ['annuler', 'annulation', 'arreter', 'arrêter', 'laisse tomber', 'oublie'],
-    en: ['cancel', 'stop', 'abort', 'nevermind', 'never mind', 'forget it'],
+    ar: ['الغاء', 'إلغاء', 'ألغي', 'الغي', 'نلغي', 'نلغيو', 'بطل', 'نبطل', 'ما نحبش', 'مانحبش', 'ما عادش نحب', 'سامحني'],
+    fr: ['annuler', 'annulation', 'arreter', 'arrêter', 'laisse tomber', 'oublie', 'pas maintenant'],
+    // "I dont wanna book" (live failure F1) must read as refusal, not as a
+    // botched specialty answer — refusal is sacred (P2-HUMANIZE §2.4).
+    en: ['cancel', 'stop', 'abort', 'nevermind', 'never mind', 'forget it', "don't wanna", 'dont wanna', "don't want", 'dont want', 'not now', 'no thanks', 'not interested'],
   },
   pricing_quote: {
-    ar: ['سعر', 'ثمن', 'بقداش', 'قداش', 'كم يكلف', 'تكلفة', 'أسعار', 'اسعار', 'كم سعر', 'التكلفة'],
+    ar: ['سعر', 'ثمن', 'بقداش', 'قداش', 'كم يكلف', 'تكلفة', 'أسعار', 'اسعار', 'كم سعر', 'التكلفة', 'chhal', 'ch7al', '9adech', '9addech'],
     fr: ['prix', 'tarif', 'tarifs', 'cout', 'coût', 'combien', 'devis', 'estimation'],
     en: ['price', 'cost', 'quote', 'how much', 'pricing', 'estimate', 'estimation'],
   },
   book_appointment: {
-    ar: ['حجز', 'نحجز', 'احجز', 'اححز', 'موعد', 'رنديفو', 'نحب نحجز', 'نأخذ موعد', 'ناخذ موعد'],
+    ar: ['حجز', 'نحجز', 'احجز', 'اححز', 'موعد', 'رنديفو', 'نحب نحجز', 'نأخذ موعد', 'ناخذ موعد', 'na7jez', 'n7jez', 'nahjez', '7ajz', 'maw3ed', 'maw3ad', 'mawid'],
     fr: ['rendez-vous', 'rendez vous', 'rdv', 'prendre rendez', 'reserver', 'réserver', 'reservation'],
     en: ['appointment', 'book', 'booking', 'schedule', 'reserve', 'reservation'],
   },
@@ -33,8 +35,11 @@ const KEYWORDS = {
     en: ['hours', 'address', 'location', 'payment', 'language', 'question', 'do you', 'where are', 'what time'],
   },
   greeting: {
-    ar: ['سلام', 'السلام', 'صباح الخير', 'مساء الخير', 'اهلا', 'أهلا', 'مرحبا', 'يعطيك الصحة'],
-    fr: ['bonjour', 'salut', 'bonsoir', 'coucou', 'cc'],
+    // Phone-style hellos ("الو", "Alo") and Arabizi greetings were dead ends in
+    // the live log (F2/F5) — they are greetings. Space-padded entries match
+    // whole words only (detectIntent pads the text with spaces).
+    ar: ['سلام', 'السلام', 'صباح الخير', 'مساء الخير', 'اهلا', 'أهلا', 'مرحبا', 'يعطيك الصحة', ' الو ', ' هالو ', ' آلو ', ' ألو ', 'aslema', '3aslema', 'mar7ba', ' salam '],
+    fr: ['bonjour', 'salut', 'bonsoir', 'coucou', 'cc', ' allo ', ' alo '],
     en: ['hello', 'hi', 'hey', 'good morning', 'good evening', 'good afternoon'],
   },
 };
