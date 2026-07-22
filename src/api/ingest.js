@@ -79,6 +79,13 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   bus.publish('message.in', { tenantId, conversationId, actor: 'patient', message: publicMessage(inMsg) });
   bus.publish('conversation.updated', { tenantId, conversationId, patch: { lastMessageAt: inMsg.ts } });
 
+  // WhatsApp niceties (P2-HUMANIZE §3): blue ticks + typing bubble while the
+  // reply is generated. Fire-and-forget — a Graph hiccup must never delay or
+  // break the turn, and the mock transport just records it to the outbox.
+  if (inbound.channel === 'whatsapp' && inbound.messageId) {
+    Promise.resolve(sender.markRead(clinic, inbound.messageId, { typing: true })).catch(() => {});
+  }
+
   // Media turn (P2-D): the 📎 owner alert + SSE fire for EVERY stored media —
   // INCLUDING paused conversations (a post-emergency X-ray is exactly when
   // staff must be pinged). Only the bot's own replies respect the pause.
@@ -174,9 +181,12 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   // their status; only genuinely NEW questions ping the dashboard badge.
   if (out.knew === false && inbound.text && !isSandboxWaId(inbound.from)) {
     try {
+      // The llm executor may pass a cleaned question (kb_gap action); the raw
+      // inbound text stays the dedupe fallback.
+      const question = out.kbQuestion || inbound.text;
       const row = await store.unanswered.upsertByNorm(tenantId, {
-        norm: normalizeQuestion(inbound.text),
-        question: String(inbound.text).slice(0, 300),
+        norm: normalizeQuestion(question),
+        question: String(question).slice(0, 300),
         lang: out.lang || null,
         conversationId,
       });
@@ -210,6 +220,49 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
     } catch {
       /* the leads pipeline must never break the turn */
     }
+  }
+
+  // Specialty gap (P2-HUMANIZE §2.5): the patient asked for a treatment we
+  // don't list — that's a LEAD, not a dead end. One open lead per conversation
+  // (upsertOpen dedupes/merges) + a hot-lead owner alert so the clinic answers
+  // TODAY. Sandbox test-drives never leak into the pipeline.
+  if (out.gap && out.gap.type === 'specialty' && !isSandboxWaId(inbound.from)) {
+    const snippet = String(inbound.text || '').slice(0, 160);
+    try {
+      await store.leads.upsertOpen(tenantId, {
+        conversationId,
+        patientWaId: inbound.from,
+        procedure: out.gap.requested || null,
+        originCountry: null,
+        details: { reason: 'specialty_gap', snippet, requested: out.gap.requested || null },
+      });
+    } catch {
+      /* the leads pipeline must never break the turn */
+    }
+    bus.publish('lead.hot', {
+      tenantId,
+      conversationId,
+      lead: {
+        reason: 'specialty_gap',
+        procedure: out.gap.requested || null,
+        country: null,
+        patientWaId: inbound.from,
+        conversationId,
+        snippet,
+      },
+    });
+  }
+
+  // notify_admin (P2-HUMANIZE): the assistant flagged something for the owner
+  // without pausing the bot — a dedicated owner alert, dashboard-visible too.
+  if (out.adminNotify && !isSandboxWaId(inbound.from)) {
+    bus.publish('admin.notify', {
+      tenantId,
+      conversationId,
+      patientWaId: inbound.from,
+      reason: out.adminNotify.reason || null,
+      lastMessage: inbound.text,
+    });
   }
 
   if (out.appointment) {

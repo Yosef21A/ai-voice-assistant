@@ -155,6 +155,14 @@ export class WhatsAppSender {
     this.outboxFile = options.outboxFile || DEFAULT_OUTBOX;
     this.onOutbound = typeof options.onOutbound === 'function' ? options.onOutbound : null;
 
+    // Humanized inter-bubble delays (P2-HUMANIZE §3): ON only for the real
+    // transport by default — tests/simulate on mock stay instant. The delay is
+    // min(1.2s + chars/60, 4s) per bubble, matching a human typing rhythm.
+    this.humanizeDelays =
+      typeof options.humanizeDelays === 'boolean'
+        ? options.humanizeDelays
+        : this.transport === 'real';
+
     // Injectable seams — real defaults, overridable in tests / future ports.
     this._fetch =
       typeof options.fetchImpl === 'function'
@@ -269,14 +277,20 @@ export class WhatsAppSender {
     return this._send('buttons', tenant, toWaId, payload);
   }
 
-  /** Mark an inbound message as read (blue ticks). Returns { ok } (no message id). */
-  async markRead(tenant, waMessageId) {
+  /**
+   * Mark an inbound message as read (blue ticks). Returns { ok } (no message id).
+   * With opts.typing the same call also shows the typing indicator (Cloud API
+   * piggybacks it on the read receipt; it auto-clears when a reply arrives or
+   * after ~25s). Degrades silently — a failure never blocks the reply.
+   */
+  async markRead(tenant, waMessageId, opts = {}) {
     if (!waMessageId) return this._reject('read', tenant, null, 'markRead requires a message id');
     const payload = {
       messaging_product: 'whatsapp',
       status: 'read',
       message_id: String(waMessageId),
     };
+    if (opts.typing) payload.typing_indicator = { type: 'text' };
     return this._send('read', tenant, null, payload);
   }
 
@@ -318,7 +332,11 @@ export class WhatsAppSender {
 
     if (norm.length > 0) {
       const body = messages.pop() ?? String(reply.bodyText ?? reply.reply ?? '');
-      for (const m of messages) await push(this.sendText(tenant, toWaId, m));
+      for (const m of messages) {
+        await this._humanPause(m);
+        await push(this.sendText(tenant, toWaId, m));
+      }
+      await this._humanPause(body);
       await push(this.sendButtons(tenant, toWaId, body, norm.slice(0, MAX_BUTTONS)));
     } else {
       if (messages.length === 0) {
@@ -328,9 +346,19 @@ export class WhatsAppSender {
           error: toPlainError(new WhatsAppError('engine reply carried no text')),
         };
       }
-      for (const m of messages) await push(this.sendText(tenant, toWaId, m));
+      for (const m of messages) {
+        await this._humanPause(m);
+        await push(this.sendText(tenant, toWaId, m));
+      }
     }
     return this._engineResult(results);
+  }
+
+  /** Humanized pre-bubble pause: min(1.2s + chars/60, 4s); no-op when disabled. */
+  async _humanPause(text) {
+    if (!this.humanizeDelays) return;
+    const ms = Math.min(1.2 + String(text ?? '').length / 60, 4) * 1000;
+    await this._sleep(ms);
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

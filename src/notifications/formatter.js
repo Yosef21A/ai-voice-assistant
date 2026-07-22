@@ -142,6 +142,13 @@ const LEAD_WHY = {
     fr: (v) => `Patient venant${v.country ? ` de ${v.country}` : " de l'étranger"}`,
     en: (v) => `Patient coming${v.country ? ` from ${v.country}` : ' from abroad'}`,
   },
+  // P2-HUMANIZE §2.5: the patient asked for a treatment we don't list — the
+  // assistant promised an answer TODAY, so this alert asks the owner for one.
+  specialty_gap: {
+    ar: (v) => `طلب علاج موش في القائمة${v.proc ? ` («${v.proc}»)` : ''} — البوت وعدو بجواب اليوم. جاوبو باش ما نخسروهش.`,
+    fr: (v) => `Demande hors catalogue${v.proc ? ` (« ${v.proc} »)` : ''} — le bot a promis une réponse aujourd'hui. Répondez pour ne pas le perdre.`,
+    en: (v) => `Asked for a treatment we don't list${v.proc ? ` ("${v.proc}")` : ''} — the bot promised an answer today. Reply so we don't lose them.`,
+  },
 };
 
 const LEAD = {
@@ -233,6 +240,23 @@ export function formatMedia({ tenant, media = {}, patientWaId, lang } = {}) {
   return withClinicTag(body, tenant);
 }
 
+const ADMIN_NOTIFY = {
+  ar: (v) => `👀 البوت يطلب انتباهك\n👤 ${v.who}\nℹ️ ${v.reason}${v.msg ? `\n💬 "${v.msg}"` : ''}\nالبوت مازال يخدم — شوف المحادثة في لوحة التحكم.`,
+  fr: (v) => `👀 Le bot demande votre attention\n👤 ${v.who}\nℹ️ ${v.reason}${v.msg ? `\n💬 "${v.msg}"` : ''}\nLe bot continue de répondre — voyez la conversation dans le tableau de bord.`,
+  en: (v) => `👀 The bot flagged a conversation\n👤 ${v.who}\nℹ️ ${v.reason}${v.msg ? `\n💬 "${v.msg}"` : ''}\nThe bot is still replying — check the conversation in the dashboard.`,
+};
+
+/** admin.notify alert (P2-HUMANIZE): assistant-flagged, bot NOT paused. */
+export function formatAdminNotify({ tenant, reason, patientWaId, lastMessage, lang } = {}) {
+  const L = lang || resolveOwnerLang(tenant);
+  const body = pick(L, ADMIN_NOTIFY)({
+    who: val(patientWaId),
+    reason: val(reason),
+    msg: lastMessage ? String(lastMessage).slice(0, 120) : '',
+  });
+  return withClinicTag(body, tenant);
+}
+
 function withClinicTag(body, tenant) {
   const name = tenantName(tenant);
   return name ? `${body}\n🏥 ${name}` : body;
@@ -257,6 +281,8 @@ export function formatAlert(type, data = {}) {
       return formatEmergency(data);
     case 'media.received':
       return formatMedia(data);
+    case 'admin.notify':
+      return formatAdminNotify(data);
     default:
       return '';
   }

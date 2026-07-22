@@ -43,6 +43,11 @@ export const EVENT_TYPES = Object.freeze([
   'emergency.detected',
   'media.received',
   'kb.unanswered',
+  // P2-HUMANIZE: the assistant flagged a conversation for the owner without
+  // pausing itself (llm notify_admin action) → owner WhatsApp alert.
+  'admin.notify',
+  // P2-HUMANIZE: audit-only — an LLM turn failed and classic answered instead.
+  'llm.fallback',
 ]);
 
 const FIREHOSE = 'event'; // single channel the SSE layer listens on

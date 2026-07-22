@@ -61,6 +61,15 @@ const EVENT_META = {
     emergency: false,
     subject: (e) => e.conversationId || e.patientWaId || 'media',
   },
+  // P2-HUMANIZE: llm notify_admin action — the assistant wants the owner's
+  // eyes on a conversation (urgency it can't classify, odd request, …) without
+  // pausing itself.
+  'admin.notify': {
+    key: 'adminNotify',
+    aliases: ['adminNotify', 'admin_notify', 'admin', 'notify'],
+    emergency: false,
+    subject: (e) => e.conversationId || e.patientWaId || 'admin',
+  },
 };
 
 function refOf(appt) {
@@ -152,6 +161,7 @@ export function createNotificationService({
           handoff: envelope.handoff,
           keyword: envelope.keyword,
           media: envelope.media,
+          reason: envelope.reason,
           patientWaId: patientOf(type, envelope),
           lastMessage: lastMessageOf(envelope),
         })
@@ -358,6 +368,7 @@ function patientOf(type, e) {
   if (type === 'lead.hot') return e.lead?.patientWaId || subjectWaId(e.conversationId);
   if (type === 'handoff.requested') return e.handoff?.patientWaId || e.patientWaId || subjectWaId(e.conversationId);
   if (type === 'media.received') return e.patientWaId || subjectWaId(e.conversationId);
+  if (type === 'admin.notify') return e.patientWaId || subjectWaId(e.conversationId);
   return e.patientWaId || null;
 }
 
