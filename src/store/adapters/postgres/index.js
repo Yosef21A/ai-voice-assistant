@@ -299,6 +299,48 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
       );
       return row2obj(rows[0]);
     },
+    // Deduped hot-lead capture (P2-C): at most ONE open lead per conversation.
+    async upsertOpen(tenantId, data = {}) {
+      const conv = data.conversationId ?? null;
+      if (conv) {
+        const { rows: ex } = await q(
+          `SELECT * FROM leads WHERE tenant_id = $1 AND conversation_id = $2
+             AND status IN ('new','contacted','quoted','negotiating')
+           ORDER BY created_at DESC LIMIT 1`,
+          [tenantId, conv]
+        );
+        if (ex[0]) {
+          const cur = row2obj(ex[0]);
+          const details = { ...(cur.details || {}), ...(data.details || {}) };
+          const { rows } = await q(
+            `UPDATE leads SET procedure = COALESCE($3, procedure),
+               origin_country = COALESCE($4, origin_country), details = $5::jsonb
+             WHERE tenant_id = $1 AND id = $2 RETURNING *`,
+            [tenantId, cur.id, data.procedure ?? null, data.originCountry ?? null, JSON.stringify(details)]
+          );
+          return row2obj(rows[0]);
+        }
+      }
+      return this.create(tenantId, data);
+    },
+    // Staff edits (assignee/value/notes/status/details).
+    async update(tenantId, id, patch = {}) {
+      const cols = { status: 'status', assignee: 'assignee', value: 'value', notes: 'notes', details: 'details' };
+      const sets = [];
+      const params = [tenantId, id];
+      for (const [k, c] of Object.entries(cols)) {
+        if (!(k in patch)) continue;
+        const jsonb = k === 'notes' || k === 'details';
+        params.push(jsonb ? JSON.stringify(patch[k]) : patch[k]);
+        sets.push(`${c} = $${params.length}${jsonb ? '::jsonb' : ''}`);
+      }
+      if (!sets.length) return this.get(tenantId, id);
+      const { rows } = await q(
+        `UPDATE leads SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = $2 RETURNING *`,
+        params
+      );
+      return row2obj(rows[0]);
+    },
   };
 
   // "Bot didn't know" queue (P2-B) — one row per (tenant, normalized question);

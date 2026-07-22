@@ -39,6 +39,7 @@ export const EVENT_TYPES = Object.freeze([
   'appointment.updated',
   'handoff.requested',
   'lead.hot',
+  'lead.updated',
   'emergency.detected',
   'media.received',
   'kb.unanswered',

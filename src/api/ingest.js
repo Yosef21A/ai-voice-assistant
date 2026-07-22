@@ -192,6 +192,26 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
     }
   }
 
+  // Persist the hot lead (P2-C) — the money pipeline. analyzeInbound emits
+  // lead.hot every hot turn AND already deduped the alert; here we upsert ONE
+  // open lead per conversation so the dashboard kanban has a durable row.
+  // Field-map deliberately: bus `country` → originCountry column; reason +
+  // snippet have no column so they ride in `details`. Best-effort — a store
+  // failure must never break the patient's turn.
+  if (analysis.lead) {
+    try {
+      await store.leads.upsertOpen(tenantId, {
+        conversationId,
+        patientWaId: analysis.lead.patientWaId ?? inbound.from,
+        procedure: analysis.lead.procedure ?? null,
+        originCountry: analysis.lead.country ?? null,
+        details: { reason: analysis.lead.reason ?? null, snippet: analysis.lead.snippet ?? null },
+      });
+    } catch {
+      /* the leads pipeline must never break the turn */
+    }
+  }
+
   if (out.appointment) {
     bus.publish('appointment.created', { tenantId, conversationId, appointment: out.appointment });
   }

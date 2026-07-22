@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { LEAD_OPEN as LEAD_OPEN_STATUS } from '../../../leads/status.js';
 
 const COLLECTIONS = [
   'patients', 'conversations', 'messages', 'appointments',
@@ -352,6 +353,47 @@ export function createJsonStore({
       const l = db.leads.find((x) => x.id === id && x.tenantId === tenantId);
       if (!l) return null;
       l.status = status;
+      l.updatedAt = now();
+      persist('leads');
+      return l;
+    },
+    // Deduped hot-lead capture (P2-C): at most ONE open lead per conversation.
+    // A re-inquiry after a terminal status (booked/arrived/lost) starts fresh.
+    async upsertOpen(tenantId, data = {}) {
+      const conv = data.conversationId ?? null;
+      let lead = conv
+        ? db.leads.find(
+            (l) => l.tenantId === tenantId && l.conversationId === conv && LEAD_OPEN_STATUS.has(l.status)
+          )
+        : null;
+      if (lead) {
+        if (data.procedure) lead.procedure = data.procedure;
+        if (data.originCountry) lead.originCountry = data.originCountry;
+        lead.details = { ...(lead.details || {}), ...(data.details || {}) };
+        lead.updatedAt = now();
+        persist('leads');
+        return lead;
+      }
+      lead = {
+        ...data,
+        id: data.id || randomUUID(),
+        tenantId,
+        status: data.status || 'new',
+        details: data.details ?? {},
+        createdAt: data.createdAt || now(),
+        updatedAt: now(),
+      };
+      db.leads.push(lead);
+      persist('leads');
+      return lead;
+    },
+    // Staff edits (status handled by updateStatus; here: assignee/value/notes).
+    async update(tenantId, id, patch = {}) {
+      const l = db.leads.find((x) => x.id === id && x.tenantId === tenantId);
+      if (!l) return null;
+      for (const k of ['status', 'assignee', 'value', 'notes', 'details']) {
+        if (k in patch) l[k] = patch[k];
+      }
       l.updatedAt = now();
       persist('leads');
       return l;

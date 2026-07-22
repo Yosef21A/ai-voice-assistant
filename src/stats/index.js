@@ -23,6 +23,8 @@
 //   • "bookings" (digest) === funnel.bookingConfirmed (dashboard): appointments
 //     CREATED in-window with status !== 'cancelled'.
 
+import { LEAD_STATUSES, LEAD_WON as LEAD_WON_STATUS } from '../leads/status.js';
+
 const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const QUESTION_INTENTS = new Set(['faq', 'unknown', 'pricing_quote', 'travel_help']);
 
@@ -299,6 +301,21 @@ export function computeAnalytics(storeData = {}, range = {}) {
   // a queue size, deliberately NOT range-filtered.
   const unansweredNew = (storeData.unanswered || []).filter((u) => u.status === 'new').length;
 
+  // Leads pipeline (P2-C): current snapshot (NOT range-filtered — a pipeline is
+  // a live board), sandbox excluded. pipelineValue sums the staff-entered deal
+  // values; conversion = won (booked+arrived) / total.
+  const pipelineLeads = (storeData.leads || []).filter((l) => !isSandboxWaId(l.patientWaId));
+  const leadsByStatus = Object.fromEntries(LEAD_STATUSES.map((s) => [s, 0]));
+  let pipelineValue = 0;
+  let wonLeads = 0;
+  for (const l of pipelineLeads) {
+    if (l.status in leadsByStatus) leadsByStatus[l.status] += 1;
+    if (LEAD_WON_STATUS.has(l.status)) wonLeads += 1;
+    const v = Number(l.value);
+    if (Number.isFinite(v)) pipelineValue += v;
+  }
+  const leadConversion = pipelineLeads.length ? wonLeads / pipelineLeads.length : null;
+
   return {
     ...digest,
     tz,
@@ -313,6 +330,10 @@ export function computeAnalytics(storeData = {}, range = {}) {
     unknownRate,
     funnel,
     apptStatuses,
+    leadsByStatus,
+    pipelineValue,
+    pipelineOpen: pipelineLeads.length - (leadsByStatus.lost || 0) - wonLeads,
+    leadConversion,
     workingHours: cfg.workingHours || null, // lets the UI draw the after-hours band
   };
 }

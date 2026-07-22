@@ -6,6 +6,7 @@ import { tenantRouter } from './tenant.js';
 import { kbRouter } from './kb.js';
 import { conversationsRouter } from './conversations.js';
 import { appointmentsRouter } from './appointments.js';
+import { leadsRouter } from './leads.js';
 import { sandboxRouter } from './sandbox.js';
 import { statsRouter } from './stats.js';
 import { mediaRouter } from './media.js';
@@ -23,6 +24,7 @@ export function createApiRouter({ store, engine, sender, bus, config, auth, prov
   router.use('/kb', kbRouter({ store, provider, bus }));
   router.use('/conversations', conversationsRouter({ store, sender, bus }));
   router.use('/appointments', appointmentsRouter({ store, bus }));
+  router.use('/leads', leadsRouter({ store, bus }));
   router.use('/sandbox', sandboxRouter({ store, engine }));
   router.use('/stats', statsRouter({ store }));
   router.use('/media', mediaRouter({ store, config }));
