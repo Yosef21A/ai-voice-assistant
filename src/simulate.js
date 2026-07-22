@@ -12,7 +12,14 @@ import { isWithinWorkingHours } from './store/availability.js';
 import { analyzeInbound } from './notifications/index.js';
 
 const base = getConfig();
-const config = { ...base, runtimeDir: path.join(base.dataDir, 'runtime-sim') };
+// The demo is byte-for-byte reproducible: always the classic deterministic
+// flow, even when a real .env carries a Gemini key (llm mode is webhook-only
+// until you opt in via the server).
+const config = {
+  ...base,
+  runtimeDir: path.join(base.dataDir, 'runtime-sim'),
+  conversationMode: 'classic',
+};
 const store = createStore({
   clinicsFile: config.clinicsFile,
   runtimeDir: config.runtimeDir,

@@ -13,34 +13,38 @@
       },
       "handoff": {
         "name": "Coordination patients internationaux",
-        "phone": "+216 20 111 222"
+        "phone": "+216 29 496 305"
+      },
+      "notifications": {
+        "recipients": ["21629496305"],
+        "lang": "fr"
       },
       "languages": ["ar", "fr", "en"],
       "specialties": [
         {
           "id": "cardiology",
           "labels": { "ar": "أمراض القلب", "fr": "Cardiologie", "en": "Cardiology" },
-          "synonyms": ["heart", "cardio", "cardiaque", "قلب", "cardiologie"]
+          "synonyms": ["heart", "cardio", "cardiaque", "قلب", "قلبي", "coeur", "cardiologie"]
         },
         {
           "id": "orthopedics",
           "labels": { "ar": "جراحة العظام", "fr": "Orthopédie", "en": "Orthopedics" },
-          "synonyms": ["ortho", "bones", "knee", "hip", "عظام", "orthopedie", "prothese"]
+          "synonyms": ["ortho", "bones", "knee", "hip", "عظام", "مفاصل", "ركبة", "genou", "orthopedie", "prothese"]
         },
         {
           "id": "cosmetic_surgery",
           "labels": { "ar": "جراحة التجميل", "fr": "Chirurgie esthétique", "en": "Cosmetic surgery" },
-          "synonyms": ["cosmetic", "plastic", "esthetique", "esthetic", "تجميل", "rhinoplastie", "liposuccion"]
+          "synonyms": ["cosmetic", "plastic", "esthetique", "esthetic", "تجميل", "نحافة", "تنحيف", "أنف", "انف", "rhino", "nez", "rhinoplastie", "liposuccion"]
         },
         {
           "id": "dental",
           "labels": { "ar": "طب الأسنان", "fr": "Dentaire", "en": "Dental" },
-          "synonyms": ["teeth", "tooth", "dentist", "dentaire", "أسنان", "implant", "hollywood smile"]
+          "synonyms": ["teeth", "tooth", "dentist", "dentiste", "dentaire", "أسنان", "سنان", "سنين", "ضروس", "ضرس", "implant", "hollywood smile"]
         },
         {
           "id": "fertility",
           "labels": { "ar": "علاج العقم", "fr": "Fertilité (PMA)", "en": "Fertility (IVF)" },
-          "synonyms": ["ivf", "fiv", "pma", "fertilite", "عقم", "أطفال الأنابيب", "insemination"]
+          "synonyms": ["ivf", "fiv", "pma", "fertilite", "عقم", "إنجاب", "انجاب", "أطفال الأنابيب", "اطفال انابيب", "أنابيب", "insemination"]
         }
       ],
       "workingHours": {
@@ -134,12 +138,12 @@
         {
           "id": "dental",
           "labels": { "ar": "طب الأسنان", "fr": "Dentaire", "en": "Dental" },
-          "synonyms": ["teeth", "tooth", "dentist", "dentaire", "أسنان", "implant", "couronne", "hollywood smile"]
+          "synonyms": ["teeth", "tooth", "dentist", "dentiste", "dentaire", "أسنان", "سنان", "سنين", "ضروس", "ضرس", "implant", "couronne", "hollywood smile"]
         },
         {
           "id": "cosmetic_surgery",
           "labels": { "ar": "جراحة التجميل", "fr": "Chirurgie esthétique", "en": "Cosmetic surgery" },
-          "synonyms": ["cosmetic", "plastic", "esthetique", "esthetic", "تجميل", "rhinoplastie", "lifting"]
+          "synonyms": ["cosmetic", "plastic", "esthetique", "esthetic", "تجميل", "نحافة", "أنف", "انف", "rhino", "nez", "rhinoplastie", "lifting"]
         },
         {
           "id": "ophthalmology",

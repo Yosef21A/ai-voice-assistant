@@ -12,7 +12,7 @@ import { getConfig } from '../src/config.js';
 import { createApp } from '../src/server.js';
 import { createBus } from '../src/events/bus.js';
 
-export function makeTestApp(overrides = {}) {
+export function makeTestApp(overrides = {}, appOpts = {}) {
   const runtimeDir = path.join(os.tmpdir(), `omen-api-${randomUUID()}`);
   const config = getConfig({
     runtimeDir,
@@ -21,14 +21,18 @@ export function makeTestApp(overrides = {}) {
     cookieSecure: false,
     sseHeartbeatMs: 40,
     // Hermetic by construction: never let a developer's .env WHATSAPP_TOKEN or
-    // LLM keys flip a test app onto real transports/providers.
+    // LLM keys flip a test app onto real transports/providers, and never let a
+    // machine-global CONVERSATION_MODE turn LLM dialogue on under test.
     whatsappTransport: 'mock',
     anthropicApiKey: '',
     geminiApiKey: '',
+    conversationMode: 'classic',
     ...overrides,
   });
   const bus = createBus();
-  const composed = createApp({ config, bus });
+  // appOpts forwards createApp injection points (provider, sender, notifier, …)
+  // — config overrides alone can't reach them (P2-HUMANIZE fake providers).
+  const composed = createApp({ config, bus, ...appOpts });
   return { ...composed, runtimeDir };
 }
 

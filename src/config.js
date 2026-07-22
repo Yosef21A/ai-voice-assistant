@@ -52,6 +52,16 @@ export function getConfig(overrides = {}) {
     geminiApiKey: process.env.GEMINI_API_KEY || '',
     geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     geminiTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 8000,
+    // ── conversation mode (P2-HUMANIZE) ────────────────────────────────────
+    // 'llm'     = LLM-led dialogue (Gemini structured output) with the
+    //             deterministic executor + guardrails.
+    // 'classic' = the scripted state machine (offline demo + automatic
+    //             fallback whenever the LLM times out or errors).
+    // Default: llm when a Gemini key is present, else classic. The engine
+    // additionally requires the provider to support structured output, so a
+    // mock provider always runs classic regardless of this flag.
+    conversationMode:
+      process.env.CONVERSATION_MODE || (process.env.GEMINI_API_KEY ? 'llm' : 'classic'),
     // Outbound WhatsApp transport: 'real' | 'mock' | '' (auto: token ⇒ real).
     // Tests pin 'mock' so a developer's .env token can never leak network calls.
     whatsappTransport: process.env.WHATSAPP_TRANSPORT || '',

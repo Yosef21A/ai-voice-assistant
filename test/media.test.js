@@ -13,9 +13,10 @@ import { ingestInbound } from '../src/api/ingest.js';
 import { makeTestApp, listen, request, setupOwner } from '../test-helpers/client.js';
 
 const A = 'el-amen-sousse';
-const PNID = JSON.parse(fs.readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8'))
-  .clinics.find((c) => c.id === A).whatsapp.phoneNumberId;
-const OWNER = '21620111222'; // El Amen handoff phone, normalized
+const EL = JSON.parse(fs.readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8'))
+  .clinics.find((c) => c.id === A);
+const PNID = EL.whatsapp.phoneNumberId;
+const OWNER = String(EL.notifications?.recipients?.[0] || EL.handoff.phone).replace(/\D/g, '');
 const TENANT = { id: A, whatsapp: { phoneNumberId: PNID } };
 
 const tmpMediaDir = () => path.join(os.tmpdir(), `omen-media-${randomUUID()}`);

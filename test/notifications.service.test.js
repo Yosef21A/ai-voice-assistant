@@ -24,6 +24,9 @@ import { analyzeInbound } from '../src/notifications/pipeline.js';
 const CLINICS = JSON.parse(readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8')).clinics;
 const EL = CLINICS.find((c) => c.id === 'el-amen-sousse');
 const TENANT_ID = EL.id;
+// Default owner recipient, derived from the seed (notifications.recipients wins
+// over handoff.phone in resolveRecipients) so the test follows the registry.
+const OWNER = String(EL.notifications?.recipients?.[0] || EL.handoff.phone).replace(/\D/g, '');
 
 // ── test doubles ───────────────────────────────────────────────────────────────
 function makeBus() {
@@ -98,7 +101,7 @@ const clockOf = (ref) => () => ref.now;
 test('resolveRecipients — defaults to escalation/owner number when no prefs', () => {
   const rcpts = resolveRecipients(makeTenantRecord(), [], { aliases: ['booking'] });
   assert.equal(rcpts.length, 1);
-  assert.equal(rcpts[0].recipient, '21620111222'); // +216 20 111 222 normalized
+  assert.equal(rcpts[0].recipient, OWNER); // seed notifications.recipients[0], normalized
   assert.deepEqual(rcpts[0].events, {}); // empty ⇒ all events on
 });
 
@@ -127,7 +130,7 @@ test('booking event → default recipient gets a formatted alert + audit event',
   await svc.settled();
 
   assert.equal(sender.sent.length, 1);
-  assert.equal(sender.sent[0].to, '21620111222');
+  assert.equal(sender.sent[0].to, OWNER);
   assert.equal(sender.sent[0].from, EL.whatsapp.phoneNumberId); // sent FROM the clinic number
   assert.match(sender.sent[0].text, /Nouvelle réservation/);
   assert.match(sender.sent[0].text, /EAS-001/);
