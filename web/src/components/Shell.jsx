@@ -8,10 +8,11 @@ import { useI18n } from '../context/I18nContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useEventStream, useStreamEvent } from '../context/EventStreamContext.jsx';
 import { useRoute } from '../router.js';
-import { Inbox as InboxIcon, Calendar, Book, Chart, Settings as SettingsIcon, Logout, Wand, glyph } from './icons.jsx';
+import { Inbox as InboxIcon, Calendar, Book, Chart, Plane, Settings as SettingsIcon, Logout, Wand, glyph } from './icons.jsx';
 import { initials } from '../lib.js';
 import { Inbox } from '../screens/Inbox.jsx';
 import { Appointments } from '../screens/Appointments.jsx';
+import { Leads } from '../screens/Leads.jsx';
 import { Knowledge } from '../screens/Knowledge.jsx';
 import { Stats } from '../screens/Stats.jsx';
 import { Settings } from '../screens/Settings.jsx';
@@ -19,6 +20,7 @@ import { Wizard } from '../screens/Wizard.jsx';
 
 const NAV = [
   { key: 'inbox', icon: InboxIcon },
+  { key: 'leads', icon: Plane },
   { key: 'appointments', icon: Calendar },
   { key: 'stats', icon: Chart },
   { key: 'knowledge', icon: Book },
@@ -27,6 +29,7 @@ const NAV = [
 
 function screenFor(top) {
   switch (top) {
+    case 'leads': return <Leads />;
     case 'appointments': return <Appointments />;
     case 'stats': return <Stats />;
     case 'knowledge': return <Knowledge />;

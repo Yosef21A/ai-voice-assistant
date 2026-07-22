@@ -88,6 +88,10 @@ export const api = {
   // ── appointments ────────────────────────────────────────────────────────────
   listAppointments: (params) => request('GET', `/api/appointments${qs(params)}`),
   setAppointmentStatus: (id, status) => request('POST', `/api/appointments/${encodeURIComponent(id)}/status`, { status }),
+  // ── leads pipeline (P2-C) ───────────────────────────────────────────────────
+  listLeads: () => request('GET', '/api/leads'),
+  setLeadStatus: (id, status) => request('POST', `/api/leads/${encodeURIComponent(id)}/status`, { status }),
+  updateLead: (id, patch) => request('PATCH', `/api/leads/${encodeURIComponent(id)}`, patch),
   // ── sandbox test-drive ──────────────────────────────────────────────────────
   sandboxMessage: (text) => request('POST', '/api/sandbox/message', { text }),
   sandboxReset: () => request('DELETE', '/api/sandbox'),
