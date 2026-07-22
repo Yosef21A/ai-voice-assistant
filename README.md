@@ -218,8 +218,42 @@ message at a time and watch the flow advance to a confirmed appointment.
 | cancel          | إلغاء · annuler · cancel                                |
 
 Language is chosen per message (Arabic script → `ar`; French accents/keywords →
-`fr`; English keywords → `en`) and **remembered** on the conversation, so short
-answers like a name or a phone number stay in the right language.
+`fr`; English keywords → `en`; Arabizi like "aslema"/"na7eb na7jez" → `ar`) and
+**remembered** on the conversation, so short answers like a name or a phone
+number stay in the right language.
+
+---
+
+## Conversation modes (P2-HUMANIZE)
+
+Two dialogue engines share one contract, switched by `CONVERSATION_MODE`
+(per-tenant override: `conversationMode` in `data/clinics.json`):
+
+- **`llm`** (default when `GEMINI_API_KEY` is set) — LLM-led dialogue: Gemini
+  plans every turn via structured output (`responseSchema`), and a
+  **deterministic executor** owns every write. The executor re-parses
+  date/times from the patient's own words (never trusts LLM datetimes and
+  always discloses adjustments), validates specialties against the tenant
+  registry, renders recap/booked messages from templates, post-filters the
+  prose (no diagnosis, no invented prices, no outcome promises), honors
+  refusal and handoff unconditionally, captures specialty gaps as leads with
+  an owner alert, and never repeats itself (regenerate once, then a variation
+  bank). Slots fill in any order, several per message; digressions are
+  answered and bridged back; handoffs keep the patient in the WhatsApp chat.
+- **`classic`** — the scripted state machine. Always used by
+  `npm run simulate` (offline, reproducible) and as the **automatic fallback**
+  whenever the LLM times out (`GEMINI_TIMEOUT_MS`, 8s) or errors. The bot
+  never goes silent; fallbacks are audited as `llm.fallback` events.
+
+WhatsApp niceties ship with llm mode: mark-as-read + typing indicator on every
+inbound, humanized per-bubble delays (real transport only), and replies split
+into at most two bubbles. Prompt rationale + per-tenant tuning:
+`docs/PROMPT-NOTES.md`.
+
+> Seed note: El Amen's `handoff.phone` / `notifications.recipients` point at
+> the allow-listed test owner number while the Meta test number is in use
+> (recipients outside the allow-list fail with `#131030`). Real clinics get
+> their own numbers at onboarding.
 
 ---
 
@@ -237,7 +271,10 @@ mock mode and prints outbound replies to the console.
 | `WHATSAPP_APP_SECRET`      | When set, `POST /webhook` enforces the HMAC check    |
 | `APP_SECRET`               | Signs dashboard session cookies — set a strong value in prod (distinct from `WHATSAPP_APP_SECRET`) |
 | `DATABASE_URL`             | When set, the API/scripts target Postgres (else the JSON store) |
-| `ANTHROPIC_API_KEY`        | When set, free-form replies upgrade to Claude        |
+| `GEMINI_API_KEY`           | Enables Gemini (wins over Anthropic) + llm dialogue mode |
+| `GEMINI_MODEL` / `GEMINI_TIMEOUT_MS` | Default `gemini-2.5-flash` / `8000` ms       |
+| `CONVERSATION_MODE`        | `llm` \| `classic` — see “Conversation modes” above  |
+| `ANTHROPIC_API_KEY`        | When set (and no Gemini key), free-form replies upgrade to Claude |
 | `ANTHROPIC_MODEL`          | Defaults to `claude-3-5-haiku-latest`               |
 
 ---
