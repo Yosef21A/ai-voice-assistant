@@ -70,8 +70,8 @@ export function Shell() {
 
   // Live "to train" badge on the Knowledge nav item (P2-B).
   const refreshUnanswered = useCallback(() => {
-    api.listUnanswered()
-      .then(({ unanswered: rows }) => setUnanswered(rows.length || 0))
+    api.countUnanswered()
+      .then(({ count }) => setUnanswered(count || 0))
       .catch(() => {});
   }, []);
   useEffect(() => {

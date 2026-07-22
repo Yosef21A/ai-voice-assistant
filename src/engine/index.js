@@ -161,6 +161,9 @@ function handlePricing(ctx) {
   return {
     intent: 'pricing_quote',
     replies: [t(lang, 'pricingList', { clinic: clinic.name, lines })],
+    // A pricing ask answered with an EMPTY list is a didn't-know turn: the
+    // clinic skipped the pricing step, and the owner should hear about it.
+    knew: lines.length > 0,
   };
 }
 
@@ -179,6 +182,8 @@ function handleTravel(ctx) {
         visa: tr.visa || '-',
       }),
     ],
+    // All-placeholder travel info (module unconfigured) is a didn't-know turn.
+    knew: Object.keys(tr).length > 0,
   };
 }
 

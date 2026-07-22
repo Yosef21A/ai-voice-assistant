@@ -28,7 +28,13 @@ const COLLECTIONS = [
  * @param {boolean} [opts.reset]     wipe the runtime dir first (tests/simulate)
  * @param {number} [opts.eventsMax]  ring-buffer cap on the events audit log
  */
-export function createJsonStore({ clinicsFile, runtimeDir, reset = false, eventsMax = 10000 } = {}) {
+export function createJsonStore({
+  clinicsFile,
+  runtimeDir,
+  reset = false,
+  eventsMax = 10000,
+  unansweredMax = 500,
+} = {}) {
   if (!runtimeDir) throw new Error('createJsonStore: runtimeDir is required');
   mkdirSync(runtimeDir, { recursive: true });
 
@@ -391,10 +397,11 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
   const unanswered = {
     async upsertByNorm(tenantId, { norm, question, lang, conversationId } = {}) {
       if (!norm) return null;
+      norm = String(norm).slice(0, 200); // patient text is untrusted — cap key size
       let row = db.unanswered.find((u) => u.tenantId === tenantId && u.norm === norm);
       if (row) {
         row.count = (row.count || 1) + 1;
-        row.question = question || row.question;
+        row.question = String(question || row.question).slice(0, 300);
         row.lang = lang ?? row.lang;
         row.conversationId = conversationId ?? row.conversationId;
         row.updatedAt = now();
@@ -403,7 +410,7 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
           id: randomUUID(),
           tenantId,
           norm,
-          question: question || norm,
+          question: String(question || norm).slice(0, 300),
           lang: lang ?? null,
           conversationId: conversationId ?? null,
           count: 1,
@@ -412,6 +419,23 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
           updatedAt: now(),
         };
         db.unanswered.push(row);
+        // Ring cap per tenant (like events): every capture rewrites the whole
+        // file synchronously, so a chatty tenant must not grow it unbounded.
+        // Oldest TRIAGED rows go first — untriaged questions are what the
+        // owner has not seen yet.
+        const rows = db.unanswered.filter((u) => u.tenantId === tenantId);
+        if (rows.length > unansweredMax) {
+          const overflow = rows.length - unansweredMax;
+          const byAge = rows
+            .slice()
+            .sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
+          const victims = [
+            ...byAge.filter((u) => u.status !== 'new'),
+            ...byAge.filter((u) => u.status === 'new'),
+          ].slice(0, overflow);
+          const ids = new Set(victims.map((v) => v.id));
+          db.unanswered = db.unanswered.filter((u) => !ids.has(u.id));
+        }
       }
       persist('unanswered');
       return row;

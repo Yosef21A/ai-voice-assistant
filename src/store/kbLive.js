@@ -11,11 +11,32 @@
 // and repeated merges never duplicate.
 import { normalizeQuestion } from '../stats/index.js';
 
+// Function words in the corridor's three languages. Keeping them as matchFaq
+// keywords lets a trained entry hijack ANY question that contains 'est'/'que'/
+// 'vous' (matchFaq scores by substring, and KB entries win ties), which both
+// serves wrong answers AND stops genuinely-unknown questions from ever being
+// captured again (the loop silently self-poisons). Content words only.
+const STOPWORDS = new Set([
+  // fr
+  'est', 'que', 'qui', 'quoi', 'vous', 'nous', 'les', 'des', 'une', 'ils', 'elle', 'elles',
+  'pour', 'avec', 'dans', 'sur', 'par', 'pas', 'peux', 'peut', 'faites', 'faire', 'avez',
+  'etes', 'votre', 'vos', 'notre', 'nos', 'mon', 'mes', 'moi', 'toi', 'ton', 'tes', 'ceci',
+  'cela', 'comment', 'combien', 'quand', 'quel', 'quelle', 'quels', 'quelles', 'chez', 'aussi',
+  // en
+  'the', 'you', 'your', 'yours', 'have', 'has', 'are', 'was', 'does', 'did', 'can', 'could',
+  'what', 'how', 'when', 'where', 'who', 'why', 'much', 'many', 'with', 'for', 'and', 'this',
+  'that', 'there', 'about', 'any',
+  // ar/tn (post-normalizeQuestion: lowercased, tashkeel stripped)
+  'ماذا', 'كيف', 'متى', 'اين', 'أين', 'على', 'انا', 'أنا', 'انت', 'أنت', 'انتم', 'هذا',
+  'هذه', 'ذلك', 'عند', 'عندكم', 'عندك', 'لديكم', 'قداش', 'شنو', 'شني', 'علاش', 'وين',
+  'كيفاش', 'نجم', 'ننجم', 'تنجم', 'نجمت', 'باش', 'الي', 'اللي', 'ماهو', 'ماهي',
+]);
+
 /** Derive matchFaq keywords from a question when the entry carries none. */
 export function deriveKeywords(question) {
   return normalizeQuestion(question)
     .split(' ')
-    .filter((w) => w.length >= 3)
+    .filter((w) => w.length >= 3 && !STOPWORDS.has(w))
     .slice(0, 8);
 }
 

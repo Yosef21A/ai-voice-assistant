@@ -17,7 +17,7 @@ export function Knowledge() {
   const timerRef = useRef(null);
 
   const refresh = useCallback(() => {
-    api.listUnanswered().then(({ unanswered }) => setPending(unanswered.length)).catch(() => {});
+    api.countUnanswered().then(({ count }) => setPending(count || 0)).catch(() => {});
   }, []);
   useEffect(() => {
     refresh();

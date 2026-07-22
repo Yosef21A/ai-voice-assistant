@@ -4,6 +4,7 @@
 // clinic so the running engine reflects the change immediately (same store).
 import express from 'express';
 import { asyncHandler } from './http.js';
+import { mergeTenantKb } from '../store/kbLive.js';
 
 const LANGS = new Set(['ar', 'fr', 'en']);
 const TONES = new Set(['professional', 'warm']);
@@ -105,6 +106,13 @@ export function tenantRouter({ store, requireRole }) {
         config.notifications = { ...(config.notifications || {}), ...body.notifications };
       }
 
+      // The engine's merged FAQ state must NEVER be persisted or restored via
+      // Settings: kbLive rebuilds clinic.faq from _baseFaq + active kb_entries.
+      // A stale snapshot here would revert trained answers and resurrect
+      // deleted ones on every save (and permanently bloat tenants.json).
+      delete config.faq;
+      delete config._baseFaq;
+
       const saved = await store.tenants.upsert({
         id: req.tenantId,
         phoneNumberId: current.phoneNumberId,
@@ -119,9 +127,12 @@ export function tenantRouter({ store, requireRole }) {
       });
 
       // Live update for the engine, which still reads the legacy clinic object.
+      // Re-merge the KB afterwards so the served FAQ always reflects base seed
+      // + current active entries, whatever this save touched.
       if (typeof store.getClinicById === 'function') {
         const live = store.getClinicById(req.tenantId);
         if (live) Object.assign(live, config);
+        await mergeTenantKb(store, req.tenantId);
       }
 
       res.json({ tenant: publicTenant(saved) });

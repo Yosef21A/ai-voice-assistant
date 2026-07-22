@@ -212,3 +212,186 @@ test('training — digest gains the learned line; analytics exposes unansweredNe
   );
   assert.equal(analytics.unansweredNew, 2);
 });
+
+// ── review hardening regressions (13 confirmed findings) ─────────────────────
+test('training — trained answers never hijack unrelated questions (stopword keywords)', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  await app.kbReady;
+  const server = await listen(app.app);
+  t.after(() => {
+    server.closeAllConnections?.();
+    return new Promise((r) => server.close(r));
+  });
+  const { cookie } = await setupOwner(server, { tenantId: A, email: `o-${randomUUID()}@x.tn` });
+
+  // Stopwords are filtered out of derived keywords entirely.
+  const kws = deriveKeywords(QUESTION);
+  for (const stop of ['est', 'que', 'vous', 'faites']) {
+    assert.ok(!kws.includes(stop), `'${stop}' must not become a keyword`);
+  }
+  assert.ok(kws.includes('blanchiment') && kws.includes('laser'), 'content words kept');
+
+  // Train the laser answer, then ask an UNRELATED payment question: the seed
+  // payment FAQ must win (pre-fix: 'est'+'que' tied it and KB-first hijacked).
+  await feed(app, '218951112221', QUESTION);
+  const [row] = await app.store.unanswered.list(A, { status: 'new' });
+  const ans = await request(server, 'POST', `/api/kb/unanswered/${row.id}/answer`, {
+    cookie,
+    body: { answer: { fr: TRAINED } },
+  });
+  assert.equal(ans.status, 200);
+
+  const pay = await feed(app, '218951112222', 'Est-ce que je peux payer en cash ?');
+  const payReply = (pay.out.replies || []).join(' ');
+  assert.ok(!payReply.includes('blanchiment'), 'payment question NOT answered with the laser entry');
+
+  // And a genuinely-unknown French question is still captured (no starvation).
+  await feed(app, '218951112223', 'Est-ce que vous proposez des séances de yoga prénatal ?');
+  const rows = await app.store.unanswered.list(A, { status: 'new' });
+  assert.ok(
+    rows.some((r) => r.question.includes('yoga')),
+    'unknown question still reaches the training queue after training an answer'
+  );
+});
+
+test('training — a Settings save never reverts trained answers nor resurrects deleted ones', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  await app.kbReady;
+  const server = await listen(app.app);
+  t.after(() => {
+    server.closeAllConnections?.();
+    return new Promise((r) => server.close(r));
+  });
+  const { cookie } = await setupOwner(server, { tenantId: A, email: `o-${randomUUID()}@x.tn` });
+
+  // Settings save #1 (pre-fix this snapshotted the merged faq into tenants.json).
+  assert.equal((await request(server, 'PUT', '/api/tenant', { cookie, body: { city: 'Sousse' } })).status, 200);
+
+  // Train an answer, then delete the KB entry, then save Settings again.
+  await feed(app, '218952223331', QUESTION);
+  const [row] = await app.store.unanswered.list(A, { status: 'new' });
+  const ans = await request(server, 'POST', `/api/kb/unanswered/${row.id}/answer`, {
+    cookie,
+    body: { answer: { fr: TRAINED } },
+  });
+  assert.equal(ans.status, 200);
+  const trainedKey = ans.body.entry.key;
+
+  const del = await request(server, 'DELETE', `/api/kb/${encodeURIComponent(trainedKey)}`, { cookie });
+  assert.equal(del.status, 200);
+
+  assert.equal((await request(server, 'PUT', '/api/tenant', { cookie, body: { city: 'Sousse 2' } })).status, 200);
+
+  // The deleted (archived) entry must NOT be served after the settings save.
+  const live = app.store.getClinicById(A);
+  assert.ok(!live.faq.some((f) => f.id === `kb:${trainedKey}`), 'archived entry not resurrected');
+  // And the persisted tenant config carries no merge state.
+  const tenant = await app.store.tenants.getById(A);
+  assert.equal(tenant.config.faq, undefined, 'merged faq never persisted');
+  assert.equal(tenant.config._baseFaq, undefined, 'base snapshot never persisted');
+
+  // Train ANOTHER answer after a save: still served (merge survives assigns).
+  await feed(app, '218952223332', 'Proposez-vous des consultations en visio ?');
+  const rows = await app.store.unanswered.list(A, { status: 'new' });
+  const visio = rows.find((r) => r.question.includes('visio'));
+  const ans2 = await request(server, 'POST', `/api/kb/unanswered/${visio.id}/answer`, {
+    cookie,
+    body: { answer: { fr: 'Oui, sur rendez-vous — demandez le lien visio à la réception.' } },
+  });
+  assert.equal(ans2.status, 200);
+  assert.equal((await request(server, 'PUT', '/api/tenant', { cookie, body: { city: 'Sousse 3' } })).status, 200);
+  const after = await feed(app, '218952223333', 'Proposez-vous des consultations en visio ?');
+  assert.ok((after.out.replies || []).join(' ').includes('visio'), 'trained answer survives Settings saves');
+});
+
+test('training — unanswered ring cap drops triaged rows first; norm/question capped', async () => {
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { createStore } = await import('../src/store/index.js');
+  const { getConfig } = await import('../src/config.js');
+  const store = createStore({
+    clinicsFile: getConfig().clinicsFile,
+    runtimeDir: path.join(os.tmpdir(), `omen-unanswered-cap-${randomUUID()}`),
+    reset: true,
+    unansweredMax: 3,
+  });
+  const r1 = await store.unanswered.upsertByNorm(A, { norm: 'q1', question: 'q1' });
+  await store.unanswered.setStatus(A, r1.id, 'dismissed'); // triaged → first victim
+  await store.unanswered.upsertByNorm(A, { norm: 'q2', question: 'q2' });
+  await store.unanswered.upsertByNorm(A, { norm: 'q3', question: 'q3' });
+  await store.unanswered.upsertByNorm(A, { norm: 'q4', question: 'q4' });
+  const rows = await store.unanswered.list(A, {});
+  assert.equal(rows.length, 3, 'capped at unansweredMax');
+  assert.ok(!rows.some((r) => r.norm === 'q1'), 'oldest TRIAGED row evicted first');
+  assert.ok(rows.some((r) => r.norm === 'q4'), 'newest kept');
+
+  const long = await store.unanswered.upsertByNorm(A, { norm: 'x'.repeat(999), question: 'y'.repeat(999) });
+  assert.ok(long.norm.length <= 200 && long.question.length <= 300, 'untrusted sizes capped');
+  await store.close();
+});
+
+test('training — countOnly badge path, list pagination, and collision-proof keys', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  await app.kbReady;
+  const server = await listen(app.app);
+  t.after(() => {
+    server.closeAllConnections?.();
+    return new Promise((r) => server.close(r));
+  });
+  const { cookie } = await setupOwner(server, { tenantId: A, email: `o-${randomUUID()}@x.tn` });
+
+  // Two DIFFERENT questions engineered to share a slug.
+  await app.store.unanswered.upsertByNorm(A, { norm: 'n1', question: 'Parking gratuit ?' });
+  await app.store.unanswered.upsertByNorm(A, { norm: 'n2', question: 'Parking gratuit !!' });
+
+  const count = await request(server, 'GET', '/api/kb/unanswered?countOnly=1', { cookie });
+  assert.equal(count.status, 200);
+  assert.equal(count.body.count, 2);
+
+  const limited = await request(server, 'GET', '/api/kb/unanswered?limit=1', { cookie });
+  assert.equal(limited.body.unanswered.length, 1);
+  assert.equal(limited.body.total, 2);
+
+  const rows = await app.store.unanswered.list(A, {});
+  const k1 = await request(server, 'POST', `/api/kb/unanswered/${rows[0].id}/answer`, {
+    cookie,
+    body: { answer: { fr: 'Oui, parking gratuit devant la clinique.' } },
+  });
+  const k2 = await request(server, 'POST', `/api/kb/unanswered/${rows[1].id}/answer`, {
+    cookie,
+    body: { answer: { fr: 'Oui — même réponse, autre formulation.' } },
+  });
+  assert.equal(k1.status, 200);
+  assert.equal(k2.status, 200);
+  assert.notEqual(k1.body.entry.key, k2.body.entry.key, 'same slug never overwrites a different entry');
+});
+
+test('training — draft route validates lengths and rate-limits the paid LLM path', async (t) => {
+  const app = makeTestApp();
+  t.after(() => app.notifier.stop());
+  await app.kbReady;
+  const server = await listen(app.app);
+  t.after(() => {
+    server.closeAllConnections?.();
+    return new Promise((r) => server.close(r));
+  });
+  const { cookie } = await setupOwner(server, { tenantId: A, email: `o-${randomUUID()}@x.tn` });
+
+  const tooLong = await request(server, 'POST', '/api/kb/draft', {
+    cookie,
+    body: { question: 'q'.repeat(600), answer: { fr: 'ok' } },
+  });
+  assert.equal(tooLong.status, 400);
+
+  let last = null;
+  for (let i = 0; i < 12; i += 1) {
+    last = await request(server, 'POST', '/api/kb/draft', {
+      cookie,
+      body: { question: `Question numéro ${i} ?`, answer: { fr: 'Réponse.' } },
+    });
+  }
+  assert.equal(last.status, 429, 'draft spam throttled per tenant');
+});

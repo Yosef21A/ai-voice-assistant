@@ -17,6 +17,7 @@ export function TrainingQueue({ onTrained }) {
   const { t } = useI18n();
   const toast = useToast();
   const [rows, setRows] = useState(null);
+  const [error, setError] = useState(false);
   const [drafts, setDrafts] = useState({}); // id -> {ar,fr,en}
   const [busy, setBusy] = useState({}); // id -> 'saving' | 'drafting' | null
   const timerRef = useRef(null);
@@ -25,8 +26,11 @@ export function TrainingQueue({ onTrained }) {
     try {
       const { unanswered } = await api.listUnanswered();
       setRows(unanswered);
+      setError(false);
     } catch {
-      setRows([]);
+      // A fetch failure must NOT render the celebratory empty state.
+      setRows(null);
+      setError(true);
     }
   }, []);
   useEffect(() => {
@@ -47,7 +51,13 @@ export function TrainingQueue({ onTrained }) {
     setRowBusy(row.id, 'drafting');
     try {
       const { draft } = await api.draftKb({ question: row.question, answer: drafts[row.id] || {} });
-      setDrafts((d) => ({ ...d, [row.id]: draft }));
+      // Anything the owner typed while the draft was in flight wins over it.
+      setDrafts((d) => {
+        const typed = Object.fromEntries(
+          Object.entries(d[row.id] || {}).filter(([, v]) => v && v.trim())
+        );
+        return { ...d, [row.id]: { ...draft, ...typed } };
+      });
     } catch (e) {
       toast.err(e?.status === 400 ? t('knowledge.trainAnswerRequired') : t('toast.error'));
     } finally {
@@ -75,17 +85,25 @@ export function TrainingQueue({ onTrained }) {
   };
 
   const ignore = async (row) => {
+    if (busy[row.id]) return; // never race a save on the same row
+    setRowBusy(row.id, 'saving');
     try {
       await api.dismissUnanswered(row.id);
       setRows((r) => (r || []).filter((x) => x.id !== row.id));
       onTrained?.();
     } catch {
       toast.err(t('toast.error'));
+    } finally {
+      setRowBusy(row.id, null);
     }
   };
 
   if (rows === null) {
-    return (
+    return error ? (
+      <EmptyState icon={X} title={t('toast.error')}>
+        <button className="btn outline sm" onClick={reload}>{t('common.retry')}</button>
+      </EmptyState>
+    ) : (
       <div className="row" style={{ justifyContent: 'center', padding: 'var(--sp-7)' }}>
         <Spinner />
       </div>

@@ -20,7 +20,7 @@ export function createApiRouter({ store, engine, sender, bus, config, auth, prov
 
   router.get('/stream', streamHandler({ bus, config }));
   router.use('/tenant', tenantRouter({ store, requireRole }));
-  router.use('/kb', kbRouter({ store, provider }));
+  router.use('/kb', kbRouter({ store, provider, bus }));
   router.use('/conversations', conversationsRouter({ store, sender, bus }));
   router.use('/appointments', appointmentsRouter({ store, bus }));
   router.use('/sandbox', sandboxRouter({ store, engine }));

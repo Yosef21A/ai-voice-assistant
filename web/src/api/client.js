@@ -74,6 +74,7 @@ export const api = {
   deleteKb: (key) => request('DELETE', `/api/kb/${encodeURIComponent(key)}`),
   // ── training loop (P2-B) ───────────────────────────────────────────────────
   listUnanswered: (params) => request('GET', `/api/kb/unanswered${qs(params)}`),
+  countUnanswered: () => request('GET', '/api/kb/unanswered?countOnly=1'),
   answerUnanswered: (id, body) => request('POST', `/api/kb/unanswered/${encodeURIComponent(id)}/answer`, body),
   dismissUnanswered: (id) => request('POST', `/api/kb/unanswered/${encodeURIComponent(id)}/dismiss`),
   draftKb: (body) => request('POST', '/api/kb/draft', body),

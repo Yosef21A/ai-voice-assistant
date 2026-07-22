@@ -306,6 +306,7 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
   const unanswered = {
     async upsertByNorm(tenantId, { norm, question, lang, conversationId } = {}) {
       if (!norm) return null;
+      norm = String(norm).slice(0, 200); // patient text is untrusted — cap key size
       const { rows } = await q(
         `INSERT INTO unanswered (tenant_id, norm, question, lang, conversation_id)
          VALUES ($1,$2,$3,$4,$5)
@@ -315,7 +316,7 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
            lang = COALESCE(EXCLUDED.lang, unanswered.lang),
            conversation_id = COALESCE(EXCLUDED.conversation_id, unanswered.conversation_id)
          RETURNING *`,
-        [tenantId, norm, question ?? null, lang ?? null, conversationId ?? null]
+        [tenantId, norm, question != null ? String(question).slice(0, 300) : null, lang ?? null, conversationId ?? null]
       );
       return row2obj(rows[0]);
     },
