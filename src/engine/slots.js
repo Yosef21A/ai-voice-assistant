@@ -1,6 +1,6 @@
 // Slot extractors for the booking flow: specialty, patient name, origin
 // (city/country) and contact number. Plus a yes/no detector for confirmation.
-const AR_DIGITS = { '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9' };
+import { normalizeDigits as normDigits } from './text.js';
 
 /** Lowercase + strip Latin diacritics (Arabic left intact). */
 export function normalize(s = '') {
@@ -9,10 +9,6 @@ export function normalize(s = '') {
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .trim();
-}
-
-function normDigits(s) {
-  return String(s).replace(/[٠-٩]/g, (d) => AR_DIGITS[d]);
 }
 
 /**

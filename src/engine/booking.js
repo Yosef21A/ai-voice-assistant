@@ -48,13 +48,19 @@ function nextStep(data) {
 function buildSummary(ctx) {
   const { clinic, lang, convo } = ctx;
   const d = convo.state.data;
-  return t(lang, 'confirmSummary', {
+  const summary = t(lang, 'confirmSummary', {
     specialty: specialtyLabel(clinic, d.specialty, lang),
     when: formatWhen(new Date(d.slotIso), lang),
     name: d.name,
     origin: originDisplay(d),
     contact: d.contact,
   });
+  // Adjustment transparency: a silently shifted time must be re-stated at the
+  // recap, not just once mid-flow (spec P2-HUMANIZE §3).
+  if (d.slotAdjusted) {
+    return `${t(lang, 'adjustedInRecap', { when: formatWhen(new Date(d.slotIso), lang) })}\n\n${summary}`;
+  }
+  return summary;
 }
 
 function promptFor(step, ctx) {

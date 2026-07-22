@@ -8,6 +8,7 @@ import { startBooking, continueBooking, cancelBooking, specialtyLabel } from './
 import { extractSpecialty } from './slots.js';
 import { matchFaq, faqAnswer } from './faq.js';
 import { t } from './responses.js';
+import { normalizeDigits } from './text.js';
 
 /**
  * @param {object} deps
@@ -40,7 +41,9 @@ export function createEngine({ store, provider, config }) {
 
     const ctx = {
       inbound,
-      text: String(inbound.text || '').trim(),
+      // Digit normalization is defensive here (ingest paths normalize too):
+      // every parser downstream must see ASCII digits (live failure F4).
+      text: normalizeDigits(String(inbound.text || '')).trim(),
       clinic,
       convo,
       lang,

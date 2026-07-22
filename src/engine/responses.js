@@ -67,6 +67,12 @@ const DICT = {
     en: () => `That number looks invalid. Please include the country code, e.g. +21891234567.`,
   },
 
+  adjustedInRecap: {
+    ar: (v) => `⚠️ ملاحظة: الوقت اللي طلبتو ما كانش متاح، حطّينالك أقرب موعد: ${v.when}. إذا ما يمشيش، قلّي «لا» ونلقاولك وقت آخر.`,
+    fr: (v) => `⚠️ Note : l'horaire demandé n'était pas disponible, nous avons retenu le plus proche : ${v.when}. S'il ne convient pas, répondez « non » et on cherche un autre créneau.`,
+    en: (v) => `⚠️ Note: the time you asked for wasn't available, so we set the nearest slot: ${v.when}. If it doesn't suit you, reply "no" and we'll find another.`,
+  },
+
   confirmSummary: {
     ar: (v) =>
       `📝 نراجعو الحجز:\n• الاختصاص: ${v.specialty}\n• الموعد: ${v.when}\n• الاسم: ${v.name}\n• المدينة: ${v.origin}\n• الهاتف: ${v.contact}\n\nنأكدو؟ اكتب «نعم» للتأكيد أو «لا» للإلغاء.`,

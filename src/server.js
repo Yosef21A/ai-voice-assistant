@@ -28,6 +28,7 @@ import { createApiRouter } from './api/index.js';
 import { createOutboundRecorder } from './api/outbound.js';
 import { ingestInbound } from './api/ingest.js';
 import { analyzeInbound, createNotificationService } from './notifications/index.js';
+import { normalizeDigits } from './engine/text.js';
 
 /**
  * Verify Meta's X-Hub-Signature-256 header (HMAC-SHA256 of the raw body with the
@@ -79,7 +80,9 @@ export function normalizeWhatsApp(body) {
         out.push({
           channel: 'whatsapp',
           from: m.from,
-          text: text || media?.caption || '',
+          // Arabic-Indic digits normalize at ingest so parsers, detectors and
+          // stored transcripts all see one digit alphabet (live failure F4).
+          text: normalizeDigits(text || media?.caption || ''),
           media,
           phoneNumberId,
           messageId: m.id,
@@ -185,7 +188,7 @@ export function createApp(opts = {}) {
       const inbound = {
         channel: 'simulate',
         from: body.from || 'sim-demo',
-        text: body.text || '',
+        text: normalizeDigits(body.text || ''),
         phoneNumberId: body.phone_number_id || config.phoneNumberId,
         tenantId: body.tenantId,
         messageId: `sim_${Date.now()}`,

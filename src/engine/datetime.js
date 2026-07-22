@@ -3,12 +3,7 @@
 // it understands the common ways patients phrase a time, and ALWAYS falls back
 // to the next open slot so the booking flow can never dead-end.
 import { WD_KEYS, SLOT_MIN, toMins } from '../store/availability.js';
-
-const AR_DIGITS = { '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9' };
-
-function normDigits(s) {
-  return String(s).replace(/[٠-٩]/g, (d) => AR_DIGITS[d]);
-}
+import { normalizeDigits as normDigits } from './text.js';
 
 const WEEKDAY_WORDS = {
   0: ['sunday', 'dimanche', 'الاحد', 'الأحد', 'احد'],
@@ -48,32 +43,23 @@ export function parseDateTimeRequest(text, now) {
   let hour = null;
   let minute = null;
   let date = null;
+  let bareHour = false;
 
-  // ── time ──
+  // ── time: explicit separator forms ──
   let m = t.match(/(\d{1,2})\s*[:h]\s*(\d{2})?/); // 10:30 / 10h / 10h30
   if (m) {
     hour = +m[1];
     minute = m[2] != null ? +m[2] : 0;
-  } else {
-    // a lone number, only trusted when a time-context word is present
-    const hasTimeWord = /(ساعة|صباح|مساء|عشية|matin|soir|midi|heure|apres-?midi|après-?midi|morning|afternoon|evening|am|pm|\bat\b|على\s|à)/.test(t);
-    m = t.match(/\b(\d{1,2})\b/);
-    if (m && hasTimeWord) {
-      hour = +m[1];
-      minute = 0;
-    }
   }
 
-  if (hour != null) {
-    const pm = /(مساء|عشية|soir|apres-?midi|après-?midi|afternoon|evening|pm)/.test(t);
-    const am = /(صباح|matin|morning|am)/.test(t);
-    if (pm && hour < 12) hour += 12;
-    if (am && hour === 12) hour = 0;
-  }
-
-  // ── date: explicit ISO ──
+  // ── date: explicit ISO ── (parsed before the lone-number rule so the date's
+  // own digits can never be mistaken for an hour)
+  let rest = t;
   m = t.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m) date = { y: +m[1], mo: +m[2] - 1, d: +m[3] };
+  if (m) {
+    date = { y: +m[1], mo: +m[2] - 1, d: +m[3] };
+    rest = rest.replace(m[0], ' ');
+  }
 
   // ── date: relative words ──
   if (!date) {
@@ -90,6 +76,29 @@ export function parseDateTimeRequest(text, now) {
         break;
       }
     }
+  }
+
+  // ── time: lone number ── Trusted when a time-context word OR a date is
+  // present: "اثنين ١٠" means Monday at 10 — dropping the 10 silently booked
+  // the wrong slot (live failure F4).
+  if (hour == null) {
+    const hasTimeWord = /(ساعة|صباح|مساء|عشية|matin|soir|midi|heure|apres-?midi|après-?midi|morning|afternoon|evening|am|pm|\bat\b|على\s|à)/.test(t);
+    m = rest.match(/\b(\d{1,2})\b/);
+    if (m && +m[1] <= 23 && (hasTimeWord || date)) {
+      hour = +m[1];
+      minute = 0;
+      bareHour = true;
+    }
+  }
+
+  if (hour != null) {
+    const pm = /(مساء|عشية|soir|apres-?midi|après-?midi|afternoon|evening|pm)/.test(t);
+    const am = /(صباح|matin|morning|am)/.test(t);
+    if (pm && hour < 12) hour += 12;
+    if (am && hour === 12) hour = 0;
+    // A bare 1-7 with no am/pm marker means the afternoon in clinic context
+    // ("الخميس 3" = Thursday 15:00, nobody books a 3 AM consultation).
+    if (bareHour && !pm && !am && hour >= 1 && hour <= 7) hour += 12;
   }
 
   return { date, hour, minute, raw: text };
