@@ -14,6 +14,7 @@ const TYPES = [
   'lead.hot',
   'emergency.detected',
   'media.received',
+  'kb.unanswered',
 ];
 
 const EventStreamContext = createContext(null);

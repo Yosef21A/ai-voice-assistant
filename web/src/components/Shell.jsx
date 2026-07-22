@@ -45,8 +45,10 @@ export function Shell() {
   const top = route.top || 'inbox';
   const [menuOpen, setMenuOpen] = useState(false);
   const [needsHuman, setNeedsHuman] = useState(0);
+  const [unanswered, setUnanswered] = useState(0);
   const menuRef = useRef(null);
   const timerRef = useRef(null);
+  const kbTimerRef = useRef(null);
 
   // Live "needs human" badge on the Inbox nav item.
   const refreshCount = useCallback(() => {
@@ -65,6 +67,22 @@ export function Shell() {
   useStreamEvent('handoff.requested', scheduleCount);
   useStreamEvent('message.in', scheduleCount);
   useEffect(() => () => clearTimeout(timerRef.current), []);
+
+  // Live "to train" badge on the Knowledge nav item (P2-B).
+  const refreshUnanswered = useCallback(() => {
+    api.listUnanswered()
+      .then(({ unanswered: rows }) => setUnanswered(rows.length || 0))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    refreshUnanswered();
+  }, [refreshUnanswered]);
+  const scheduleUnanswered = useCallback(() => {
+    clearTimeout(kbTimerRef.current);
+    kbTimerRef.current = setTimeout(refreshUnanswered, 400);
+  }, [refreshUnanswered]);
+  useStreamEvent('kb.unanswered', scheduleUnanswered);
+  useEffect(() => () => clearTimeout(kbTimerRef.current), []);
 
   // Close the user menu on outside click / Escape.
   useEffect(() => {
@@ -102,6 +120,7 @@ export function Shell() {
             <Icon />
             <span>{t(`nav.${key}`)}</span>
             {key === 'inbox' && needsHuman > 0 ? <span className="count">{needsHuman}</span> : null}
+            {key === 'knowledge' && unanswered > 0 ? <span className="count">{unanswered}</span> : null}
           </button>
         ))}
         <span className="spacer" />
@@ -145,6 +164,7 @@ export function Shell() {
             <Icon />
             <span>{t(`nav.${key}`)}</span>
             {key === 'inbox' && needsHuman > 0 ? <span className="count">{needsHuman}</span> : null}
+            {key === 'knowledge' && unanswered > 0 ? <span className="count">{unanswered}</span> : null}
           </button>
         ))}
       </nav>

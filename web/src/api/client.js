@@ -72,6 +72,11 @@ export const api = {
   createKb: (body) => request('POST', '/api/kb', body),
   updateKb: (key, body) => request('PUT', `/api/kb/${encodeURIComponent(key)}`, body),
   deleteKb: (key) => request('DELETE', `/api/kb/${encodeURIComponent(key)}`),
+  // ── training loop (P2-B) ───────────────────────────────────────────────────
+  listUnanswered: (params) => request('GET', `/api/kb/unanswered${qs(params)}`),
+  answerUnanswered: (id, body) => request('POST', `/api/kb/unanswered/${encodeURIComponent(id)}/answer`, body),
+  dismissUnanswered: (id) => request('POST', `/api/kb/unanswered/${encodeURIComponent(id)}/dismiss`),
+  draftKb: (body) => request('POST', '/api/kb/draft', body),
   // ── conversations (live inbox) ──────────────────────────────────────────────
   listConversations: (params) => request('GET', `/api/conversations${qs(params)}`),
   getConversation: (id) => request('GET', `/api/conversations/${encodeURIComponent(id)}`),
