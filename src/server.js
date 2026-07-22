@@ -21,6 +21,7 @@ import { createEngine } from './engine/index.js';
 import { getProvider } from './llm/index.js';
 import { createSender } from './whatsapp/index.js';
 import { createMediaClient } from './whatsapp/media.js';
+import { hydrateAllClinicsKb } from './store/kbLive.js';
 import { createBus } from './events/bus.js';
 import { createAuth } from './auth/index.js';
 import { createApiRouter } from './api/index.js';
@@ -134,6 +135,12 @@ export function createApp(opts = {}) {
     });
   const auth = createAuth({ store, config });
 
+  // KB → live engine (P2-B): merge each tenant's saved kb_entries into its
+  // in-memory clinic on boot so wizard KB + trained answers survive restarts.
+  // Fire-and-forget (createApp stays sync) — converges in ms; tests that need
+  // determinism can `await composed.kbReady`.
+  const kbReady = hydrateAllClinicsKb(store).catch(() => {});
+
   // Owner-notification worker (P1-E, wired here in P1-F): one subscriber on the
   // shared bus turns appointment.created / lead.hot / handoff.requested /
   // emergency.detected into WhatsApp alerts on the owner's phone. It never throws
@@ -231,7 +238,7 @@ export function createApp(opts = {}) {
 
   // ── dashboard API (public auth bootstrap, then the gated tenant-scoped API) ───
   app.use('/api/auth', auth.router);
-  app.use('/api', createApiRouter({ store, engine, sender, bus, config, auth, mediaClient }));
+  app.use('/api', createApiRouter({ store, engine, sender, bus, config, auth, mediaClient, provider }));
 
   // ── dashboard SPA (web/dist) ──────────────────────────────────────────────────
   // Serve the built Vite bundle at / with an SPA fallback so client-side (hash)
@@ -282,7 +289,7 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, mediaClient, auth, notifier };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, auth, notifier, kbReady };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.

@@ -11,7 +11,7 @@ import { statsRouter } from './stats.js';
 import { mediaRouter } from './media.js';
 import { streamHandler } from './stream.js';
 
-export function createApiRouter({ store, engine, sender, bus, config, auth }) {
+export function createApiRouter({ store, engine, sender, bus, config, auth, provider }) {
   const { requireAuth, requireRole } = auth;
   const router = express.Router();
 
@@ -20,7 +20,7 @@ export function createApiRouter({ store, engine, sender, bus, config, auth }) {
 
   router.get('/stream', streamHandler({ bus, config }));
   router.use('/tenant', tenantRouter({ store, requireRole }));
-  router.use('/kb', kbRouter({ store }));
+  router.use('/kb', kbRouter({ store, provider }));
   router.use('/conversations', conversationsRouter({ store, sender, bus }));
   router.use('/appointments', appointmentsRouter({ store, bus }));
   router.use('/sandbox', sandboxRouter({ store, engine }));

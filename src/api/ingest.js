@@ -17,6 +17,7 @@
 // from the engine result. Both land on the shared bus → SSE + notifications.
 import { sendAs, publicMessage } from './outbound.js';
 import { analyzeInbound } from '../notifications/index.js';
+import { normalizeQuestion, isSandboxWaId } from '../stats/index.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
 // interprets media medically — it confirms receipt and promises a human.
@@ -166,6 +167,30 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
     await sendAs('bot', conversationId, () => sender.sendEngineReply(clinic, inbound.from, out));
   }
   await logAnalyzed();
+
+  // "Bot didn't know" capture (P2-B) — AFTER the reply, best-effort, deduped by
+  // normalized question. Uses a dedicated collection (the events log is a ring
+  // buffer on the JSON store; unknowns must not age out). Triaged rows keep
+  // their status; only genuinely NEW questions ping the dashboard badge.
+  if (out.knew === false && inbound.text && !isSandboxWaId(inbound.from)) {
+    try {
+      const row = await store.unanswered.upsertByNorm(tenantId, {
+        norm: normalizeQuestion(inbound.text),
+        question: String(inbound.text).slice(0, 300),
+        lang: out.lang || null,
+        conversationId,
+      });
+      if (row && row.status === 'new') {
+        bus.publish('kb.unanswered', {
+          tenantId,
+          conversationId,
+          unanswered: { id: row.id, question: row.question, lang: row.lang, count: row.count },
+        });
+      }
+    } catch {
+      /* the training queue must never break the turn */
+    }
+  }
 
   if (out.appointment) {
     bus.publish('appointment.created', { tenantId, conversationId, appointment: out.appointment });

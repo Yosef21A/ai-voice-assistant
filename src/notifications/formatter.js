@@ -269,9 +269,9 @@ const DIGEST_TITLE = {
   weekly: { ar: 'التقرير الأسبوعي', fr: 'Rapport hebdomadaire', en: 'Weekly report' },
 };
 const DIGEST_LABELS = {
-  ar: { convos: '💬 محادثات', bookings: '📅 حجوزات', leads: '🔥 عملاء محتملون', after: '🌙 خارج الدوام', money: '💶 القيمة المقدّرة المحصّلة' },
-  fr: { convos: '💬 Conversations', bookings: '📅 Réservations', leads: '🔥 Leads', after: '🌙 Hors horaires', money: '💶 Valeur estimée captée' },
-  en: { convos: '💬 Conversations', bookings: '📅 Bookings', leads: '🔥 Leads', after: '🌙 After-hours', money: '💶 Estimated captured value' },
+  ar: { convos: '💬 محادثات', bookings: '📅 حجوزات', leads: '🔥 عملاء محتملون', after: '🌙 خارج الدوام', money: '💶 القيمة المقدّرة المحصّلة', learned: '🧠 أجوبة تعلّمها البوت' },
+  fr: { convos: '💬 Conversations', bookings: '📅 Réservations', leads: '🔥 Leads', after: '🌙 Hors horaires', money: '💶 Valeur estimée captée', learned: '🧠 Réponses apprises' },
+  en: { convos: '💬 Conversations', bookings: '📅 Bookings', leads: '🔥 Leads', after: '🌙 After-hours', money: '💶 Estimated captured value', learned: '🧠 Answers learned' },
 };
 
 function formatDigest(kind, stats = {}, { tenant, lang } = {}) {
@@ -292,6 +292,12 @@ function formatDigest(kind, stats = {}, { tenant, lang } = {}) {
     `${lbl.leads} : ${Number(stats.leads) || 0}`,
     `${lbl.after} : ${pct}%`,
   ];
+
+  // Training-loop line (P2-B) only when the owner actually taught something.
+  const learned = Number(stats.learned);
+  if (Number.isFinite(learned) && learned > 0) {
+    lines.push(`${lbl.learned} : ${learned}`);
+  }
 
   // Money line only when an average procedure value is configured (guardrail:
   // never invent a captured-value number the owner didn't set up).

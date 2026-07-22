@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 const COLLECTIONS = [
   'patients', 'conversations', 'messages', 'appointments',
   'leads', 'kb_entries', 'events', 'notification_prefs', 'tenants', 'users',
+  'unanswered',
 ];
 
 /**
@@ -269,9 +270,11 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
       const [rec] = db.conversations.splice(idx, 1);
       db.messages = db.messages.filter((m) => !(m.conversationId === id && m.tenantId === tenantId));
       db.events = db.events.filter((e) => !(e.conversationId === id && e.tenantId === tenantId));
+      db.unanswered = db.unanswered.filter((u) => !(u.conversationId === id && u.tenantId === tenantId));
       persist('conversations');
       persist('messages');
       persist('events');
+      persist('unanswered');
       return rec;
     },
   };
@@ -378,6 +381,56 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
       k.updatedAt = now();
       persist('kb_entries');
       return k;
+    },
+  };
+
+  // "Bot didn't know" queue (P2-B). One row per NORMALIZED question per tenant;
+  // repeats bump `count`. Statuses: new → answered | dismissed (an already
+  // triaged row keeps its status on re-ask — the KB should answer it now, and
+  // a dismissed question must not nag the owner again).
+  const unanswered = {
+    async upsertByNorm(tenantId, { norm, question, lang, conversationId } = {}) {
+      if (!norm) return null;
+      let row = db.unanswered.find((u) => u.tenantId === tenantId && u.norm === norm);
+      if (row) {
+        row.count = (row.count || 1) + 1;
+        row.question = question || row.question;
+        row.lang = lang ?? row.lang;
+        row.conversationId = conversationId ?? row.conversationId;
+        row.updatedAt = now();
+      } else {
+        row = {
+          id: randomUUID(),
+          tenantId,
+          norm,
+          question: question || norm,
+          lang: lang ?? null,
+          conversationId: conversationId ?? null,
+          count: 1,
+          status: 'new',
+          createdAt: now(),
+          updatedAt: now(),
+        };
+        db.unanswered.push(row);
+      }
+      persist('unanswered');
+      return row;
+    },
+    async list(tenantId, filter = {}) {
+      return db.unanswered.filter(
+        (u) => u.tenantId === tenantId && (filter.status === undefined || u.status === filter.status)
+      );
+    },
+    async get(tenantId, id) {
+      return db.unanswered.find((u) => u.id === id && u.tenantId === tenantId) || null;
+    },
+    async setStatus(tenantId, id, status) {
+      const u = db.unanswered.find((x) => x.id === id && x.tenantId === tenantId);
+      if (!u) return null;
+      u.status = status;
+      u.updatedAt = now();
+      persist('unanswered');
+      return u;
     },
   };
 
@@ -522,6 +575,7 @@ export function createJsonStore({ clinicsFile, runtimeDir, reset = false, events
     appointments,
     leads,
     kbEntries,
+    unanswered,
     events,
     notificationPrefs,
     async health() {

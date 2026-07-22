@@ -210,6 +210,7 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     // Tenant-scoped.
     async remove(tenantId, id) {
       await q('DELETE FROM events WHERE tenant_id = $1 AND conversation_id = $2', [tenantId, id]);
+      await q('DELETE FROM unanswered WHERE tenant_id = $1 AND conversation_id = $2', [tenantId, id]);
       const { rows } = await q(
         'DELETE FROM conversations WHERE tenant_id = $1 AND id = $2 RETURNING *',
         [tenantId, id]
@@ -294,6 +295,47 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     async updateStatus(tenantId, id, status) {
       const { rows } = await q(
         'UPDATE leads SET status = $3 WHERE tenant_id = $1 AND id = $2 RETURNING *',
+        [tenantId, id, status]
+      );
+      return row2obj(rows[0]);
+    },
+  };
+
+  // "Bot didn't know" queue (P2-B) — one row per (tenant, normalized question);
+  // re-asks bump count. Triaged rows keep their status on re-ask.
+  const unanswered = {
+    async upsertByNorm(tenantId, { norm, question, lang, conversationId } = {}) {
+      if (!norm) return null;
+      const { rows } = await q(
+        `INSERT INTO unanswered (tenant_id, norm, question, lang, conversation_id)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (tenant_id, norm) DO UPDATE SET
+           count = unanswered.count + 1,
+           question = COALESCE(EXCLUDED.question, unanswered.question),
+           lang = COALESCE(EXCLUDED.lang, unanswered.lang),
+           conversation_id = COALESCE(EXCLUDED.conversation_id, unanswered.conversation_id)
+         RETURNING *`,
+        [tenantId, norm, question ?? null, lang ?? null, conversationId ?? null]
+      );
+      return row2obj(rows[0]);
+    },
+    async list(tenantId, filter = {}) {
+      const cond = ['tenant_id = $1'];
+      const params = [tenantId];
+      if (filter.status !== undefined) { params.push(filter.status); cond.push(`status = $${params.length}`); }
+      const { rows } = await q(
+        `SELECT * FROM unanswered WHERE ${cond.join(' AND ')} ORDER BY updated_at DESC`,
+        params
+      );
+      return rows2obj(rows);
+    },
+    async get(tenantId, id) {
+      const { rows } = await q('SELECT * FROM unanswered WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
+      return row2obj(rows[0]);
+    },
+    async setStatus(tenantId, id, status) {
+      const { rows } = await q(
+        'UPDATE unanswered SET status = $3 WHERE tenant_id = $1 AND id = $2 RETURNING *',
         [tenantId, id, status]
       );
       return row2obj(rows[0]);
@@ -450,6 +492,7 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     appointments,
     leads,
     kbEntries,
+    unanswered,
     events,
     notificationPrefs,
     async health() {

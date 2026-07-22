@@ -73,6 +73,9 @@ export function createEngine({ store, provider, config }) {
       appointment: result.appointment || null,
       handoff: result.handoff || null,
       state: convo.state || null,
+      // P2-B: false only when the bot had NO real answer (unknown intent, or a
+      // FAQ ask that matched nothing) — feeds the "bot didn't know" queue.
+      knew: result.knew !== false,
     };
   }
 
@@ -191,13 +194,25 @@ async function handleFaq(ctx) {
     });
     return { intent: 'faq', replies: [out.text || faqAnswer(entry, lang)] };
   }
-  return { intent: 'faq', replies: [t(lang, 'faqFallback')] };
+  return { intent: 'faq', replies: [t(lang, 'faqFallback')], knew: false };
 }
 
 async function handleFallback(ctx) {
-  const { lang } = ctx;
+  const { clinic, lang, text } = ctx;
+  // The KB gets first refusal (P2-B): owner-trained answers live in clinic.faq
+  // (merged by src/store/kbLive.js), so a question the bot once missed — which
+  // rarely carries an intent keyword — is answered here instead of falling to
+  // the generic provider reply. This IS the training loop closing.
+  const entry = matchFaq(text, clinic);
+  if (entry) {
+    const out = await safeGenerate(ctx, {
+      task: 'faq_answer',
+      context: { answer: faqAnswer(entry, lang) },
+    });
+    return { intent: 'faq', replies: [out.text || faqAnswer(entry, lang)] };
+  }
   const out = await safeGenerate(ctx, { task: 'fallback' });
-  return { intent: 'unknown', replies: [out.text] };
+  return { intent: 'unknown', replies: [out.text], knew: false };
 }
 
 // Never let a provider error break the conversation.

@@ -162,6 +162,12 @@ export function computeDigestStats(storeData = {}, range = {}) {
     (l) => !isSandboxWaId(l.patientWaId) && inRange(l.createdAt)
   ).length;
 
+  // Training loop (P2-B): KB entries the owner created from unknown questions
+  // in-window — the digest's "le bot a appris N réponses" line.
+  const learned = (storeData.kbEntries || []).filter(
+    (e) => e.source === 'didnt_know' && e.status === 'active' && inRange(e.updatedAt || e.createdAt)
+  ).length;
+
   const avgValue = resolveAvgValue(cfg, range);
   const money = avgValue != null && Number.isFinite(avgValue) ? bookings * avgValue : null;
   const afterHoursShare = convoCount > 0 ? afterHours / convoCount : 0;
@@ -170,6 +176,7 @@ export function computeDigestStats(storeData = {}, range = {}) {
     conversations: convoCount,
     bookings,
     leads,
+    learned,
     afterHours,
     afterHoursShare,
     afterHoursPct: Math.round(afterHoursShare * 100),
@@ -288,9 +295,14 @@ export function computeAnalytics(storeData = {}, range = {}) {
     bookingConfirmed: digest.bookings, // same definition as the digest money base
   };
 
+  // Training-queue depth (P2-B): open questions the owner hasn't triaged —
+  // a queue size, deliberately NOT range-filtered.
+  const unansweredNew = (storeData.unanswered || []).filter((u) => u.status === 'new').length;
+
   return {
     ...digest,
     tz,
+    unansweredNew,
     conversationsByHour,
     languageSplit,
     messageCount,
@@ -334,12 +346,13 @@ async function safeList(fn) {
 /** Fetch + aggregate the digest numbers. `tenant` is the already-loaded record. */
 export async function collectDigestStats(store, tenant, range = {}) {
   const tenantId = tenant.id;
-  const [conversations, appointments, leads] = await Promise.all([
+  const [conversations, appointments, leads, kbEntries] = await Promise.all([
     safeList(() => store.conversations.list(tenantId)),
     safeList(() => store.appointments.list(tenantId)),
     safeList(() => store.leads.list(tenantId)),
+    safeList(() => store.kbEntries.list(tenantId, { status: 'active' })),
   ]);
-  return computeDigestStats({ tenant, conversations, appointments, leads }, range);
+  return computeDigestStats({ tenant, conversations, appointments, leads, kbEntries }, range);
 }
 
 // Fetch bounds: analytics is a dashboard read that must stay cheap no matter
@@ -351,11 +364,13 @@ const TRANSCRIPT_CHUNK = 20; // listMessages concurrency bound (no unbounded fan
 /** Fetch + aggregate the full dashboard analytics. */
 export async function collectAnalytics(store, tenant, range = {}) {
   const tenantId = tenant.id;
-  const [conversations, appointments, leads, events] = await Promise.all([
+  const [conversations, appointments, leads, events, kbEntries, unanswered] = await Promise.all([
     safeList(() => store.conversations.list(tenantId)),
     safeList(() => store.appointments.list(tenantId)),
     safeList(() => store.leads.list(tenantId)),
     safeList(() => store.events.list(tenantId, { type: 'message.analyzed', limit: EVENTS_FETCH_LIMIT })),
+    safeList(() => store.kbEntries.list(tenantId, { status: 'active' })),
+    safeList(() => store.unanswered.list(tenantId, {})),
   ]);
 
   // Transcripts only for conversations active in the window; most recent first,
@@ -377,7 +392,7 @@ export async function collectAnalytics(store, tenant, range = {}) {
   }
 
   return computeAnalytics(
-    { tenant, conversations, appointments, leads, events, messagesByConvo },
+    { tenant, conversations, appointments, leads, events, kbEntries, unanswered, messagesByConvo },
     range
   );
 }
