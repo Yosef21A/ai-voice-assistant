@@ -13,7 +13,7 @@ export class GeminiProvider {
   constructor(config = {}) {
     this.name = 'gemini';
     this.apiKey = config.geminiApiKey;
-    this.model = config.geminiModel || 'gemini-2.5-flash';
+    this.model = config.geminiModel || 'gemini-flash-latest';
     this.timeoutMs = Number(config.geminiTimeoutMs) || 8000;
     this._fetch =
       typeof config.fetchImpl === 'function'

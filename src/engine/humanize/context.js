@@ -5,6 +5,7 @@ import { normalize } from '../slots.js';
 import { faqAnswer } from '../faq.js';
 import { isArabizi } from '../language.js';
 import { buildSystemPrompt } from './prompt.js';
+import { buildResponseSchema } from './schema.js';
 
 const HISTORY_TURNS = 12;
 const MSG_CAP = 500;
@@ -72,5 +73,6 @@ export async function buildLlmRequest(ctx) {
     nowStr: nowString(now),
     arabizi: isArabizi(text),
   });
-  return { system, messages: historyMessages(convo) };
+  const schema = buildResponseSchema((clinic.specialties || []).map((s) => s.id));
+  return { system, messages: historyMessages(convo), schema };
 }

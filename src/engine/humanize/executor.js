@@ -94,6 +94,52 @@ function applySlots(ctx, patch = {}, data) {
   return res;
 }
 
+/**
+ * Backfill slots the LLM omitted, from the raw patient message, using the same
+ * deterministic extractors classic mode trusts. The LLM leads; this is the
+ * backstop for turns where a capable model understood the message (its prose
+ * proves it) but under-filled slots_patch — common on dense Arabizi. It NEVER
+ * overrides an LLM value, and deliberately skips:
+ *   · specialty — rescanning the whole message could bind an unrelated word and
+ *     mask a genuine gap (the enum already makes the LLM reliable here);
+ *   · name — no detector is safe enough (any text passes extractName).
+ * Only high-confidence extractors run: a concrete date/time, a known origin
+ * city, a phone-shaped contact.
+ */
+function backfillFromText(ctx, data, res) {
+  const t = ctx.text;
+  if (!data.slotIso) {
+    const req = parseDateTimeRequest(t, ctx.now);
+    if (req.date || req.hour != null) {
+      const slot = resolveSlot(ctx.clinic, req, ctx.now);
+      if (slot) {
+        data.slotIso = slot.iso;
+        data.slotAdjusted = slot.adjusted;
+        data.datetimeRaw = t;
+        res.any = true;
+        res.adjusted = slot.adjusted;
+        res.slotDate = slot.date;
+      }
+    }
+  }
+  if (!data.originCity && !data.originRaw) {
+    const o = extractOrigin(t);
+    if (o.city) {
+      data.originCity = o.city;
+      data.originCountry = o.country;
+      data.originRaw = o.raw;
+      res.any = true;
+    }
+  }
+  if (!data.contact) {
+    const contact = extractContact(t);
+    if (contact) {
+      data.contact = contact;
+      res.any = true;
+    }
+  }
+}
+
 /** Final safety net on the composed bubbles: non-empty + never-repeat marker. */
 function finish(ctx, result) {
   const replies = (result.replies || []).map((r) => String(r ?? '').trim()).filter(Boolean);
@@ -138,7 +184,12 @@ export function executePlan(ctx, plan) {
 
   const patch = applySlots(ctx, plan.slots_patch, data);
   if (patch.any && state.flow !== 'booking') state.flow = 'booking';
-  if (state.flow === 'booking') state.step = nextStep(data);
+  // Once a booking is live, backstop the LLM's slot extraction from the raw
+  // message so a captured date/city/phone never gets stranded in the prose.
+  if (state.flow === 'booking') {
+    backfillFromText(ctx, data, patch);
+    state.step = nextStep(data);
+  }
 
   const filtered = filterReply(plan.reply_text, { clinic, lang });
   const reply = filtered.text;

@@ -4,7 +4,7 @@
 // go silent (the fallback contract deliberately inverts the decorative
 // generate() path, which degrades to mock text).
 import { buildLlmRequest } from './context.js';
-import { RESPONSE_SCHEMA, coercePlan } from './schema.js';
+import { coercePlan } from './schema.js';
 import { executePlan, applyVariation } from './executor.js';
 import { VARY_HINT } from './prompt.js';
 
@@ -23,9 +23,10 @@ export async function handleLlmTurn(ctx) {
     ctx.convo.state = snapshot ? structuredClone(snapshot) : null;
   };
 
-  const plan = coercePlan(
-    await ctx.provider.generateStructured({ ...request, schema: RESPONSE_SCHEMA })
-  );
+  // request carries { system, messages, schema } — schema is the per-tenant
+  // ENUM-constrained variant (buildLlmRequest), which prevents flash models
+  // from looping on the specialty string field.
+  const plan = coercePlan(await ctx.provider.generateStructured(request));
   let result = executePlan(ctx, plan);
 
   if (result.__repeat) {
@@ -37,7 +38,6 @@ export async function handleLlmTurn(ctx) {
         await ctx.provider.generateStructured({
           ...request,
           system: request.system + VARY_HINT,
-          schema: RESPONSE_SCHEMA,
         })
       );
       const second = executePlan(ctx, retryPlan);

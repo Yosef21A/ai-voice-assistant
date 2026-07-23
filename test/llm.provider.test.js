@@ -34,7 +34,7 @@ test('getProvider — gemini wins over a stray anthropic key; anthropic next; mo
 
 test('getProvider — gemini model/timeout come from config with safe defaults', () => {
   const p = getProvider({ geminiApiKey: KEY });
-  assert.equal(p.model, 'gemini-2.5-flash');
+  assert.equal(p.model, 'gemini-flash-latest'); // rolling default (2.5-flash was retired)
   assert.equal(p.timeoutMs, 8000);
   const q = getProvider({ geminiApiKey: KEY, geminiModel: 'gemini-2.0-flash', geminiTimeoutMs: 3000 });
   assert.equal(q.model, 'gemini-2.0-flash');
@@ -46,6 +46,7 @@ test('gemini — posts to generateContent with the key in the HEADER, never the 
   const calls = [];
   const p = new GeminiProvider({
     geminiApiKey: KEY,
+    geminiModel: 'gemini-2.5-flash', // pinned so this test still exercises the thinking-budget gate
     fetchImpl: async (url, opts) => {
       calls.push({ url, opts });
       return geminiResponse('أهلا بيك في مصحة الأمان 🌟');

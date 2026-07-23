@@ -50,7 +50,11 @@ export function getConfig(overrides = {}) {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
     anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-latest',
     geminiApiKey: process.env.GEMINI_API_KEY || '',
-    geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    // gemini-flash-latest = the rolling current flash. The pinned gemini-2.5-flash
+    // was retired for new API keys (404 "no longer available to new users"),
+    // which silently degraded every LLM turn to classic/mock — always prefer a
+    // rolling alias here so a model retirement can't take the bot offline again.
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-flash-latest',
     geminiTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 8000,
     // ── conversation mode (P2-HUMANIZE) ────────────────────────────────────
     // 'llm'     = LLM-led dialogue (Gemini structured output) with the

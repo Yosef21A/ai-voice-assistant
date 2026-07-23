@@ -26,6 +26,7 @@ test('generateStructured — posts responseSchema + JSON mime, key in header, pa
   const calls = [];
   const p = new GeminiProvider({
     geminiApiKey: KEY,
+    geminiModel: 'gemini-2.5-flash', // pinned to exercise the thinking-budget gate deterministically
     fetchImpl: async (url, opts) => {
       calls.push({ url, opts });
       return structuredResponse({ reply_text: 'أهلا 👋', actions: ['none'] });

@@ -33,7 +33,11 @@ export const RESPONSE_SCHEMA = {
       type: 'OBJECT',
       description: 'Booking facts learned THIS message, any subset, any order.',
       properties: {
-        specialty: { type: 'STRING', description: 'One of the clinic specialty ids listed in the system prompt.' },
+        // NOTE: the humanize path replaces this with a per-tenant ENUM of real
+        // specialty ids (see buildResponseSchema). A free STRING here lets some
+        // Gemini models loop-repeat the value until they exhaust the token
+        // budget — starving the other fields and truncating the JSON.
+        specialty: { type: 'STRING', description: 'One of the clinic specialty ids listed in the system prompt. Omit for treatments the clinic does not offer (use the specialty_gap action instead).' },
         datetimeText: {
           type: 'STRING',
           description: "The patient's own words for the date/time, verbatim. NEVER compute or format dates yourself.",
@@ -51,6 +55,25 @@ export const RESPONSE_SCHEMA = {
   },
   required: ['reply_text', 'detected_lang', 'actions'],
 };
+
+/**
+ * Per-tenant schema: constrain slots_patch.specialty to the clinic's real
+ * specialty ids (an ENUM). Beyond correctness this is a robustness fix — an
+ * unconstrained string field is where flash models run away into repetition.
+ * A treatment the clinic doesn't offer is expressed via the specialty_gap
+ * action + requested_specialty, never by inventing a specialty id.
+ * @param {string[]} specialtyIds
+ */
+export function buildResponseSchema(specialtyIds = []) {
+  if (!Array.isArray(specialtyIds) || !specialtyIds.length) return RESPONSE_SCHEMA;
+  const schema = structuredClone(RESPONSE_SCHEMA);
+  schema.properties.slots_patch.properties.specialty = {
+    type: 'STRING',
+    enum: specialtyIds,
+    description: "The clinic specialty id this message names. Omit entirely for treatments the clinic doesn't offer (use the specialty_gap action).",
+  };
+  return schema;
+}
 
 const LANGS = new Set(['ar', 'fr', 'en', 'ar-Latn']);
 
