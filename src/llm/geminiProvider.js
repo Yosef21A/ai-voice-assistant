@@ -103,7 +103,10 @@ export class GeminiProvider {
     if (!schema) throw new Error('generateStructured: schema is required');
 
     const generationConfig = {
-      maxOutputTokens: 1024,
+      // A larger budget than the free-text path: the JSON plan carries reply +
+      // slots + actions, and a thinking-capable model (if configured instead of
+      // 2.5-flash, which gets thinkingBudget 0 below) must not starve the JSON.
+      maxOutputTokens: 2048,
       temperature,
       responseMimeType: 'application/json',
       responseSchema: schema,

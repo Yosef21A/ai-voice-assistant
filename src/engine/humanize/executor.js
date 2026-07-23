@@ -37,8 +37,9 @@ function applySlots(ctx, patch = {}, data) {
 
   if (patch.specialty) {
     const byId = (ctx.clinic.specialties || []).find((s) => s.id === patch.specialty);
-    const sp =
-      byId || extractSpecialty(patch.specialty, ctx.clinic) || extractSpecialty(ctx.text, ctx.clinic);
+    // Match the LLM's specialty value only — do NOT rescan the whole message,
+    // which could bind an unrelated specialty word and mask a genuine gap.
+    const sp = byId || extractSpecialty(patch.specialty, ctx.clinic);
     if (sp) {
       if (data.specialty !== sp.id) res.any = true;
       data.specialty = sp.id;
@@ -163,11 +164,15 @@ export function executePlan(ctx, plan) {
     return finish(ctx, result);
   }
 
-  // ── handoff keeps the chat (§2.6): pause + owner alert via ingest ─────────
+  // ── handoff keeps the chat (§2.6): flag needs_human + owner alert, but the
+  // bot stays ACTIVE so it can keep helping until a human actually takes over
+  // (keepActive tells ingest not to pause — pausing here would contradict the
+  // "I can help you meanwhile" the prompt promises). Takeover pauses the bot
+  // when staff sends the first message.
   if (actions.has('handoff_request')) {
     h.awaitingConfirm = false;
     result.intent = 'human_handoff';
-    result.handoff = { clinicId: clinic.id, ...(clinic.handoff || {}) };
+    result.handoff = { clinicId: clinic.id, ...(clinic.handoff || {}), keepActive: true };
     result.replies = [
       reply ||
         t(lang, 'handoff', { name: clinic.handoff?.name || '', phone: clinic.handoff?.phone || '' }),
@@ -194,8 +199,12 @@ export function executePlan(ctx, plan) {
   const complete = state.flow === 'booking' && nextStep(data) === 'confirm';
   if (complete) {
     const wantsConfirm = actions.has('confirm_booking');
-    const consent = yn === 'yes' || (h.awaitingConfirm && yn !== 'no');
-    if ((wantsConfirm && consent) || (h.awaitingConfirm && yn === 'yes')) {
+    // Finalize ONLY after a recap was shown (awaitingConfirm) and the patient
+    // agreed. A recap is non-negotiable: it's where an auto-adjusted slot is
+    // disclosed (§3) and where the patient sees the parsed facts. A first-turn
+    // confirm_booking (no recap yet) falls through to propose the recap.
+    const agreed = yn === 'yes' || (wantsConfirm && yn !== 'no');
+    if (h.awaitingConfirm && agreed) {
       const fin = finalizeBooking(ctx); // the ONE appointment write + booked recap
       const appt = fin.appointment;
       convo.state = {

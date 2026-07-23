@@ -16,6 +16,13 @@ import { VARY_HINT } from './prompt.js';
  */
 export async function handleLlmTurn(ctx) {
   const request = await buildLlmRequest(ctx);
+  // Snapshot the pre-turn state so a regenerate re-executes from a clean base
+  // instead of mutating state the discarded first pass already touched.
+  const snapshot = ctx.convo.state ? structuredClone(ctx.convo.state) : null;
+  const restore = () => {
+    ctx.convo.state = snapshot ? structuredClone(snapshot) : null;
+  };
+
   const plan = coercePlan(
     await ctx.provider.generateStructured({ ...request, schema: RESPONSE_SCHEMA })
   );
@@ -24,6 +31,7 @@ export async function handleLlmTurn(ctx) {
   if (result.__repeat) {
     // Never-repeat policy: one regenerate with a vary hint, else the fallback
     // variation bank (different angle + human offer).
+    restore();
     try {
       const retryPlan = coercePlan(
         await ctx.provider.generateStructured({
@@ -35,7 +43,9 @@ export async function handleLlmTurn(ctx) {
       const second = executePlan(ctx, retryPlan);
       result = second.__repeat ? applyVariation(ctx, second) : second;
     } catch {
-      result = applyVariation(ctx, result);
+      // Re-run the original plan on the restored state, then vary the reply so
+      // the patient never sees the same bubble twice.
+      result = applyVariation(ctx, executePlan(ctx, plan));
     }
   }
   delete result.__repeat;

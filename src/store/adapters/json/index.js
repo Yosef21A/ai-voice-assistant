@@ -282,11 +282,20 @@ export function createJsonStore({
       // Leads carry patient PII too (wa id, origin, verbatim snippet) — a GDPR
       // erase must take them, exactly like events/unanswered.
       db.leads = db.leads.filter((l) => !(l.conversationId === id && l.tenantId === tenantId));
+      // The patient row carries PII too (name, phone, origin city/country,
+      // language since P2-HUMANIZE) — a GDPR erase must take it. Conversation id
+      // is `${clinicId}:${waId}`, so match the patient by tenant + waId.
+      if (rec.waId != null) {
+        db.patients = db.patients.filter(
+          (p) => !(p.clinicId === tenantId && p.waId === rec.waId)
+        );
+      }
       persist('conversations');
       persist('messages');
       persist('events');
       persist('unanswered');
       persist('leads');
+      persist('patients');
       return rec;
     },
   };

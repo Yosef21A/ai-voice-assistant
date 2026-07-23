@@ -52,9 +52,16 @@ test('word-boundary safety: "alo" never fires inside other words', () => {
 
 test('refusals are cancel, not noise (F1)', () => {
   assert.equal(detectIntent('I dont wanna book').intent, 'cancel');
-  assert.equal(detectIntent("i don't want this").intent, 'cancel');
+  assert.equal(detectIntent("i don't wanna").intent, 'cancel');
   assert.equal(detectIntent('not now thanks').intent, 'cancel');
+  assert.equal(detectIntent('no thanks').intent, 'cancel');
   assert.equal(detectIntent('مانحبش').intent, 'cancel');
+});
+
+test('bare "don\'t want" is NOT a blanket cancel (mid-flow corrections)', () => {
+  // "I don't want cardiology, I want dental" is a correction, not a refusal —
+  // the tightened keyword set must not abort the booking on it.
+  assert.notEqual(detectIntent("I don't want cardiology, I want dental").intent, 'cancel');
 });
 
 // ── bubble splitting ─────────────────────────────────────────────────────────

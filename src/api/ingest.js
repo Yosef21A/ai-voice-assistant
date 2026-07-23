@@ -79,11 +79,14 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   bus.publish('message.in', { tenantId, conversationId, actor: 'patient', message: publicMessage(inMsg) });
   bus.publish('conversation.updated', { tenantId, conversationId, patch: { lastMessageAt: inMsg.ts } });
 
-  // WhatsApp niceties (P2-HUMANIZE §3): blue ticks + typing bubble while the
-  // reply is generated. Fire-and-forget — a Graph hiccup must never delay or
-  // break the turn, and the mock transport just records it to the outbox.
+  // WhatsApp niceties (P2-HUMANIZE §3): blue ticks always (the message was
+  // seen), but the typing bubble ONLY when the bot will actually reply — never
+  // on a paused (human-takeover) conversation, where "typing…" then silence is
+  // worse than nothing. Fire-and-forget: a Graph hiccup must not delay the turn.
   if (inbound.channel === 'whatsapp' && inbound.messageId) {
-    Promise.resolve(sender.markRead(clinic, inbound.messageId, { typing: true })).catch(() => {});
+    Promise.resolve(sender.markRead(clinic, inbound.messageId, { typing: !convo.aiPaused })).catch(
+      () => {}
+    );
   }
 
   // Media turn (P2-D): the 📎 owner alert + SSE fire for EVERY stored media —
@@ -270,8 +273,14 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   }
 
   if (out.handoff) {
-    // Bot steps back: flag for a human and pause until staff hand control back.
-    await store.conversations.update(tenantId, conversationId, { status: 'needs_human', aiPaused: true });
+    // Flag for a human + alert the owner. Classic handoff PAUSES the bot (it
+    // pointed the patient off WhatsApp). The llm handoff sets keepActive: the
+    // patient was told the team will reply HERE and the bot can keep helping in
+    // the meantime (§2.6), so we flag needs_human WITHOUT pausing — takeover
+    // pauses the bot when staff actually sends the first message.
+    const keepActive = out.handoff.keepActive === true;
+    const patch = keepActive ? { status: 'needs_human' } : { status: 'needs_human', aiPaused: true };
+    await store.conversations.update(tenantId, conversationId, patch);
     bus.publish('handoff.requested', {
       tenantId,
       conversationId,
@@ -279,11 +288,7 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
       lastMessage: inbound.text,
       patientWaId: inbound.from,
     });
-    bus.publish('conversation.updated', {
-      tenantId,
-      conversationId,
-      patch: { status: 'needs_human', aiPaused: true },
-    });
+    bus.publish('conversation.updated', { tenantId, conversationId, patch });
   }
 
   return { tenantId, conversationId, out, lead: analysis.lead || null };

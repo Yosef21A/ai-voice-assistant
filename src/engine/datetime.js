@@ -82,7 +82,7 @@ export function parseDateTimeRequest(text, now) {
   // present: "اثنين ١٠" means Monday at 10 — dropping the 10 silently booked
   // the wrong slot (live failure F4).
   if (hour == null) {
-    const hasTimeWord = /(ساعة|صباح|مساء|عشية|matin|soir|midi|heure|apres-?midi|après-?midi|morning|afternoon|evening|am|pm|\bat\b|على\s|à)/.test(t);
+    const hasTimeWord = /(ساعة|صباح|مساء|عشية|matin|soir|midi|heure|apres-?midi|après-?midi|morning|afternoon|evening|\bam\b|\bpm\b|\bat\b|على\s|à)/.test(t);
     m = rest.match(/\b(\d{1,2})\b/);
     if (m && +m[1] <= 23 && (hasTimeWord || date)) {
       hour = +m[1];
@@ -92,8 +92,11 @@ export function parseDateTimeRequest(text, now) {
   }
 
   if (hour != null) {
-    const pm = /(مساء|عشية|soir|apres-?midi|après-?midi|afternoon|evening|pm)/.test(t);
-    const am = /(صباح|matin|morning|am)/.test(t);
+    // Word-bounded am/pm: bare "am" is a substring of "samedi" (French
+    // Saturday), which silently made the afternoon inference below fire only on
+    // some weekdays. Boundaries keep the meridiem tied to a real am/pm token.
+    const pm = /(مساء|عشية|soir|apres-?midi|après-?midi|afternoon|evening|\bpm\b)/.test(t);
+    const am = /(صباح|matin|morning|\bam\b)/.test(t);
     if (pm && hour < 12) hour += 12;
     if (am && hour === 12) hour = 0;
     // A bare 1-7 with no am/pm marker means the afternoon in clinic context

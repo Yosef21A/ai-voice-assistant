@@ -11,8 +11,11 @@ const KEYWORDS = {
     ar: ['الغاء', 'إلغاء', 'ألغي', 'الغي', 'نلغي', 'نلغيو', 'بطل', 'نبطل', 'ما نحبش', 'مانحبش', 'ما عادش نحب', 'سامحني'],
     fr: ['annuler', 'annulation', 'arreter', 'arrêter', 'laisse tomber', 'oublie', 'pas maintenant'],
     // "I dont wanna book" (live failure F1) must read as refusal, not as a
-    // botched specialty answer — refusal is sacred (P2-HUMANIZE §2.4).
-    en: ['cancel', 'stop', 'abort', 'nevermind', 'never mind', 'forget it', "don't wanna", 'dont wanna', "don't want", 'dont want', 'not now', 'no thanks', 'not interested'],
+    // botched specialty answer — refusal is sacred (P2-HUMANIZE §2.4). NOTE:
+    // bare "don't want" is deliberately excluded — it fires on mid-flow
+    // corrections ("I don't want cardiology, I want dental"); the colloquial
+    // "dont wanna" and the explicit deferrals below carry the refusal signal.
+    en: ['cancel', 'stop', 'abort', 'nevermind', 'never mind', 'forget it', "don't wanna", 'dont wanna', 'not now', 'no thanks', 'not interested'],
   },
   pricing_quote: {
     ar: ['سعر', 'ثمن', 'بقداش', 'قداش', 'كم يكلف', 'تكلفة', 'أسعار', 'اسعار', 'كم سعر', 'التكلفة', 'chhal', 'ch7al', '9adech', '9addech'],

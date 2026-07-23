@@ -222,8 +222,10 @@ test('F6: handoff keeps the patient in the chat — pause + 🙋 owner alert', a
   assert.ok(r.out.reply.includes('نفس المحادثة'), 'patient told the team replies HERE');
 
   const convo = await app.store.conversations.get(A, '218922200001');
-  assert.equal(convo.aiPaused, true, 'bot stepped back');
+  // §2.6: the bot KEEPS the chat — needs_human flag + owner alert, but NOT
+  // paused, so it can keep helping until staff actually take over.
   assert.equal(convo.status, 'needs_human');
+  assert.equal(convo.aiPaused, false, 'bot stays active meanwhile (never dead-ends)');
 
   const alerts = readOutbox(app).filter((x) => x.ok && x.to === OWNER).map((x) => x.payload.text.body);
   assert.ok(alerts.some((a) => a.includes('🙋')), 'owner handoff alert sent');

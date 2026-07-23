@@ -141,24 +141,28 @@ async function route(ctx) {
   const gi = detectIntent(text);
 
   // An active booking flow captures the turn, except for explicit interrupts.
-  // A STALE flow (idle >2h, F9) no longer captures: the message routes fresh
-  // by intent; collected slots survive via startBooking's data carry-over.
-  if (convo.state?.flow === 'booking' && !ctx.staleFlow) {
+  if (convo.state?.flow === 'booking') {
+    // cancel / handoff are interrupts in BOTH fresh and stale flows — a stale
+    // flow must still be cancellable, or the patient hears "nothing to cancel"
+    // while a zombie flow re-captures the next message (F9 regression).
     if (gi.intent === 'cancel') return cancelBooking(ctx);
     if (gi.intent === 'human_handoff') return handleHandoff(ctx);
-    return continueBooking(ctx);
-  }
-  if (convo.state?.flow === 'booking' && ctx.staleFlow && gi.intent === 'unknown') {
-    // Fresh evaluation of an unknown message against a stale flow: fall through
-    // to the FAQ/fallback handlers instead of force-feeding the old step.
-    return handleFallback(ctx);
+    // A live (non-stale) flow captures the turn on its current step.
+    if (!ctx.staleFlow) return continueBooking(ctx);
+    // Stale flow (idle >2h, F9): the "expected answer" lock is released. A
+    // restated booking intent resumes (slots carried over by startBooking);
+    // anything else is evaluated fresh through the switch below.
+    if (gi.intent === 'book_appointment') return startBooking(ctx);
   }
 
   switch (gi.intent) {
     case 'human_handoff':
       return handleHandoff(ctx);
     case 'cancel':
-      return { intent: 'cancel', replies: [t(ctx.lang, 'nothingToCancel')] };
+      // A lingering (stale) flow is cleared; with no flow, nothing to cancel.
+      return convo.state?.flow === 'booking'
+        ? cancelBooking(ctx)
+        : { intent: 'cancel', replies: [t(ctx.lang, 'nothingToCancel')] };
     case 'pricing_quote':
       return handlePricing(ctx);
     case 'book_appointment':

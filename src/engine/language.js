@@ -26,21 +26,30 @@ function tokens(text) {
 }
 
 // ── Arabizi (Arabic in Latin letters, F2) ────────────────────────────────────
-// Two signals: a lexicon of common Tunisian/Libyan chat words, and the
-// letters-as-digits convention (3=ع, 7=ح, 9=ق, 5=خ, 2=ء) INSIDE a word.
-const ARABIZI_WORDS = new Set([
-  'aslema', 'aslama', '3aslema', 'salam', 'salem', 'slm', 'mar7ba', 'mar7aba', 'marahba',
-  'sba7', 'sbah', 'labes', 'lebes', 'chneya', 'chnowa', 'chnia', 'chkoun', 'kifach', 'kifech',
-  '9adech', '9addech', 'kadesh', 'chhal', 'ch7al', 'na7eb', 'n7eb', 'nheb', 'nhebb',
-  'na7jez', 'n7jez', 'nahjez', '7ajz', 'hjez', 'maw3ed', 'maw3ad', 'mawid', 'mou3id',
-  'tbib', 'doktor', 'doctour', '3iyada', 'behi', 'bahi', 'barcha', 'barsha', 'yezzi',
-  'sa7a', 'sahha', 'ya3tik', 'wa9tach', 'waktach', 'win', 'wen', 'famma', 'fama',
-  'mawjoud', 'njem', 'najem', 'momken', 'mumken', '3andi', '3andek', '3andkom',
-  'bech', 'besh', 'inchallah', 'nchalla', '3la', 'mte3', 'mta3',
+// Three signals: STRONG lexicon words that are unambiguously Arabic chat (a
+// single one settles it), WEAK words that also appear in FR/EN or are short/
+// ambiguous (need corroboration), and the letters-as-digits convention
+// (3=ع, 7=ح, 9=ق, 5=خ, 2=ء) INSIDE a word.
+const ARABIZI_STRONG = new Set([
+  'aslema', 'aslama', '3aslema', 'mar7ba', 'mar7aba', 'marahba', 'chnowa', 'chneya', 'chnia',
+  'chkoun', 'kifach', 'kifech', '9adech', '9addech', 'chhal', 'ch7al', 'na7eb', 'n7eb',
+  'nhebb', 'na7jez', 'n7jez', 'nahjez', '7ajz', 'maw3ed', 'maw3ad', 'wa9tach', 'waktach',
+  '3iyada', 'ya3tik', 'barcha', 'barsha', 'yezzi', 'inchallah', 'nchalla',
+]);
+const ARABIZI_WEAK = new Set([
+  'salam', 'salem', 'slm', 'sba7', 'sbah', 'labes', 'lebes', 'kadesh', 'nheb', 'hjez',
+  'mawid', 'mou3id', 'tbib', 'doktor', 'doctour', 'behi', 'bahi', 'sa7a', 'sahha',
+  'famma', 'fama', 'mawjoud', 'njem', 'najem', 'momken', 'mumken', '3andi', '3andek',
+  '3andkom', 'bech', 'besh', '3la', 'mte3', 'mta3',
 ]);
 const ARABIZI_TOKEN_RE = /[a-z][23579][a-z]|^[23579][a-z]{3,}$/;
 
-/** True when the text reads as Arabic written in Latin letters. */
+/**
+ * True when the text reads as Arabic written in Latin letters. A single strong
+ * marker is enough ("aslema"); weak/ambiguous words (which overlap FR/EN, e.g.
+ * a bare loanword) need a second signal so an English or French sentence that
+ * merely contains one isn't flipped to Arabic.
+ */
 export function isArabizi(text = '') {
   if (ARABIC_RE.test(text)) return false; // real Arabic script wins
   const toks = String(text)
@@ -49,7 +58,8 @@ export function isArabizi(text = '') {
     .filter(Boolean);
   let hits = 0;
   for (const w of toks) {
-    if (ARABIZI_WORDS.has(w)) hits += 2;
+    if (ARABIZI_STRONG.has(w)) hits += 2;
+    else if (ARABIZI_WEAK.has(w)) hits += 1;
     else if (/[a-z]/.test(w) && ARABIZI_TOKEN_RE.test(w)) hits += 1;
   }
   return hits >= 2;
