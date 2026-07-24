@@ -242,6 +242,19 @@ test('LLM failure → classic flow answers + llm.fallback audit event', async ()
   assert.ok(events.length >= 1, 'fallback audited');
 });
 
+test('a transient LLM error is retried once, not dumped to classic', async () => {
+  // Models the observed free-tier `http 429` (fast fail) followed by a good
+  // response on the retry — must recover with the LLM reply, never the menu.
+  const { engine, provider } = llmEngine([
+    new Error('gemini http 429'),
+    plan({ reply_text: 'أهلا بيك 👋 كيفاش ننجّم نعاونك؟', detected_lang: 'ar' }),
+  ]);
+  const out = await turn(engine, ID(), 'مرحبا');
+  assert.equal(provider.calls.length, 2, 'retried once');
+  assert.ok(out.reply.includes('كيفاش'), 'recovered with the LLM reply');
+  assert.notEqual(out.intent, undefined);
+});
+
 test('classic mode never calls generateStructured', async () => {
   const config = getConfig({ conversationMode: 'classic' });
   const runtimeDir = path.join(os.tmpdir(), `omen-hum-${randomUUID()}`);

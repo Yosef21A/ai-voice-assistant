@@ -100,6 +100,26 @@ test('a lone number with no date and no time-word is still ignored', () => {
   assert.equal(req.date, null);
 });
 
+// ── Arabizi dates (corridor chat style — feeds the executor backfill) ────────
+
+test('Arabizi weekday + time-of-day parses ("jem3a 3 3chia" → Friday 15:00)', () => {
+  const req = parseDateTimeRequest('jem3a 3 3chia', NOW);
+  assert.ok(req.date);
+  assert.equal(new Date(req.date.y, req.date.mo, req.date.d).getDay(), 5, 'Friday');
+  assert.equal(req.hour, 15, '3chia (evening) forces PM');
+});
+
+test('Arabizi morning keeps the hour ("litnin 10 sbah" → Monday 10:00)', () => {
+  const req = parseDateTimeRequest('litnin 10 sbah', NOW);
+  assert.equal(new Date(req.date.y, req.date.mo, req.date.d).getDay(), 1, 'Monday');
+  assert.equal(req.hour, 10);
+});
+
+test('Arabizi weekday alone resolves the day ("lkhmis" → Thursday)', () => {
+  const req = parseDateTimeRequest('lkhmis el 3chia', NOW);
+  assert.equal(new Date(req.date.y, req.date.mo, req.date.d).getDay(), 4, 'Thursday');
+});
+
 // ── end-to-end classic booking (F4 replay) ───────────────────────────────────
 
 test('F4 replay: "اثنين ١٠" books Monday 10:00, not the opening slot', async () => {

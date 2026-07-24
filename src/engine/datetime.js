@@ -5,14 +5,16 @@
 import { WD_KEYS, SLOT_MIN, toMins } from '../store/availability.js';
 import { normalizeDigits as normDigits } from './text.js';
 
+// Includes common Tunisian/Libyan Arabizi spellings (Latin) so the deterministic
+// backfill can read dates the LLM leaves in prose ("lkhmis el 3chia").
 const WEEKDAY_WORDS = {
-  0: ['sunday', 'dimanche', 'الاحد', 'الأحد', 'احد'],
-  1: ['monday', 'lundi', 'الاثنين', 'الإثنين', 'الاتنين', 'اثنين'],
-  2: ['tuesday', 'mardi', 'الثلاثاء', 'الثلاثا', 'ثلاثاء'],
-  3: ['wednesday', 'mercredi', 'الاربعاء', 'الأربعاء', 'اربعاء'],
-  4: ['thursday', 'jeudi', 'الخميس', 'خميس'],
-  5: ['friday', 'vendredi', 'الجمعة', 'الجمعه', 'جمعة'],
-  6: ['saturday', 'samedi', 'السبت', 'سبت'],
+  0: ['sunday', 'dimanche', 'الاحد', 'الأحد', 'احد', 'lahad', 'l7ad', 'elhad'],
+  1: ['monday', 'lundi', 'الاثنين', 'الإثنين', 'الاتنين', 'اثنين', 'litnin', 'letnin', 'litnine', 'tnin'],
+  2: ['tuesday', 'mardi', 'الثلاثاء', 'الثلاثا', 'ثلاثاء', 'tlata', 'thlatha', 'eltlata'],
+  3: ['wednesday', 'mercredi', 'الاربعاء', 'الأربعاء', 'اربعاء', 'larb3a', 'larbaa', 'larba3'],
+  4: ['thursday', 'jeudi', 'الخميس', 'خميس', 'lkhmis', 'lekhmis', 'khmis', 'khemis'],
+  5: ['friday', 'vendredi', 'الجمعة', 'الجمعه', 'جمعة', 'jem3a', 'jemaa', 'ljem3a', 'jum3a'],
+  6: ['saturday', 'samedi', 'السبت', 'سبت', 'sebt', 'essebt', 'sabt'],
 };
 
 const WEEKDAY_NAMES = {
@@ -61,11 +63,11 @@ export function parseDateTimeRequest(text, now) {
     rest = rest.replace(m[0], ' ');
   }
 
-  // ── date: relative words ──
+  // ── date: relative words (incl. Arabizi) ──
   if (!date) {
     if (/(بعد غد|بعد غدا|apres-demain|après-demain|day after tomorrow)/.test(t)) date = offsetDate(now, 2);
-    else if (/(غدا|غدًا|غداً|بكرة|demain|tomorrow)/.test(t)) date = offsetDate(now, 1);
-    else if (/(اليوم|aujourd'?hui|today)/.test(t)) date = offsetDate(now, 0);
+    else if (/(غدا|غدًا|غداً|بكرة|demain|tomorrow|ghodwa|ghdwa|ghadwa|bekri|bokra)/.test(t)) date = offsetDate(now, 1);
+    else if (/(اليوم|aujourd'?hui|today|lyoum|lioum|elyoum)/.test(t)) date = offsetDate(now, 0);
   }
 
   // ── date: weekday name ──
@@ -82,7 +84,7 @@ export function parseDateTimeRequest(text, now) {
   // present: "اثنين ١٠" means Monday at 10 — dropping the 10 silently booked
   // the wrong slot (live failure F4).
   if (hour == null) {
-    const hasTimeWord = /(ساعة|صباح|مساء|عشية|matin|soir|midi|heure|apres-?midi|après-?midi|morning|afternoon|evening|\bam\b|\bpm\b|\bat\b|على\s|à)/.test(t);
+    const hasTimeWord = /(ساعة|صباح|مساء|عشية|matin|soir|midi|heure|apres-?midi|après-?midi|morning|afternoon|evening|sbah|sba7|sabah|3chi|3achi|3shi|\bam\b|\bpm\b|\bat\b|على\s|à)/.test(t);
     m = rest.match(/\b(\d{1,2})\b/);
     if (m && +m[1] <= 23 && (hasTimeWord || date)) {
       hour = +m[1];
@@ -95,8 +97,8 @@ export function parseDateTimeRequest(text, now) {
     // Word-bounded am/pm: bare "am" is a substring of "samedi" (French
     // Saturday), which silently made the afternoon inference below fire only on
     // some weekdays. Boundaries keep the meridiem tied to a real am/pm token.
-    const pm = /(مساء|عشية|soir|apres-?midi|après-?midi|afternoon|evening|\bpm\b)/.test(t);
-    const am = /(صباح|matin|morning|\bam\b)/.test(t);
+    const pm = /(مساء|عشية|soir|apres-?midi|après-?midi|afternoon|evening|3chi|3achi|3shi|\bpm\b)/.test(t);
+    const am = /(صباح|matin|morning|sbah|sba7|sabah|\bam\b)/.test(t);
     if (pm && hour < 12) hour += 12;
     if (am && hour === 12) hour = 0;
     // A bare 1-7 with no am/pm marker means the afternoon in clinic context

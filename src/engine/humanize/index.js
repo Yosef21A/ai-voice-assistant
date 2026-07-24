@@ -8,6 +8,29 @@ import { coercePlan } from './schema.js';
 import { executePlan, applyVariation } from './executor.js';
 import { VARY_HINT } from './prompt.js';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * One structured call with a single retry. Observed failures on the free Gemini
+ * tier are dominated by a fast (~0.1s) `http 429` under bursts, and the
+ * occasional truncated/blocked response — all transient. A brief backoff + one
+ * fresh attempt recovers almost all of them, which beats dumping the patient to
+ * the classic "I didn't understand" menu. If BOTH attempts fail it throws, and
+ * the engine falls back to classic (the bot still never goes silent).
+ */
+async function callStructured(provider, request) {
+  try {
+    return await provider.generateStructured(request);
+  } catch (first) {
+    await sleep(600);
+    try {
+      return await provider.generateStructured(request);
+    } catch {
+      throw first;
+    }
+  }
+}
+
 /**
  * @param {object} ctx  the engine turn context ({inbound, text, clinic, convo,
  *                      lang, store, provider, config, now})
@@ -26,7 +49,7 @@ export async function handleLlmTurn(ctx) {
   // request carries { system, messages, schema } — schema is the per-tenant
   // ENUM-constrained variant (buildLlmRequest), which prevents flash models
   // from looping on the specialty string field.
-  const plan = coercePlan(await ctx.provider.generateStructured(request));
+  const plan = coercePlan(await callStructured(ctx.provider, request));
   let result = executePlan(ctx, plan);
 
   if (result.__repeat) {
