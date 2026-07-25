@@ -93,6 +93,16 @@ function shortSnippet(text, max = 160) {
  * @param {string}  [args.waId]        patient WhatsApp id (E.164 digits)
  * @param {object}  [args.bus]         ClinicEventBus (optional; verdicts still returned)
  * @param {string}  [args.conversationId] override; else derived `${tenantId}:${waId}`
+ * @param {boolean} [args.emergencyOnly] run ONLY the emergency detector and return.
+ *   Used by the ingest PREFLIGHT, which runs before the engine: emergency
+ *   detection is a deterministic regex pass costing ~0 ms, and it must not sit
+ *   behind an LLM round trip that can take seconds or be starved by a 429.
+ *   The lead verdict is skipped because it needs an engineResult we don't have yet.
+ * @param {boolean} [args.skipEmergency] skip the emergency block entirely and run
+ *   only the lead verdict. The post-engine call uses this so `emergency.detected`
+ *   can never be emitted twice for one turn.
+ * Both default false ⇒ behaviour is byte-for-byte today's for every other caller
+ * (/simulate, /api/sandbox, the existing tests).
  * @returns {{emergency:object|null, overrideReply:string|null, lead:object|null, hot:boolean}}
  */
 export function analyzeInbound({
@@ -103,6 +113,8 @@ export function analyzeInbound({
   waId,
   bus,
   conversationId,
+  emergencyOnly = false,
+  skipEmergency = false,
 } = {}) {
   const out = { emergency: null, overrideReply: null, lead: null, hot: false };
   try {
@@ -113,7 +125,7 @@ export function analyzeInbound({
     // 1) EMERGENCY — highest priority. A hit steps the bot back: we emit the
     //    alert AND return an overrideReply the caller MUST send instead of the
     //    engine output. We do NOT also classify a lead on an emergency turn.
-    const emg = detectEmergency(text, lang);
+    const emg = skipEmergency ? { hit: false } : detectEmergency(text, lang);
     if (emg.hit) {
       const emergency = {
         keyword: emg.keyword,
@@ -123,7 +135,17 @@ export function analyzeInbound({
         conversationId: convId,
       };
       out.emergency = emergency;
-      out.overrideReply = buildEmergencyReply(tenant, lang);
+      // Localize from the table that ACTUALLY matched, not from the ambient
+      // language guess. detectLanguage() returns null for a French or English
+      // sentence carrying no hint word — "j'ai une forte douleur thoracique" is
+      // exactly that — so the ambient guess falls through to the clinic's
+      // primary language and would answer a French emergency in Arabic. The
+      // matched keyword table is direct evidence of what the patient wrote.
+      // ('arabizi' is Arabic typed in Latin letters → Arabic-script reply, the
+      // same mapping the humanize executor uses for 'ar-Latn'.)
+      const matched = emg.lang === 'arabizi' ? 'ar' : emg.lang;
+      const replyLang = ['ar', 'fr', 'en'].includes(matched) ? matched : lang;
+      out.overrideReply = buildEmergencyReply(tenant, replyLang);
       publish(bus, 'emergency.detected', {
         tenantId: tid,
         conversationId: convId,
@@ -135,6 +157,8 @@ export function analyzeInbound({
       });
       return out;
     }
+    // The preflight has no engineResult, so there is no lead verdict to make.
+    if (emergencyOnly) return out;
 
     // 2) HOT LEAD — revenue signal. Never fires on a completed booking turn
     //    (isHotLead guards that); the booking alert already covers those.

@@ -9,14 +9,31 @@
 | WABA id | `1038353382027655` |
 | Test number | **+1 (555) 177-7574** — phone_number_id `1153135121224452` |
 | Allow-listed recipient | +216 29 496 305 (Youssef, verified via OTP) — max 5 total |
-| Webhook callback | `https://dock-flooring-comparisons-issn.trycloudflare.com/webhook` (VERIFIED ✓) |
+| Webhook callback | **rotates every session** — a free `trycloudflare` URL changes on every `cloudflared` restart, so it MUST be re-entered in the Meta console each time (see below). Last set 2026-07-25: `https://durham-pharmaceutical-painted-robin.trycloudflare.com/webhook` |
 | Console page | developers.facebook.com → app → WhatsApp → Étape 1 (api-testing-v2) |
 
 ## .env state (repo root, git-ignored — NEVER commit or print it)
-- `WHATSAPP_TOKEN` — **temporary token, regenerated 2026-07-20, expires ~24h.** When it dies: console Étape 1 → "Générer un token" (popup; popups must be allowed) → paste new value into `.env` → restart server.
+- `WHATSAPP_TOKEN` — **temporary token, expires ~24h.** When it dies (Graph returns `OAuthException 190`):
+  console Étape 1 → "Générer un token" (popup; popups must be allowed) → paste new value into `.env` →
+  restart the server. Youssef pastes it himself; it never needs to travel through chat.
 - `WHATSAPP_PHONE_NUMBER_ID=1153135121224452`, `WHATSAPP_VERIFY_TOKEN=omen-verify-18c7b105b0484b25`, `APP_SECRET` set. `WHATSAPP_APP_SECRET` NOT set (signature check off — fine for dev).
-- `ANTHROPIC_API_KEY` is present on Youssef's machine env (health shows provider "anthropic").
+- `GEMINI_API_KEY` + `GEMINI_MODEL` are set → `/health` reports provider `gemini` and the bot runs in
+  LLM (humanize) mode. Unset the key and it runs classic/deterministic. The free tier has a DAILY quota
+  that has been exhausted before — when it is, the provider degrades and the bot silently runs classic.
 - `data/clinics.json`: El Amen tenant keyed to `1153135121224452` (committed `2b92c67`).
+
+## Session start-up ritual (what actually has to happen every time)
+1. `npm start` (port 3000) — kill any stale listener first: `netstat -ano | grep :3000`, confirm the PID is
+   `node src/server.js`, then `taskkill //PID <pid> //F`. Stopping the shell task does NOT kill the child.
+2. `cloudflared tunnel --url http://localhost:3000` → note the NEW public URL.
+3. Meta console → WhatsApp → Étape 1 → Webhook → Modifier → paste `<new-url>/webhook` + the verify token
+   above → Vérifier et enregistrer. Pre-check it yourself first — the handshake is just:
+   `curl "<url>/webhook?hub.mode=subscribe&hub.verify_token=<verify-token>&hub.challenge=OK"` → echoes `OK`.
+4. Confirm the app is still subscribed to the WABA (this silently failed once and produced NO webhooks):
+   `curl -H "Authorization: Bearer $TOK" "https://graph.facebook.com/v25.0/1038353382027655/subscribed_apps"`
+   → expect `omen-clinic-agent` in the list.
+5. Testing without bothering the founder: WhatsApp Web in his Chrome (claude-in-chrome MCP) is logged in
+   and his number is the allow-listed recipient, so messages sent from there exercise the real loop.
 
 ## THE BUG WE FIXED LAST (important)
 Inbound messages produced NO webhook because the app was never subscribed to the WABA (console auto-subscribe silently failed). Fixed via API — this is the diagnostic + fix if it ever regresses:
@@ -44,7 +61,7 @@ cloudflared tunnel --url http://localhost:3000   # public tunnel
 ```
 - If the tunnel restarts, the URL CHANGES → the Meta console webhook must be updated to the new `https://…/webhook` (verify token above) — Youssef does this in the console UI (or automate later with an app-access-token subscriptions call).
 - `npm start` must be restarted whenever `.env` changes.
-- Keep `npm test` green (247 pass / 1 skip baseline) before/after every change.
+- Keep `npm test` green (252 pass / 1 skip baseline) before/after every change.
 
 ## Build roadmap after verification (in order)
 1. **P1-G** — engine async on the store interface → `DATABASE_URL` flips Postgres to primary (schema/adapter/tests already exist from P1-A).

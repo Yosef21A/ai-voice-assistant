@@ -18,6 +18,7 @@
 import { sendAs, publicMessage } from './outbound.js';
 import { analyzeInbound } from '../notifications/index.js';
 import { normalizeQuestion, isSandboxWaId } from '../stats/index.js';
+import { detectLanguage, resolveLanguage } from '../engine/language.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
 // interprets media medically — it confirms receipt and promises a human.
@@ -109,6 +110,56 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   // Human takeover: the bot stays silent while a staff member is driving.
   if (convo.aiPaused) return { tenantId, conversationId, paused: true };
 
+  // ── EMERGENCY PREFLIGHT ────────────────────────────────────────────────────
+  // Runs BEFORE the engine, deliberately. Emergency detection is a deterministic
+  // regex pass costing ~0 ms; the engine is an LLM round trip that can take
+  // seconds and can be starved outright by a 429. Detecting a chest-pain message
+  // only after that budget is spent is not acceptable in a medical product, so
+  // the safety reply goes out first and the model never gates it.
+  //
+  // The language is resolved HERE rather than borrowed from the engine result
+  // (which doesn't exist yet): buildEmergencyReply falls back to French for an
+  // unknown lang, and an Arabic speaker in crisis must not get a French message.
+  const preLang = resolveLanguage(detectLanguage(inbound.text), convo.lang, clinic);
+  const preflight = analyzeInbound({
+    tenant: clinic,
+    text: inbound.text,
+    lang: preLang,
+    waId: inbound.from,
+    bus,
+    conversationId,
+    emergencyOnly: true,
+  });
+  if (preflight.overrideReply) {
+    await sendAs('bot', conversationId, () =>
+      sender.sendText(clinic, inbound.from, preflight.overrideReply)
+    );
+    await store.conversations.update(tenantId, conversationId, {
+      status: 'needs_human',
+      aiPaused: true,
+    });
+    bus.publish('conversation.updated', {
+      tenantId,
+      conversationId,
+      patch: { status: 'needs_human', aiPaused: true },
+    });
+    try {
+      await store.events.append(tenantId, {
+        type: 'message.analyzed',
+        actor: 'engine',
+        conversationId,
+        payload: {
+          intent: 'emergency',
+          lang: preLang,
+          snippet: String(inbound.text || '').slice(0, 160),
+        },
+      });
+    } catch {
+      /* best-effort audit trail */
+    }
+    return { tenantId, conversationId, emergency: preflight.emergency };
+  }
+
   // Captionless media: nothing for the engine to parse — acknowledge receipt
   // and stop. GUARDRAIL: media is routed to a human, never interpreted.
   if (mediaMeta && !inbound.text) {
@@ -143,9 +194,10 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
     }
   };
 
-  // Detectors run BESIDE the engine (which never touches the bus). analyzeInbound
-  // emits lead.hot / emergency.detected for the notification service and returns
-  // an overrideReply on emergencies so the bot steps back.
+  // Detectors run BESIDE the engine (which never touches the bus). The EMERGENCY
+  // half already ran in the preflight above — this call takes the lead verdict
+  // only (it needs the engineResult), and `skipEmergency` guarantees
+  // `emergency.detected` can never be emitted twice for one turn.
   const analysis = analyzeInbound({
     tenant: clinic,
     text: inbound.text,
@@ -154,24 +206,8 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
     waId: inbound.from,
     bus,
     conversationId,
+    skipEmergency: true,
   });
-
-  if (analysis.overrideReply) {
-    // EMERGENCY: replace the engine reply with the safety message, persist it as
-    // a bot bubble, pause the bot, and flag the conversation for a human. The
-    // 🚨 owner alert is fired by the notification service off emergency.detected.
-    await sendAs('bot', conversationId, () =>
-      sender.sendText(clinic, inbound.from, analysis.overrideReply)
-    );
-    await store.conversations.update(tenantId, conversationId, { status: 'needs_human', aiPaused: true });
-    bus.publish('conversation.updated', {
-      tenantId,
-      conversationId,
-      patch: { status: 'needs_human', aiPaused: true },
-    });
-    await logAnalyzed();
-    return { tenantId, conversationId, emergency: analysis.emergency };
-  }
 
   if (out.replies && out.replies.length) {
     await sendAs('bot', conversationId, () => sender.sendEngineReply(clinic, inbound.from, out));
