@@ -18,6 +18,15 @@ import { t } from '../responses.js';
 import { splitBubbles } from '../text.js';
 import { filterReply } from './guardrails.js';
 import { mapIntent, isRepeat, pickVariation } from './policies.js';
+import {
+  snapshotCritical,
+  diffCritical,
+  markVoiceProvisional,
+  clearTypedOverrides,
+  resolveVoiceConfirm,
+  blocksFinalize,
+  markEchoed,
+} from '../voiceSlots.js';
 
 const LANG_MAP = { ar: 'ar', fr: 'fr', en: 'en', 'ar-Latn': 'ar' };
 const WARM_LINE_MAX = 200;
@@ -182,12 +191,26 @@ export function executePlan(ctx, plan) {
   const yn = detectYesNo(ctx.text);
   const actions = new Set(plan.actions);
 
+  // Voice humility gate (V1). Resolve any PENDING read-back first, before this
+  // turn writes anything, so a turn can never confirm its own slots.
+  const beforeCritical = snapshotCritical(data);
+  resolveVoiceConfirm(ctx, state, data, yn);
+
   const patch = applySlots(ctx, plan.slots_patch, data);
   if (patch.any && state.flow !== 'booking') state.flow = 'booking';
   // Once a booking is live, backstop the LLM's slot extraction from the raw
   // message so a captured date/city/phone never gets stranded in the prose.
   if (state.flow === 'booking') {
     backfillFromText(ctx, data, patch);
+    // Mark whatever this turn captured. On a VOICE turn the values become
+    // provisional (and a spoken phone number is moved off `data.contact`
+    // entirely) BEFORE nextStep/buildSummary read the data, so the recap can
+    // never restate a contact the state no longer holds.
+    const changed = diffCritical(beforeCritical, data);
+    markVoiceProvisional(ctx, data, beforeCritical);
+    // A TYPED value for a field is authoritative and needs no read-back — drop
+    // that field's provenance (and only that field's).
+    clearTypedOverrides(ctx, data, changed);
     state.step = nextStep(data);
   }
 
@@ -255,7 +278,11 @@ export function executePlan(ctx, plan) {
     // disclosed (§3) and where the patient sees the parsed facts. A first-turn
     // confirm_booking (no recap yet) falls through to propose the recap.
     const agreed = yn === 'yes' || (wantsConfirm && yn !== 'no');
-    if (h.awaitingConfirm && agreed) {
+    // Voice humility gate: a slot heard in a voice note and not yet read back
+    // cannot be booked. This does NOT deadlock — falling through renders the
+    // recap below, which IS the read-back, so the very next "نعم" completes the
+    // booking. Cost on a clean voice booking: zero extra turns.
+    if (h.awaitingConfirm && agreed && !blocksFinalize(data)) {
       const fin = finalizeBooking(ctx); // the ONE appointment write + booked recap
       const appt = fin.appointment;
       convo.state = {
@@ -278,11 +305,13 @@ export function executePlan(ctx, plan) {
         reply && reply.length <= WARM_LINE_MAX ? [reply, ...fin.replies] : fin.replies;
       return finish(ctx, result);
     }
-    if (wantsConfirm || actions.has('propose_summary')) {
+    if (wantsConfirm || actions.has('propose_summary') || blocksFinalize(data)) {
       // A confirm without consent downgrades to a proposal — the recap is
       // template-rendered so every number is the executor's, never the LLM's.
       h.awaitingConfirm = true;
       state.step = 'confirm';
+      // buildSummary() promotes 'heard' → 'echoed' itself: the recap IS the
+      // read-back, so the patient's next "نعم" is consent to these exact values.
       const summary = buildSummary(ctx);
       result.replies = reply && reply.length <= WARM_LINE_MAX ? [reply, summary] : [summary];
       return finish(ctx, result);

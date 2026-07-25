@@ -10,6 +10,7 @@ import { matchFaq, faqAnswer } from './faq.js';
 import { t } from './responses.js';
 import { normalizeDigits } from './text.js';
 import { handleLlmTurn } from './humanize/index.js';
+import { snapshotCritical, markVoiceProvisional } from './voiceSlots.js';
 
 // F9 state decay: a booking flow idle longer than this keeps its slots but
 // drops the "expected answer" lock — the next message is evaluated fresh.
@@ -56,6 +57,13 @@ export function createEngine({ store, provider, config }) {
       provider,
       config,
       now,
+      // V1: how this turn's TEXT reached us. 'voice' means it is a machine
+      // transcript of a voice note, not something the patient typed — the
+      // humility guardrail (voiceSlots.js) keys off this. The engine stays
+      // transport-agnostic; it just consumes two more fields on the normalized
+      // inbound shape.
+      source: inbound.source === 'voice' ? 'voice' : 'text',
+      voice: inbound.voice || null,
       // F9: mark a stale booking flow so route() releases the step lock.
       staleFlow:
         convo.state?.flow === 'booking' &&
@@ -89,7 +97,15 @@ export function createEngine({ store, provider, config }) {
         }
       }
     }
+    const beforeCritical = snapshotCritical(convo.state?.data);
     if (!result) result = await route(ctx);
+
+    // Writer-agnostic BACKSTOP for the voice humility guardrail. The executor
+    // marks its own writes, but the CLASSIC state machine (continueBooking /
+    // startBooking) writes slots directly and is reached on any LLM failure —
+    // and any writer added later would be too. Diffing here means nobody has to
+    // remember to call markVoiceProvisional at a new assignment site.
+    if (convo.state?.data) markVoiceProvisional(ctx, convo.state.data, beforeCritical);
 
     const replies = result.replies || [];
     for (const r of replies) convo.messages.push({ role: 'assistant', text: r, ts: now.toISOString() });

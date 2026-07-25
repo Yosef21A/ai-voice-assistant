@@ -14,6 +14,8 @@ import {
   detectYesNo,
 } from './slots.js';
 import { parseDateTimeRequest, resolveSlot, formatWhen } from './datetime.js';
+// Leaf module — voiceSlots.js imports nothing from here, so there is no cycle.
+import { blocksFinalize, markEchoed } from './voiceSlots.js';
 
 const STEPS = ['specialty', 'datetime', 'name', 'origin', 'contact', 'confirm'];
 
@@ -48,6 +50,12 @@ function nextStep(data) {
 function buildSummary(ctx) {
   const { clinic, lang, convo } = ctx;
   const d = convo.state.data;
+  // The recap IS the voice read-back (V1 humility guardrail): it restates every
+  // captured fact from re-derived values, so it is a strict superset of any
+  // per-slot confirmation. Promoting here — the ONE place the recap is
+  // rendered — covers both the llm executor and the classic flow, so a voice
+  // booking costs zero extra turns while still never locking an unheard value.
+  markEchoed(d);
   const summary = t(lang, 'confirmSummary', {
     specialty: specialtyLabel(clinic, d.specialty, lang),
     when: formatWhen(new Date(d.slotIso), lang),
@@ -171,7 +179,12 @@ export function continueBooking(ctx) {
 
   if (step === 'confirm') {
     const yn = detectYesNo(text);
-    if (yn === 'yes') return finalizeBooking(ctx);
+    // Voice humility gate (V1). This is the CLASSIC twin of the same check in
+    // the humanize executor — and it is not redundant: engine/index.js drops to
+    // classic route() on ANY llm failure (a timeout or a 429, which is exactly
+    // what happens right after an STT call spends the quota), so without this
+    // line a voice-derived slot could be finalized here with no read-back.
+    if (yn === 'yes' && !blocksFinalize(data)) return finalizeBooking(ctx);
     if (yn === 'no') return cancelBooking(ctx);
     return { intent: 'book_appointment', replies: [t(lang, 'confirmRetry'), buildSummary(ctx)] };
   }
