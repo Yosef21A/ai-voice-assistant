@@ -7,19 +7,34 @@
 // reads a file, a clock, a DB, or the network.
 //
 // ── Design notes ─────────────────────────────────────────────────────────────
-// • Multilingual by construction: separate AR / FR / EN keyword tables, incl.
-//   Libyan/Tunisian colloquial Arabic forms (وجع / يوجعني / طاح / ما يفيقش …).
+// • Multilingual by construction: separate AR / FR / EN / ARABIZI keyword
+//   tables, incl. Libyan/Tunisian colloquial forms (وجع / يوجعني / طاح / ما
+//   يفيقش …). "Arabizi" is Arabic written in Latin letters with digits for the
+//   sounds Latin lacks (3=ع, 7=ح, 9=ق, 5=خ) — how most corridor patients type.
+//   It is matched against the Latin-folded text, like fr/en.
 // • Conservative matching (guardrail: false NEGATIVES on emergencies are worse
 //   than false positives, but we must not scream on every cardiology or
 //   cosmetic-surgery inquiry):
-//     - Latin (fr/en): whole-token / whole-phrase matching after accent + case
-//       + apostrophe folding, so "pas de douleur" never trips a chest-pain rule
-//       (there is no bare "douleur" keyword).
+//     - Latin (fr/en/arabizi): whole-token / whole-phrase matching after accent
+//       + case + apostrophe folding, so "pas de douleur" never trips a
+//       chest-pain rule (there is no bare "douleur" keyword).
 //     - Arabic: root-aware substring matching after diacritic + alef/ya/
 //       ta-marbuta normalization, so prefixes (و/ب/ال/ف) and suffixes (ي/ك/نا)
 //       still match.
 //     - Ambiguous roots (صدر "chest" also in "مصدر"/breast cosmetics, قلب,
 //       حساسية) require CO-OCCURRENCE with an acute marker, as { all: [...] }.
+//     - Ambiguous LATIN roots additionally require PROXIMITY, as
+//       { groups: [[...], [...]], within }. Co-occurrence alone is not enough
+//       once the tokens are everyday words: 'dam' is the ordinary word for a
+//       blood TEST, 'di9' for a shortage ("di9 el wa9t" = short of time),
+//       'sadr' for the breast in cosmetic-surgery traffic. Without a distance
+//       bound, a long booking message containing both tokens in unrelated
+//       clauses would fire the ambulance override. `not:` suppresses a rule
+//       outright on a known-benign collocation.
+//     - Function words are never tokens. 'ma' negates practically every
+//       Tunisian sentence (and is French "my"); 'mesh' is also the English
+//       hernia-mesh term. Negated verbs are spelled out as whole phrases
+//       instead ('ma yfi9ch'), which is both safer and more readable.
 // • Easy to extend per tenant later: the tables are exported; a tenant override
 //   can be merged before matching without touching this file's logic.
 import { extractSpecialty, extractOrigin } from '../engine/slots.js';
@@ -50,7 +65,7 @@ export function normalizeLatin(s = '') {
  *  root/substring based because the language glues particles onto words. */
 export function normalizeArabic(s = '') {
   return String(s)
-    .replace(/[\u064B-\u0655\u0670\u0640]/g, '') // harakat, hamza/madda marks, superscript alef, tatweel
+    .replace(/[ً-ٰٕـ]/g, '') // harakat, hamza/madda marks, superscript alef, tatweel
     .replace(/[آأإ]/g, 'ا') // آ أ إ -> ا
     .replace(/ى/g, 'ي') // ى -> ي
     .replace(/ؤ/g, 'و') // ؤ -> و
@@ -70,8 +85,64 @@ function matchArabic(normText, kw) {
   return k.length > 0 && normText.includes(k);
 }
 
+/** Every [start,end) of `kw` in the padded Latin text (token span, no padding). */
+function latinPositions(normText, kw) {
+  const k = normalizeLatin(kw); // ' kw '
+  const out = [];
+  if (k.length <= 2) return out; // empty keyword folds to '  '
+  for (let i = normText.indexOf(k); i !== -1; i = normText.indexOf(k, i + 1)) {
+    out.push([i + 1, i + k.length - 1]);
+  }
+  return out;
+}
+
+/** Every [start,end) of `kw` in the normalized Arabic text. */
+function arabicPositions(normText, kw) {
+  const k = normalizeArabic(kw);
+  const out = [];
+  if (!k) return out;
+  for (let i = normText.indexOf(k); i !== -1; i = normText.indexOf(k, i + 1)) {
+    out.push([i, i + k.length]);
+  }
+  return out;
+}
+
+// Distance bound for a { groups } rule, measured as the GAP — the characters
+// sitting BETWEEN the matched tokens, i.e. total span minus the tokens' own
+// lengths. Measuring the raw span instead would punish long keywords: with a
+// span bound, 'ma najjamtsh ntnaffes' (21 chars of keyword, 1 of gap) looks
+// "further apart" than a genuinely loose pair of short words. ~18 chars of gap
+// is about three intervening words — "wja3 kbir barcha fi sadri" — which is
+// how people actually write, while still refusing to bridge separate clauses.
+const DEFAULT_GAP = 18;
+
+/**
+ * True when at least one token from EACH group is present AND some choice of
+ * one occurrence per group leaves at most `maxGap` characters between them.
+ */
+function groupsMatch(groups, positionsOf, maxGap) {
+  const lists = groups.map((g) => g.flatMap((kw) => positionsOf(kw)));
+  if (lists.some((l) => l.length === 0)) return false;
+  let best = Infinity;
+  const walk = (idx, lo, hi, tokenChars) => {
+    if (best <= maxGap) return; // already satisfied
+    if (idx === lists.length) {
+      best = Math.min(best, Math.max(0, hi - lo - tokenChars));
+      return;
+    }
+    for (const [s, e] of lists[idx]) {
+      walk(idx + 1, Math.min(lo, s), Math.max(hi, e), tokenChars + (e - s));
+    }
+  };
+  walk(0, Infinity, -Infinity, 0);
+  return best <= maxGap;
+}
+
 // ── emergency keyword tables ─────────────────────────────────────────────────
-// A matcher is either a string (phrase) or { all:[roots], label } (co-occurrence).
+// A matcher is one of:
+//   'phrase'                                   — whole phrase / token
+//   { all: [roots], label }                    — co-occurrence anywhere (Arabic)
+//   { groups: [[...],[...]], gap, not, label }   — co-occurrence + proximity
 // Categories map to the guardrail list in PRODUCT-SPEC §5 / CLAUDE.md.
 export const EMERGENCY_KEYWORDS = {
   bleeding: {
@@ -95,6 +166,23 @@ export const EMERGENCY_KEYWORDS = {
       'lots of blood',
       'wont stop bleeding',
       'cant stop the bleeding',
+    ],
+    arabizi: [
+      'nazif',
+      'nzif',
+      'nazeef',
+      {
+        groups: [
+          ['dam', 'damm', 'demm', 'eddem'],
+          ['yseel', 'ysil', 'ysayel', 'sayel', 'yfour', 'ywa9ef', 'ywa9efch', 'yew9efch', 'yow9efch'],
+        ],
+        // 'dam' is the everyday word for a blood TEST and 'sayel' just means
+        // liquid — this pair only reads as haemorrhage in a tight collocation,
+        // and never when the message is about lab work.
+        not: ['ta7lil', 'tahlil', 'tahalil', 'analyse', 'analyses', 'bilan', 'prise de sang'],
+        gap: 14,
+        label: 'dam (blood) + flow',
+      },
     ],
   },
   chest_pain: {
@@ -126,6 +214,29 @@ export const EMERGENCY_KEYWORDS = {
       'chest tightness',
       'pressure in my chest',
       'heart attack',
+    ],
+    arabizi: [
+      'nawba 9albiya',
+      'jalta 9albiya',
+      'zab7a sadriya',
+      {
+        groups: [
+          ['wja3', 'wje3', 'uja3', 'waja3', 'yewja3ni', 'yuja3ni', 'youja3ni', 'mwaja3', 'weja3'],
+          ['sadr', 'sadri', 'sder', 'sedri', 'sadrou'],
+        ],
+        gap: 18,
+        label: 'wja3 sadr (chest pain)',
+      },
+      {
+        groups: [
+          ['di9', 'dhi9', 'daghet', 'dhaghet'],
+          ['sadr', 'sadri', 'sder', 'sedri', 'sadrou'],
+        ],
+        // Standing alone 'di9' (ضيق) is the ordinary word for scarcity.
+        not: ['di9 el wa9t', 'di9 fel wa9t', 'di9 lwa9t', 'di9 el 7al', 'di9 fel budget', 'di9 fel flous'],
+        gap: 16,
+        label: 'chest tightness',
+      },
     ],
   },
   breathing: {
@@ -162,6 +273,48 @@ export const EMERGENCY_KEYWORDS = {
       'short of breath',
       'shortness of breath',
       'choking',
+    ],
+    arabizi: [
+      '5na9',
+      'khna9',
+      'nakhtne9',
+      'nekhtne9',
+      'nkhna9',
+      'ykhne9',
+      'yekhne9',
+      'ma yetnaffesch',
+      'ma yitnaffesch',
+      'ma ytnaffesch',
+      'mayetnaffesch',
+      {
+        groups: [
+          ['di9', 'dhi9', 'dae9', 'daye9', 'sae9', 'saye9'],
+          ['nefs', 'nefes', 'nafas', 'tnaffes', 'tanaffos'],
+        ],
+        not: ['di9 el wa9t', 'di9 fel wa9t', 'di9 lwa9t'],
+        gap: 16,
+        label: 'di9 nefes (breathing distress)',
+      },
+      {
+        // Negated VERB forms only — bare 'ma' is a function word.
+        groups: [
+          [
+            'manajjamtsh',
+            'najjamtsh',
+            'najamtsh',
+            'najamtish',
+            'najjamtish',
+            'nnajjamch',
+            'manajjamch',
+            'ma3adch',
+            'sa3ib',
+            's3ib',
+          ],
+          ['ntnaffes', 'netnaffes', 'natnaffes', 'ntanaffas', 'yetnaffes', 'ntnafes'],
+        ],
+        gap: 20,
+        label: "can't breathe",
+      },
     ],
   },
   unconscious: {
@@ -200,6 +353,34 @@ export const EMERGENCY_KEYWORDS = {
       'unresponsive',
       'loss of consciousness',
     ],
+    arabizi: [
+      'ghmaya',
+      'ghaybouba',
+      'ghaïbouba',
+      'maghmi',
+      'mghmi',
+      // Spelled out instead of a {ma, mesh, mish} × {yfi9} group: those group-1
+      // tokens are function words, and 'yfi9' on its own is just "wakes up".
+      'ma yfi9',
+      'ma yfi9ch',
+      'mayfi9ch',
+      'ma yfou9ch',
+      'mayfou9ch',
+      'ma yfik',
+      'ma yfikch',
+      'mayfikch',
+      'mesh yfi9',
+      'mish yfi9',
+      'ma3adch yfi9',
+      {
+        groups: [
+          ['tah', 'ta7', 'taht', 'ta7et'],
+          ['ard', 'lard', 'larth'],
+        ],
+        gap: 12,
+        label: 'collapsed',
+      },
+    ],
   },
   stroke: {
     ar: ['جلطه دماغيه', 'سكته دماغيه', 'سكته', 'فمه معوج', 'وجهه معوج', 'نصو مشلول', 'شلل مفاجئ', 'لسانه متلغبط'],
@@ -222,6 +403,21 @@ export const EMERGENCY_KEYWORDS = {
       'numbness on one side',
       'one side of the body',
       'sudden paralysis',
+    ],
+    arabizi: [
+      'sakta',
+      'sakta dimaghiya',
+      'jalta dimaghiya',
+      'jalta dimghiya',
+      'jalta fel mokh',
+      {
+        groups: [
+          ['fom', 'fomm', 'wejh', 'wjeh', 'wejhou'],
+          ['m3awej', 'm3awaj', 'ma3wej', 'm3awja'],
+        ],
+        gap: 16,
+        label: 'facial droop',
+      },
     ],
   },
   allergic: {
@@ -253,6 +449,29 @@ export const EMERGENCY_KEYWORDS = {
       'throat swelling',
       'face swelling up',
       'tongue swelling',
+    ],
+    arabizi: [
+      'sadma tahassousiya',
+      'sadma ta7assousiya',
+      {
+        groups: [
+          ['hasasiya', '7asasiya', '7assasiya', 'hsesiya'],
+          ['chdida', 'shdida', 'khtira', '5tira', 'mfarta', 'gadda'],
+        ],
+        // Tight: the intensifier sits next to the noun in a real report
+        // ("hasasiya chdida"). Loosen it and an allergy INQUIRY that happens to
+        // say "ma3andich chdida" further along starts paging the owner.
+        gap: 14,
+        label: 'severe allergy',
+      },
+      {
+        groups: [
+          ['ntfa5', 'ntafa5', 'entafa5', 'ntfakh', 'ntafakh'],
+          ['wejh', 'wjeh', 'wejhou', 'wjehou', '7al9', 'hal9', '7al9i', 'lsen', 'lseni', 'lsanou'],
+        ],
+        gap: 16,
+        label: 'swelling (face/throat/tongue)',
+      },
     ],
   },
   self_harm: {
@@ -292,6 +511,35 @@ export const EMERGENCY_KEYWORDS = {
       'dont want to live',
       'no reason to live',
     ],
+    arabizi: [
+      'ntihar',
+      'nntihar',
+      {
+        groups: [
+          ['n9tel', 'nn9tel', 'na9tel', 'ne9tel', 'nqtel', 'na9tal'],
+          ['rou7i', 'rouhi', 'nefsi', 'ro7i', 'rohi'],
+        ],
+        gap: 12,
+        label: 'kill myself',
+      },
+      {
+        groups: [
+          ['nheb', 'n7eb', 'nhab', 'nhib'],
+          ['nmout', 'nmoot', 'namout', 'nmut'],
+        ],
+        // 'nheb' ("I want") opens most booking messages — keep this one tight.
+        gap: 8,
+        label: 'want to die',
+      },
+      {
+        groups: [
+          ['ma3adch', 'ma3adech', 'ma3adnich', 'manajjamch'],
+          ['n3ich', 'na3ich', 'ne3ich'],
+        ],
+        gap: 12,
+        label: "don't want to live",
+      },
+    ],
   },
 };
 
@@ -308,9 +556,9 @@ const EMERGENCY_ORDER = [
 ];
 
 /**
- * Detect an emergency in free text. Scans AR/FR/EN tables regardless of `lang`
- * (a fr-tagged conversation can still send Arabic), Arabic first since script is
- * self-identifying. `lang` only nudges which table is tried first.
+ * Detect an emergency in free text. Scans AR/FR/EN/ARABIZI tables regardless of
+ * `lang` (a fr-tagged conversation can still send Arabic), Arabic first since
+ * script is self-identifying. `lang` only nudges which table is tried first.
  * @param {string} text
  * @param {'ar'|'fr'|'en'} [lang]
  * @returns {{hit:boolean, keyword?:string, category?:string, lang?:string}}
@@ -326,12 +574,28 @@ export function detectEmergency(text = '', lang) {
     for (const L of langs) {
       const list = table[L];
       if (!list) continue;
-      const has = L === 'ar' ? (k) => matchArabic(arabic, k) : (k) => matchLatin(latin, k);
+      // Arabizi (Arabic in Latin letters) is matched like fr/en against the
+      // space-padded Latin text, so short roots ('dam','di9') stay whole-word.
+      const isAr = L === 'ar';
+      const has = isAr ? (k) => matchArabic(arabic, k) : (k) => matchLatin(latin, k);
+      const positionsOf = isAr
+        ? (k) => arabicPositions(arabic, k)
+        : (k) => latinPositions(latin, k);
       for (const m of list) {
         if (typeof m === 'string') {
           if (has(m)) return { hit: true, keyword: m, category, lang: L };
         } else if (m && Array.isArray(m.all)) {
           if (m.all.every(has)) return { hit: true, keyword: m.label || m.all.join(' + '), category, lang: L };
+        } else if (m && Array.isArray(m.groups)) {
+          if (m.not && m.not.some(has)) continue; // known-benign collocation
+          if (groupsMatch(m.groups, positionsOf, m.gap ?? DEFAULT_GAP)) {
+            return {
+              hit: true,
+              keyword: m.label || m.groups.map((g) => g[0]).join(' + '),
+              category,
+              lang: L,
+            };
+          }
         }
       }
     }
@@ -340,7 +604,9 @@ export function detectEmergency(text = '', lang) {
 }
 
 function orderLangs(lang) {
-  const all = ['ar', 'fr', 'en'];
+  // 'arabizi' is always scanned (Latin-script Arabic is common in the corridor
+  // and script-ambiguous, so lang tagging can't be trusted to include it).
+  const all = ['ar', 'fr', 'en', 'arabizi'];
   if (lang && all.includes(lang)) return [lang, ...all.filter((x) => x !== lang)];
   return all;
 }

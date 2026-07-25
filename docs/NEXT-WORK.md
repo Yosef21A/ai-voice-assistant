@@ -24,7 +24,7 @@ Golden-transcript tests for Libyan vs Tunisian registers through the humanize pi
 ## Standing rules (every session)
 - Run `npm start` + `cloudflared tunnel` in background yourself; if the tunnel URL rotates, update the Meta webhook in Chrome and confirm the `messages` field stays subscribed (HANDOFF-STATE.md).
 - Token dies ~24h → regenerate in console, paste to `.env`, restart (surface 401s per Task 1).
-- Suite green before/after every slice (baseline 196+ pass / 1 skip). `npm run simulate` must stay offline-green (classic mode).
+- Suite green before/after every slice (baseline 241 pass / 1 skip). `npm run simulate` must stay offline-green (classic mode).
 - Medical guardrails are law: no diagnosis, "from" prices only, emergency override deterministic. Add regression tests when touching the pipeline.
 - Commit per slice. Never commit `.env` / session logs. Rename stale `.git/*.lock` aside if the mount blocks unlink.
 - After each slice: quick live sanity on the real line (send a message, watch logs) — live truth beats green tests.
@@ -37,7 +37,7 @@ Production cutover (P2-H): VPS deploy, real number + permanent System-User token
 Read CLAUDE.md, docs/HANDOFF-STATE.md, then docs/NEXT-WORK.md — execute
 NEXT-WORK in order starting with Task 0 (close the uncommitted WIP on disk).
 Plan each task before coding, audit-don't-assume where the spec says so, keep
-the suite green (196+ baseline) and simulate offline-green, run the servers in
+the suite green (247 pass / 1 skip baseline) and simulate offline-green, run the servers in
 the background yourself, and do a quick live sanity check on the real WhatsApp
 line after each slice. Commit per slice.
 ```
