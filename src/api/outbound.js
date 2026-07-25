@@ -30,6 +30,18 @@ export function publicMessage(m) {
         size: body.media.size ?? null,
         available: !!body.media.file,
         url: body.media.file ? `/api/media/${encodeURIComponent(m.id)}` : null,
+        // Voice transcript (V1) — staff gold. Flagged with its grade so the
+        // inbox can say "low-confidence" rather than presenting a machine guess
+        // as fact. publicMessage is the single normalization point for BOTH the
+        // REST thread route and every SSE frame, so the live stream gets it free.
+        transcript: body.media.transcript
+          ? {
+              text: body.media.transcript.text,
+              lang: body.media.transcript.lang ?? null,
+              grade: body.media.transcript.grade ?? null,
+              durationSec: body.media.transcript.durationSec ?? null,
+            }
+          : null,
       }
     : null;
   return {

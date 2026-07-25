@@ -10,10 +10,24 @@ import { useStreamEvent } from '../context/EventStreamContext.jsx';
 import { useRoute, routeTo } from '../router.js';
 import { Badge, EmptyState, Spinner, CONV_STATUS_KIND } from '../components/ui.jsx';
 import { Inbox as InboxIcon, Bot, User, Send, ChevronLeft, Calendar, Info } from '../components/icons.jsx';
-import { fmtAgo, fmtTime, fmtDay, dayKey, dirOf, specialtyLabel } from '../lib.js';
+import { fmtAgo, fmtTime, fmtDay, dayKey, dirOf, specialtyLabel, transcriptView } from '../lib.js';
 
 const authorOf = (m) =>
   m.direction === 'inbound' ? 'patient' : String(m.by || '').startsWith('staff') ? 'staff' : 'bot';
+
+/** Voice transcript block (V1) — always labelled "(auto)": staff must never
+ *  mistake a machine transcription for something the patient wrote. */
+function Transcript({ media, t }) {
+  const v = transcriptView(media);
+  if (!v.show) return null;
+  return (
+    <div className="msg-transcript" dir={dirOf(v.text)}>
+      <span className="transcript-tag">🎧 {t('inbox.transcript')}</span>
+      {v.text}
+      {v.weak ? <div className="tiny muted">{t('inbox.transcriptWeak')}</div> : null}
+    </div>
+  );
+}
 
 // Attachment block inside a bubble (P2-D): image thumbnail, file chip or audio
 // player. Same-origin <img>/<audio> URLs carry the session cookie. `available`
@@ -24,7 +38,14 @@ function MediaBlock({ media, t }) {
   const [broken, setBroken] = useState(false);
   if (!media) return null;
   if (!media.available || broken) {
-    return <div className="media-unavailable">📎 {t('inbox.mediaUnavailable')}</div>;
+    // The bytes are gone (purged or expired) but the transcript survives on the
+    // message row — and it is the part staff actually come back for.
+    return (
+      <>
+        <div className="media-unavailable">📎 {t('inbox.mediaUnavailable')}</div>
+        <Transcript media={media} t={t} />
+      </>
+    );
   }
   if (media.kind === 'image') {
     return (
@@ -40,7 +61,12 @@ function MediaBlock({ media, t }) {
     );
   }
   if (media.kind === 'audio') {
-    return <audio className="msg-audio" controls src={media.url} preload="metadata" onError={() => setBroken(true)} />;
+    return (
+      <>
+        <audio className="msg-audio" controls src={media.url} preload="metadata" onError={() => setBroken(true)} />
+        <Transcript media={media} t={t} />
+      </>
+    );
   }
   // Documents have no load event — probe on click so a purged file becomes the
   // note instead of a dead tab.

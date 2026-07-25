@@ -1,5 +1,5 @@
 # VALUE-ROADMAP — make the bot worth more money (fresh session orders, 2026-07-23)
-> Read after CLAUDE.md + docs/HANDOFF-STATE.md. This SUPERSEDES the ordering of NEXT-WORK.md (its Task 0 is inherited below; its P2-F/P1-G land mid-roadmap; slice DETAILS in PHASE2-WORKPLAN.md still apply where referenced). Baseline: 37 commits, 262 tests passing / 1 skip, humanize live, real WhatsApp line working.
+> Read after CLAUDE.md + docs/HANDOFF-STATE.md. This SUPERSEDES the ordering of NEXT-WORK.md (its Task 0 is inherited below; its P2-F/P1-G land mid-roadmap; slice DETAILS in PHASE2-WORKPLAN.md still apply where referenced). Baseline: 37 commits, 272 tests passing / 1 skip, humanize live, real WhatsApp line working.
 
 ## Why these slices (CEO logic — read this to build with intent)
 The pricing card (`docs/pricing-and-packaging.md`) SELLS: voice-note understanding (Growth), no-show reminders (Growth), CRM/Sheets sync (Growth), Instagram (add-on), recall campaigns (add-on). Today the bot does none of these. Rule #1 of value: **ship what the price list promises.** Rule #2: **capture revenue the clinic can feel** (fewer no-shows, revived silent leads → numbers on the Stats screen). Rule #3: **wow moments sell demos** (a bot that understands a Libyan voice note closes meetings by itself).
@@ -62,7 +62,7 @@ Spec base: PHASE2-WORKPLAN §P2-E (scheduler T-48h/T-3h, quiet hours, cancel-on-
 ---
 
 ## Standing rules (unchanged, enforced every session)
-Background servers + tunnel-rotation webhook update yourself · token ritual (~24h, surface 401s) · suite green (262 pass / 1 skip baseline) + simulate offline-green · medical guardrails are law (no diagnosis, "from" prices, deterministic emergency override) + regression tests when touching the pipeline · tenant scoping everywhere · commit per slice, never `.env` · live sanity check on the real line after each slice · rename stale `.git/*.lock` aside if the mount blocks unlink.
+Background servers + tunnel-rotation webhook update yourself · token ritual (~24h, surface 401s) · suite green (272 pass / 1 skip baseline) + simulate offline-green · medical guardrails are law (no diagnosis, "from" prices, deterministic emergency override) + regression tests when touching the pipeline · tenant scoping everywhere · commit per slice, never `.env` · live sanity check on the real line after each slice · rename stale `.git/*.lock` aside if the mount blocks unlink.
 
 ## Kickoff prompt (paste into Claude Code)
 ```

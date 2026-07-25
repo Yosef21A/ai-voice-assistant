@@ -61,7 +61,7 @@ cloudflared tunnel --url http://localhost:3000   # public tunnel
 ```
 - If the tunnel restarts, the URL CHANGES → the Meta console webhook must be updated to the new `https://…/webhook` (verify token above) — Youssef does this in the console UI (or automate later with an app-access-token subscriptions call).
 - `npm start` must be restarted whenever `.env` changes.
-- Keep `npm test` green (262 pass / 1 skip baseline) before/after every change.
+- Keep `npm test` green (272 pass / 1 skip baseline) before/after every change.
 
 ## Build roadmap after verification (in order)
 1. **P1-G** — engine async on the store interface → `DATABASE_URL` flips Postgres to primary (schema/adapter/tests already exist from P1-A).

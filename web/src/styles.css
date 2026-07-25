@@ -523,3 +523,23 @@ select.control { appearance: none; cursor: pointer;
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
+
+/* Voice transcript under the audio player (V1). Deliberately quiet: it is a
+   machine transcription sitting inside a patient bubble, and it must read as
+   annotation, not as something the patient typed. */
+.msg-transcript {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-inline-start: 2px solid var(--border, #d5dde5);
+  font-size: 0.86rem;
+  line-height: 1.45;
+  opacity: 0.9;
+}
+.transcript-tag {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  margin-bottom: 2px;
+}

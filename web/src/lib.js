@@ -176,3 +176,15 @@ export function templateEntries(specId) {
 }
 
 export const hasTemplate = (specId) => (T[specId] || []).length > 0;
+
+// Voice transcript (V1) — pure view logic so the inbox render contract has a
+// real unit test in a repo with no DOM harness. `weak` means the transcriber
+// itself flagged doubt, and staff must see that rather than read a machine
+// guess as fact. The transcript is shown even when the audio bytes are gone:
+// the retention purge deletes files but keeps message rows, and the transcript
+// is exactly the part staff re-read afterwards.
+export function transcriptView(media) {
+  const tr = media && media.kind === 'audio' ? media.transcript : null;
+  const text = tr && typeof tr.text === 'string' ? tr.text.trim() : '';
+  return { show: !!text, text, weak: tr?.grade === 'weak', lang: tr?.lang || null };
+}

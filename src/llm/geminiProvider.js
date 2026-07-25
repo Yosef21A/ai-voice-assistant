@@ -99,7 +99,7 @@ export class GeminiProvider {
    * @returns {Promise<object>} the parsed JSON object
    */
   async generateStructured(req = {}) {
-    const { system = '', messages = [], schema, temperature = 0.4 } = req;
+    const { system = '', messages = [], schema, temperature = 0.4, timeoutMs } = req;
     if (!schema) throw new Error('generateStructured: schema is required');
 
     const generationConfig = {
@@ -117,13 +117,21 @@ export class GeminiProvider {
       generationConfig.thinkingConfig = { thinkingBudget: 0 };
     }
 
+    // A message is either { text } (the dialogue path) or { parts } (inline
+    // audio for STT). One structured code path keeps ownership of the timeout,
+    // the header and the thinkingBudget rule in a single place.
     const contents = messages
-      .filter((m) => m && m.text)
-      .map((m) => ({ role: m.role === 'model' ? 'model' : 'user', parts: [{ text: m.text }] }));
+      .filter((m) => m && (m.text || (Array.isArray(m.parts) && m.parts.length)))
+      .map((m) => ({
+        role: m.role === 'model' ? 'model' : 'user',
+        parts: Array.isArray(m.parts) && m.parts.length ? m.parts : [{ text: m.text }],
+      }));
     if (!contents.length) contents.push({ role: 'user', parts: [{ text: '...' }] });
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // Audio is heavier than text, so STT passes a longer per-call budget rather
+    // than raising the dialogue timeout for everyone.
+    const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || this.timeoutMs);
     if (typeof timer.unref === 'function') timer.unref();
     try {
       const res = await this._fetch(
@@ -152,5 +160,26 @@ export class GeminiProvider {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Transcribe a voice note (V1). Gemini accepts audio natively as an
+   * inline_data part, so this is a thin wrapper over the SAME structured call —
+   * no second HTTP path, no duplicated timeout/header/thinking rules.
+   *
+   * THROWS on any failure, like generateStructured: the caller
+   * (src/voice/transcriber.js) owns the retry, the circuit breaker and the
+   * degradation. It must never degrade to invented words.
+   *
+   * @param {object} req  from buildTranscriptionRequest() + { timeoutMs }
+   * @returns {Promise<{transcript:string, language?:string, is_speech:boolean,
+   *                    unclear:boolean, confidence?:number}>}
+   */
+  async transcribeAudio(req = {}) {
+    const out = await this.generateStructured(req);
+    if (!out || typeof out.transcript !== 'string') {
+      throw new Error('gemini stt: response carried no transcript');
+    }
+    return out;
   }
 }

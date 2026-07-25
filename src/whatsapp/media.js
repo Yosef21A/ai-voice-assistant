@@ -114,9 +114,14 @@ export class WhatsAppMediaClient {
    * @returns {Promise<{ok:true, file:string, mimeType:string, size:number} |
    *                   {ok:false, error:object}>}  file is RELATIVE to mediaDir.
    */
-  async fetchMedia(tenant, media = {}) {
+  async fetchMedia(tenant, media = {}, opts = {}) {
     const tenantId = tenant?.id || tenant?.tenantId || 'unknown';
     const mediaId = media.id;
+    // A stricter per-call cap (V1 uses it to enforce "≤ 2 min" of audio in
+    // bytes) and an opt-in to return the bytes in memory so a caller like the
+    // transcriber never has to re-read what we just wrote.
+    const cap = Math.min(this.maxBytes, Number(opts.maxBytes) || this.maxBytes);
+    const keepBytes = opts.keepBytes === true;
     if (!mediaId) return this._fail('media id missing');
     if (!allowedMime(media.mimeType)) {
       return this._fail(`mime type not allowed: ${bareMime(media.mimeType) || 'unknown'}`);
@@ -131,7 +136,13 @@ export class WhatsAppMediaClient {
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       const buf = Buffer.from(`mock-media:${mediaId}:${mime}`);
       fs.writeFileSync(abs, buf);
-      return { ok: true, file: rel, mimeType: mime, size: buf.length };
+      return {
+        ok: true,
+        file: rel,
+        mimeType: mime,
+        size: buf.length,
+        ...(keepBytes ? { bytes: buf } : {}),
+      };
     }
 
     const token = resolveToken(tenant, this.token);
@@ -147,24 +158,34 @@ export class WhatsAppMediaClient {
       if (!allowedMime(mime)) return this._fail(`mime type not allowed: ${mime}`);
       // FAIL CLOSED: a missing/non-numeric file_size must not slip past the cap.
       const declared = Number(fileSize);
-      if (!Number.isFinite(declared) || declared > this.maxBytes) {
-        return this._fail(`media too large or size unknown: ${fileSize} (cap ${this.maxBytes})`);
+      if (!Number.isFinite(declared) || declared > cap) {
+        return this._fail(`media too large or size unknown: ${fileSize} (cap ${cap})`, {
+          code: 'media_too_large',
+        });
       }
 
       // 2. binary from the lookaside CDN (same Bearer token; url expires fast).
       // The read itself is byte-budgeted — a body larger than the declared size
       // (or gzip-inflated) aborts mid-stream instead of ballooning RAM.
-      const bin = await this._get(url, token, 'bytes', this.maxBytes);
+      const bin = await this._get(url, token, 'bytes', cap);
       if (!bin.ok) return { ok: false, error: bin.error };
-      if (bin.data.length > this.maxBytes) {
-        return this._fail(`media too large: ${bin.data.length} > ${this.maxBytes}`);
+      if (bin.data.length > cap) {
+        return this._fail(`media too large: ${bin.data.length} > ${cap}`, {
+          code: 'media_too_large',
+        });
       }
 
       const rel = this._relPath(tenantId, mime);
       const abs = path.join(this.mediaDir, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, bin.data);
-      return { ok: true, file: rel, mimeType: mime, size: bin.data.length };
+      return {
+        ok: true,
+        file: rel,
+        mimeType: mime,
+        size: bin.data.length,
+        ...(keepBytes ? { bytes: bin.data } : {}),
+      };
     } catch (e) {
       this._logger('media download failed', e?.message);
       return { ok: false, error: toPlainError(e instanceof WhatsAppError ? e : new WhatsAppError(String(e?.message || e))) };
@@ -264,8 +285,11 @@ export class WhatsAppMediaClient {
     }
   }
 
-  _fail(message) {
-    return { ok: false, error: toPlainError(new WhatsAppError(message, { code: 'invalid_media', retriable: false })) };
+  _fail(message, { code = 'invalid_media' } = {}) {
+    const err = toPlainError(new WhatsAppError(message, { code, retriable: false }));
+    // Surface the code on the result too: the voice path distinguishes
+    // "too long" (an honest patient-facing note) from a generic failure.
+    return { ok: false, error: { ...err, code }, code };
   }
 }
 

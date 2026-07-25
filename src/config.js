@@ -99,6 +99,20 @@ export function getConfig(overrides = {}) {
     mediaDir: process.env.MEDIA_DIR || path.join(DATA_DIR, 'media'),
     mediaMaxBytes: Number(process.env.MEDIA_MAX_BYTES) || 10 * 1024 * 1024,
     mediaRetentionDays: Number(process.env.MEDIA_RETENTION_DAYS) || 90,
+    // ── voice-note understanding (V1) ──────────────────────────────────────
+    // Still gated twice on top of this flag: the tenant must be in llm mode AND
+    // the provider must implement transcribeAudio() (MockProvider deliberately
+    // does not). VOICE_STT=off kills it instantly if a clinic burns quota.
+    // The "≤ 2 min" rule is enforced on BYTES — the Cloud API audio object
+    // carries no duration (see src/voice/policy.js).
+    voiceStt: process.env.VOICE_STT !== 'off',
+    voiceMaxSeconds: Number(process.env.VOICE_MAX_SECONDS) || 120,
+    voiceSttTimeoutMs: Number(process.env.VOICE_STT_TIMEOUT_MS) || 15000,
+    voiceSttDeadlineMs: Number(process.env.VOICE_STT_DEADLINE_MS) || 22000,
+    voiceMinConfidence: Number(process.env.VOICE_MIN_CONFIDENCE ?? 0.5),
+    voiceMaxTranscriptChars: Number(process.env.VOICE_MAX_TRANSCRIPT_CHARS) || 1500,
+    voiceBreakerThreshold: Number(process.env.VOICE_BREAKER_THRESHOLD) || 3,
+    voiceBreakerCooldownMs: Number(process.env.VOICE_BREAKER_COOLDOWN_MS) || 60000,
     dataDir: DATA_DIR,
     runtimeDir: RUNTIME_DIR,
     clinicsFile: CLINICS_FILE,

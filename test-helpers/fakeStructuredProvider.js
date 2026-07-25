@@ -13,10 +13,30 @@
 // the request in .calls for assertions. An exhausted queue throws (the engine
 // must fall back to classic — asserting on that IS the test).
 export class FakeStructuredProvider {
-  constructor({ plans = [], name = 'fake-structured' } = {}) {
+  /**
+   * @param {object}  [opts]
+   * @param {Array}   [opts.plans]        queue for generateStructured()
+   * @param {Array}   [opts.transcripts]  queue for transcribeAudio() — same
+   *   convention (object | function(req) | Error). Supplying this array is what
+   *   turns STT on for a test: MockProvider has no transcribeAudio at all, and
+   *   that absence is exactly what keeps classic mode unchanged, so a fake must
+   *   opt in explicitly rather than fabricate speech by default.
+   */
+  constructor({ plans = [], transcripts = null, name = 'fake-structured' } = {}) {
     this.name = name;
     this.plans = [...plans];
     this.calls = [];
+    this.audioCalls = [];
+    if (transcripts) {
+      this.transcripts = [...transcripts];
+      this.transcribeAudio = async (req = {}) => {
+        this.audioCalls.push(req);
+        if (!this.transcripts.length) throw new Error('fake-structured: transcript queue exhausted');
+        const next = this.transcripts.shift();
+        if (next instanceof Error) throw next;
+        return typeof next === 'function' ? next(req) : next;
+      };
+    }
   }
 
   /** Classic-path decoration (faq_answer passthrough), mirroring MockProvider. */

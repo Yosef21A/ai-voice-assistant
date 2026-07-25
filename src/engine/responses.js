@@ -87,6 +87,40 @@ const DICT = {
     en: () => `Please answer "yes" to confirm or "no" to cancel.`,
   },
 
+  // ── voice notes (V1) ──────────────────────────────────────────────────────
+  // Every patient-facing voice line is a TEMPLATE, rendered by the executor from
+  // its own re-derived values. No LLM prose ever states back a captured fact —
+  // the same discipline that makes the booking recap trustworthy.
+
+  // Transcription failed or was ungradeable. Never silent, never pretending.
+  voiceUnclear: {
+    ar: () => `سمعت الرسالة أما ما فهمتش مليح 🙏 تنجم تعاودها ولا تكتبلي؟`,
+    fr: () =>
+      `J'ai bien reçu votre vocal, mais je n'ai pas bien compris 🙏 Pouvez-vous le refaire ou m'écrire ?`,
+    en: () => `I got your voice note but couldn't make it out 🙏 Could you resend it or type it?`,
+  },
+  // The transcript is doubtful — read the WHOLE thing back before acting on it.
+  voiceConfirmTranscript: {
+    ar: (v) => `سمعتك تقول: «${v.transcript}» — صحيح ولا تعاودها؟`,
+    fr: (v) => `J'ai entendu : « ${v.transcript} » — c'est bien ça ?`,
+    en: (v) => `I heard: "${v.transcript}" — is that right?`,
+  },
+  // Over the byte cap: honest, and a human is pinged. The bot stays available.
+  voiceTooLong: {
+    ar: () =>
+      `وصلتني الرسالة الصوتية 🎙️ طويلة شوية — واحد من الفريق باش يسمعها ويردّ عليك هنا. تنجم في نفس الوقت تكتبلي.`,
+    fr: () =>
+      `J'ai bien reçu votre vocal 🎙️ il est un peu long — un membre de l'équipe va l'écouter et vous répondre ici. Vous pouvez aussi m'écrire en attendant.`,
+    en: () =>
+      `Got your voice note 🎙️ it's a bit long — someone from the team will listen and reply here. You can also type it to me meanwhile.`,
+  },
+  // A phone number heard in speech is read back, never committed silently.
+  voiceContactHeard: {
+    ar: (v) => `سمعت الرقم: ${v.digits} — صحيح؟ 🙌`,
+    fr: (v) => `J'ai noté le numéro : ${v.digits} — c'est correct ?`,
+    en: (v) => `I heard the number: ${v.digits} — is that correct?`,
+  },
+
   booked: {
     ar: (v) =>
       `✅ تأكد الحجز! رقم الحجز: *${v.ref}*\n\n🏥 ${v.clinic}\n• ${v.specialty}\n• 📅 ${v.when}\n• 👤 ${v.name} (${v.origin})\n• 📞 ${v.contact}\n\nفريق المرضى الدوليين باش يتواصل معاك لتفاصيل السفر والدعوة. للاستعجال: ${v.handoff}. شكراً وسلامتك! 🌿`,

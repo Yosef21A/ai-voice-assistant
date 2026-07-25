@@ -21,6 +21,7 @@ import { createEngine } from './engine/index.js';
 import { getProvider } from './llm/index.js';
 import { createSender } from './whatsapp/index.js';
 import { createMediaClient } from './whatsapp/media.js';
+import { createTranscriber } from './voice/transcriber.js';
 import { hydrateAllClinicsKb } from './store/kbLive.js';
 import { createBus } from './events/bus.js';
 import { createAuth } from './auth/index.js';
@@ -136,6 +137,14 @@ export function createApp(opts = {}) {
       mediaDir: config.mediaDir,
       maxBytes: config.mediaMaxBytes,
     });
+  // Voice-note understanding (V1). Gated on the provider actually implementing
+  // transcribeAudio(): MockProvider deliberately does not, so classic mode and
+  // every offline test keep today's behaviour with no config to get wrong.
+  const transcriber =
+    opts.transcriber ||
+    (config.voiceStt !== false && typeof provider?.transcribeAudio === 'function'
+      ? createTranscriber({ provider, config })
+      : null);
   const auth = createAuth({ store, config });
 
   // KB → live engine (P2-B): merge each tenant's saved kb_entries into its
@@ -174,7 +183,7 @@ export function createApp(opts = {}) {
       for (const inbound of normalizeWhatsApp(req.body)) {
         if (!inbound.text && !inbound.media) continue; // statuses / unsupported types
         // Persist + reply via the ONE sender + emit bus events; respects ai_paused.
-        await ingestInbound({ store, engine, sender, bus, mediaClient }, inbound);
+        await ingestInbound({ store, engine, sender, bus, mediaClient, transcriber, config }, inbound);
       }
     } catch (err) {
       console.error('[webhook] processing error:', err);
@@ -292,7 +301,7 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, mediaClient, auth, notifier, kbReady };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, kbReady };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.

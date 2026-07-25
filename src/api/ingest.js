@@ -19,6 +19,8 @@ import { sendAs, publicMessage } from './outbound.js';
 import { analyzeInbound } from '../notifications/index.js';
 import { normalizeQuestion, isSandboxWaId } from '../stats/index.js';
 import { detectLanguage, resolveLanguage } from '../engine/language.js';
+import { t } from '../engine/responses.js';
+import { estimateMaxBytes } from '../voice/policy.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
 // interprets media medically — it confirms receipt and promises a human.
@@ -32,7 +34,10 @@ const MEDIA_ACK = {
 const safeFilename = (name) =>
   String(name || '').replace(/[\\/\u0000-\u001f]/g, '').slice(0, 120) || null;
 
-export async function ingestInbound({ store, engine, sender, bus, mediaClient }, inbound) {
+export async function ingestInbound(
+  { store, engine, sender, bus, mediaClient, transcriber, config = {} },
+  inbound
+) {
   const clinic =
     store.getClinicByPhoneNumberId(inbound.phoneNumberId) ||
     store.getClinicById(inbound.tenantId) ||
@@ -51,9 +56,26 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   // URL expires in minutes, so intake is synchronous. A failed download still
   // persists the metadata (available:false) so staff see that something arrived.
   let mediaMeta = null;
+  // Voice (V1): the transcript, when we produced one. Computed BEFORE the
+  // message is persisted so it rides the single existing appendMessage write —
+  // neither store adapter has an updateMessage, and adding a second write would
+  // mean a second SSE frame and a race with the inbox.
+  let voice = null;
   if (inbound.media) {
+    const isVoice = inbound.media.kind === 'audio';
+    // Byte cap stands in for the "≤ 2 min" rule (the webhook carries no
+    // duration). Applied at the pre-download metadata check, so an over-cap note
+    // costs zero CDN bytes and zero STT calls.
+    const sttOn =
+      isVoice && !!transcriber && config.voiceStt !== false && !inbound.media.caption;
+    const opts = sttOn
+      ? {
+          keepBytes: true,
+          maxBytes: estimateMaxBytes(inbound.media.mimeType, config.voiceMaxSeconds || 120),
+        }
+      : {};
     const dl = mediaClient
-      ? await mediaClient.fetchMedia(clinic, inbound.media)
+      ? await mediaClient.fetchMedia(clinic, inbound.media, opts)
       : { ok: false, error: { message: 'no media client configured' } };
     mediaMeta = {
       kind: inbound.media.kind,
@@ -65,7 +87,34 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
       file: dl.ok ? dl.file : null,
       error: dl.ok ? null : dl.error?.message || 'download failed',
     };
+
+    if (sttOn) {
+      if (dl.ok && dl.bytes?.length) {
+        const r = await transcriber.transcribe({ bytes: dl.bytes, mimeType: dl.mimeType });
+        voice = r;
+        if (r.transcript) {
+          mediaMeta.transcript = {
+            text: r.transcript,
+            lang: r.lang ?? null,
+            grade: r.grade,
+            durationSec: Math.round(r.durationSec || 0),
+          };
+        }
+      } else if (dl.error?.code === 'media_too_large') {
+        voice = { ok: false, grade: 'failed', reason: 'too_long', transcript: '' };
+      }
+    }
   }
+
+  // THE TURN. A voice note we successfully transcribed has words, so from here
+  // on it IS the turn's text and flows through the SAME pipeline as if typed —
+  // emergency preflight, engine, detectors, everything. `source:'voice'` travels
+  // with it so the humility guardrail (engine/voiceSlots.js) knows the values
+  // came from speech and must be read back before they can book anything.
+  // Images and documents are untouched: we never interpret an X-ray.
+  const turn = voice?.transcript
+    ? { ...inbound, text: voice.transcript, source: 'voice', voice: { grade: voice.grade } }
+    : inbound;
 
   // Persist inbound + fan out (staff see the patient even while the bot is paused).
   const inMsg = await store.conversations.appendMessage(tenantId, conversationId, {
@@ -120,10 +169,10 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
   // The language is resolved HERE rather than borrowed from the engine result
   // (which doesn't exist yet): buildEmergencyReply falls back to French for an
   // unknown lang, and an Arabic speaker in crisis must not get a French message.
-  const preLang = resolveLanguage(detectLanguage(inbound.text), convo.lang, clinic);
+  const preLang = resolveLanguage(detectLanguage(turn.text), convo.lang, clinic);
   const preflight = analyzeInbound({
     tenant: clinic,
-    text: inbound.text,
+    text: turn.text,
     lang: preLang,
     waId: inbound.from,
     bus,
@@ -151,7 +200,7 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
         payload: {
           intent: 'emergency',
           lang: preLang,
-          snippet: String(inbound.text || '').slice(0, 160),
+          snippet: String(turn.text || '').slice(0, 160),
         },
       });
     } catch {
@@ -160,17 +209,20 @@ export async function ingestInbound({ store, engine, sender, bus, mediaClient },
     return { tenantId, conversationId, emergency: preflight.emergency };
   }
 
-  // Captionless media: nothing for the engine to parse — acknowledge receipt
-  // and stop. GUARDRAIL: media is routed to a human, never interpreted.
-  if (mediaMeta && !inbound.text) {
+  if (mediaMeta && !turn.text) {
     const lang = ['ar', 'fr', 'en'].includes(convo.lang) ? convo.lang : 'ar';
-    await sendAs('bot', conversationId, () => sender.sendText(clinic, inbound.from, MEDIA_ACK[lang]));
-    return { tenantId, conversationId, media: mediaMeta };
+    // A voice note we heard but could not understand gets the warm fallback,
+    // never the generic 📎 ack — "the doctor will review it" is the wrong
+    // promise for audio, and silence is the one thing we refuse.
+    let text = MEDIA_ACK[lang];
+    if (voice && !voice.ok) text = t(lang, voice.reason === 'too_long' ? 'voiceTooLong' : 'voiceUnclear');
+    await sendAs('bot', conversationId, () => sender.sendText(clinic, inbound.from, text));
+    return { tenantId, conversationId, media: mediaMeta, voice: voice || undefined };
   }
   // A caption rides along: fall through — the engine and the emergency/lead
   // detectors treat it as the turn's text (guardrails stay active).
 
-  const out = await engine.handleMessage(inbound);
+  const out = await engine.handleMessage(turn);
 
   // Per-turn analysis event (P2-A): intent + language + a short snippet power
   // the analytics screen (topIntents / topQuestions / funnel) and the P2-B

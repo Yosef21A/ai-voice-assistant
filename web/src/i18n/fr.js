@@ -161,6 +161,7 @@ export default {
     flagEmergency: 'Urgence détectée — le bot s’est retiré', flagLead: 'Lead à forte valeur — répondez vite',
     mediaImage: 'Photo / radio', mediaDocument: 'Document', mediaAudio: 'Note vocale',
     mediaUnavailable: 'Fichier indisponible (expiré ou supprimé)',
+    transcript: 'Transcription (auto)', transcriptWeak: 'Transcription peu fiable — audio peu clair',
   },
   convStatus: { open: 'Ouverte', needs_human: 'À traiter', closed: 'Fermée' },
   appt: {

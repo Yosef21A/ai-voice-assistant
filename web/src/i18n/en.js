@@ -161,6 +161,7 @@ export default {
     flagEmergency: 'Emergency detected — the bot stepped back', flagLead: 'Hot lead — reply fast',
     mediaImage: 'Photo / X-ray', mediaDocument: 'Document', mediaAudio: 'Voice note',
     mediaUnavailable: 'File unavailable (expired or deleted)',
+    transcript: 'Voice transcript (auto)', transcriptWeak: 'Low-confidence transcript — audio was unclear',
   },
   convStatus: { open: 'Open', needs_human: 'Needs human', closed: 'Closed' },
   appt: {

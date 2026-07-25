@@ -37,7 +37,7 @@ Production cutover (P2-H): VPS deploy, real number + permanent System-User token
 Read CLAUDE.md, docs/HANDOFF-STATE.md, then docs/NEXT-WORK.md — execute
 NEXT-WORK in order starting with Task 0 (close the uncommitted WIP on disk).
 Plan each task before coding, audit-don't-assume where the spec says so, keep
-the suite green (262 pass / 1 skip baseline) and simulate offline-green, run the servers in
+the suite green (272 pass / 1 skip baseline) and simulate offline-green, run the servers in
 the background yourself, and do a quick live sanity check on the real WhatsApp
 line after each slice. Commit per slice.
 ```

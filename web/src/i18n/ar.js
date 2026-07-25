@@ -161,6 +161,7 @@ export default {
     flagEmergency: 'تم رصد حالة طوارئ — البوت توقّف', flagLead: 'عميل مهم — ردّ بسرعة',
     mediaImage: 'صورة / أشعة', mediaDocument: 'ملف', mediaAudio: 'رسالة صوتية',
     mediaUnavailable: 'الملف غير متوفر (انتهت مدته أو حُذف)',
+    transcript: 'نص الرسالة الصوتية (آلي)', transcriptWeak: 'نص غير مؤكد — الصوت ما كانش واضح',
   },
   convStatus: { open: 'مفتوحة', needs_human: 'تحتاج تدخّلاً', closed: 'مغلقة' },
   appt: {
