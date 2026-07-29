@@ -16,6 +16,8 @@ import {
 import { parseDateTimeRequest, resolveSlot, formatWhen } from './datetime.js';
 // Leaf module — voiceSlots.js imports nothing from here, so there is no cycle.
 import { blocksFinalize, markEchoed } from './voiceSlots.js';
+// Leaf module too (D1): tenant type + doctor persona + default specialty.
+import { defaultSpecialtyId, hasDoctorPersona, doctorName, isCabinet } from './tenantProfile.js';
 
 const STEPS = ['specialty', 'datetime', 'name', 'origin', 'contact', 'confirm'];
 
@@ -57,6 +59,9 @@ function buildSummary(ctx) {
   // booking costs zero extra turns while still never locking an unheard value.
   markEchoed(d);
   const summary = t(lang, 'confirmSummary', {
+    // Cabinet persona (D1): the recap names the doctor. Absent → byte-identical
+    // pre-D1 output, so clinic tenants cannot regress.
+    doctor: hasDoctorPersona(clinic) ? doctorName(clinic, lang) : null,
     specialty: specialtyLabel(clinic, d.specialty, lang),
     when: formatWhen(new Date(d.slotIso), lang),
     name: d.name,
@@ -122,6 +127,15 @@ export function startBooking(ctx) {
   // ("I want to book cardiology" -> skip the specialty question).
   const sp = extractSpecialty(text, clinic);
   if (sp) convo.state.data.specialty = sp.id;
+  // D1: a single-specialty practice (or a cabinet) NEVER asks "which specialty?"
+  // — there is only one answer, and asking it is what makes a doctor's bot feel
+  // like a switchboard. (On a voice turn the engine's provenance diff may mark
+  // this config-derived value 'heard'; that is benign — the recap read-back
+  // echoes it like any other slot, at zero extra turns.)
+  if (!convo.state.data.specialty) {
+    const def = defaultSpecialtyId(clinic);
+    if (def) convo.state.data.specialty = def;
+  }
   return advanceBooking(ctx, { intro: true });
 }
 
@@ -212,7 +226,10 @@ export function finalizeBooking(ctx) {
     datetimeAdjusted: !!d.slotAdjusted,
     patientName: d.name,
     originCity: d.originCity || null,
-    originCountry: d.originCountry || 'Libya',
+    // The Libya default is a MEDICAL-TOURISM assumption (most clinic patients
+    // cross the border). A cabinet is a local practice — its walk-ins default
+    // to the practice's own country, never to a tourism corridor (D1 review).
+    originCountry: d.originCountry || (isCabinet(clinic) ? clinic.country || null : 'Libya'),
     originRaw: d.originRaw || null,
     contact: d.contact,
     lang,
@@ -223,16 +240,28 @@ export function finalizeBooking(ctx) {
   store.createAppointment(appt);
   convo.state = null; // flow complete
 
-  const reply = t(lang, 'booked', {
-    ref,
-    clinic: clinic.name,
-    specialty: spLabel,
-    when,
-    name: d.name,
-    origin: originDisplay(d),
-    contact: d.contact,
-    handoff: clinic.handoff?.phone || '',
-  });
+  // Cabinet persona (D1): the confirmation names the doctor and closes like a
+  // local practice; clinics keep the international-patients closing.
+  const reply = hasDoctorPersona(clinic)
+    ? t(lang, 'bookedCabinet', {
+        ref,
+        clinic: clinic.name,
+        doctor: doctorName(clinic, lang),
+        when,
+        name: d.name,
+        contact: d.contact,
+        handoff: clinic.handoff?.phone || '',
+      })
+    : t(lang, 'booked', {
+        ref,
+        clinic: clinic.name,
+        specialty: spLabel,
+        when,
+        name: d.name,
+        origin: originDisplay(d),
+        contact: d.contact,
+        handoff: clinic.handoff?.phone || '',
+      });
   return { intent: 'book_appointment', replies: [reply], appointment: appt };
 }
 

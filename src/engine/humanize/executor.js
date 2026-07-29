@@ -27,6 +27,7 @@ import {
   blocksFinalize,
   markEchoed,
 } from '../voiceSlots.js';
+import { defaultSpecialtyId, hasDoctorPersona, doctorName } from '../tenantProfile.js';
 
 const LANG_MAP = { ar: 'ar', fr: 'fr', en: 'en', 'ar-Latn': 'ar' };
 const WARM_LINE_MAX = 200;
@@ -201,6 +202,14 @@ export function executePlan(ctx, plan) {
   // Once a booking is live, backstop the LLM's slot extraction from the raw
   // message so a captured date/city/phone never gets stranded in the prose.
   if (state.flow === 'booking') {
+    // D1 deterministic twin of the prompt's FIXED SPECIALTY rule: a
+    // single-specialty practice (or cabinet) books under its one specialty even
+    // when the LLM forgets to patch it — nextStep() must never land on
+    // 'specialty' for these tenants.
+    if (!data.specialty) {
+      const def = defaultSpecialtyId(clinic);
+      if (def) data.specialty = def;
+    }
     backfillFromText(ctx, data, patch);
     // Mark whatever this turn captured. On a VOICE turn the values become
     // provisional (and a spoken phone number is moved off `data.contact`
@@ -249,7 +258,9 @@ export function executePlan(ctx, plan) {
     result.handoff = { clinicId: clinic.id, ...(clinic.handoff || {}), keepActive: true };
     result.replies = [
       reply ||
-        t(lang, 'handoff', { name: clinic.handoff?.name || '', phone: clinic.handoff?.phone || '' }),
+        (hasDoctorPersona(clinic)
+          ? t(lang, 'handoffCabinet', { doctor: doctorName(clinic, lang), phone: clinic.handoff?.phone || '' })
+          : t(lang, 'handoff', { name: clinic.handoff?.name || '', phone: clinic.handoff?.phone || '' })),
     ];
     return finish(ctx, result);
   }

@@ -4,6 +4,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import { useI18n } from '../context/I18nContext.jsx';
+import { useTenant } from '../context/TenantContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 import { useStreamEvent } from '../context/EventStreamContext.jsx';
 import { Badge, EmptyState, Spinner, APPT_STATUS_KIND } from '../components/ui.jsx';
@@ -29,8 +30,18 @@ const ACTIONS = {
   cancelled: [['confirmed', 'confirm', 'outline']],
 };
 
+// Localized doctor name off the tenant config ('doctorName' is a plain string
+// or an {ar,fr,en} object — same convention as the engine's tenantProfile.js).
+function tenantDoctor(config, lang) {
+  if (config?.type !== 'cabinet' || !config?.doctorName) return null;
+  const dn = config.doctorName;
+  if (typeof dn === 'string') return dn.trim() || null;
+  return dn[lang] || dn.fr || dn.en || dn.ar || null;
+}
+
 export function Appointments() {
   const { t, lang } = useI18n();
+  const { config } = useTenant();
   const toast = useToast();
   const [filters, setFilters] = useState({ range: 'next7', status: '' });
   const [list, setList] = useState(null);
@@ -89,7 +100,7 @@ export function Appointments() {
     <div className="page">
       <div className="page-head">
         <div>
-          <h1>{t('appt.title')}</h1>
+          <h1>{tenantDoctor(config, lang) ? t('appt.titleCabinet', { name: tenantDoctor(config, lang) }) : t('appt.title')}</h1>
         </div>
         <div className="row-wrap">
           <div className="chips">

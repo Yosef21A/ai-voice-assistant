@@ -11,6 +11,7 @@ import { t } from './responses.js';
 import { normalizeDigits } from './text.js';
 import { handleLlmTurn } from './humanize/index.js';
 import { snapshotCritical, markVoiceProvisional } from './voiceSlots.js';
+import { hasDoctorPersona, doctorName } from './tenantProfile.js';
 
 // F9 state decay: a booking flow idle longer than this keeps its slots but
 // drops the "expected answer" lock — the next message is evaluated fresh.
@@ -196,18 +197,29 @@ async function route(ctx) {
 
 // ── intent handlers ─────────────────────────────────────────────────────────
 function handleGreeting(ctx) {
+  const { clinic, lang } = ctx;
+  // Cabinet persona (D1): the bot introduces itself as the doctor's assistant.
+  if (hasDoctorPersona(clinic)) {
+    return {
+      intent: 'greeting',
+      replies: [t(lang, 'greetingCabinet', { cabinet: clinic.name, doctor: doctorName(clinic, lang) })],
+    };
+  }
   return {
     intent: 'greeting',
-    replies: [t(ctx.lang, 'greeting', { clinic: ctx.clinic.name })],
+    replies: [t(lang, 'greeting', { clinic: clinic.name })],
   };
 }
 
 function handleHandoff(ctx) {
   const { clinic, lang } = ctx;
   // Leaving any active flow intact is intentional: a human takes over from here.
+  const reply = hasDoctorPersona(clinic)
+    ? t(lang, 'handoffCabinet', { doctor: doctorName(clinic, lang), phone: clinic.handoff?.phone || '' })
+    : t(lang, 'handoff', { name: clinic.handoff?.name || '', phone: clinic.handoff?.phone || '' });
   return {
     intent: 'human_handoff',
-    replies: [t(lang, 'handoff', { name: clinic.handoff?.name || '', phone: clinic.handoff?.phone || '' })],
+    replies: [reply],
     handoff: { clinicId: clinic.id, ...clinic.handoff },
   };
 }

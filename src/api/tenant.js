@@ -8,6 +8,7 @@ import { mergeTenantKb } from '../store/kbLive.js';
 
 const LANGS = new Set(['ar', 'fr', 'en']);
 const TONES = new Set(['professional', 'warm']);
+const TENANT_TYPES = new Set(['clinic', 'cabinet', 'facilitator']);
 
 // Redact any per-tenant secrets before returning config to the dashboard.
 function publicTenant(t) {
@@ -47,6 +48,22 @@ function validate(body) {
   if (body.escalation?.handoff != null && typeof body.escalation.handoff !== 'object') {
     errs.push('escalation.handoff must be an object { name, phone }');
   }
+  if (body.type != null && !TENANT_TYPES.has(body.type)) {
+    errs.push('type must be clinic|cabinet|facilitator');
+  }
+  if (body.doctorName != null) {
+    const dn = body.doctorName;
+    const isLabelString = (v) => typeof v === 'string' && v.length <= 120;
+    const isLabelObject =
+      typeof dn === 'object' &&
+      !Array.isArray(dn) &&
+      Object.entries(dn).every(([k, v]) => LANGS.has(k) && isLabelString(v));
+    // Values are rendered verbatim into patient-facing messages ("Dr {name}"),
+    // so anything non-string would literally read "Dr [object Object]".
+    if (!isLabelString(dn) && !isLabelObject) {
+      errs.push('doctorName must be a string or an {ar,fr,en} object of strings');
+    }
+  }
   return errs;
 }
 
@@ -70,6 +87,12 @@ export function tenantRouter({ store, requireRole }) {
       const current = await store.tenants.getById(req.tenantId);
       if (!current) return res.status(404).json({ error: 'tenant not found' });
       const errs = validate(body);
+      // A cabinet must keep its one specialty: saving an empty list would leave
+      // the booking flow asking a specialty question no patient can answer.
+      const effectiveType = body.type ?? current.config?.type;
+      if (effectiveType === 'cabinet' && Array.isArray(body.specialties) && body.specialties.length === 0) {
+        errs.push('a cabinet needs exactly one specialty');
+      }
       if (errs.length) return res.status(400).json({ error: 'validation', details: errs });
 
       const config = { ...(current.config || {}) };
@@ -87,6 +110,13 @@ export function tenantRouter({ store, requireRole }) {
       if (body.address != null) config.address = String(body.address);
       if (body.googleMapsUrl != null) config.googleMapsUrl = String(body.googleMapsUrl);
       if (body.phone != null) config.phone = String(body.phone);
+      // D1 cabinet mode: tenant type + doctor persona name (engine reads both
+      // off the clinic object — tenantProfile.js).
+      if (body.type != null) config.type = body.type;
+      if (body.doctorName != null) {
+        config.doctorName =
+          typeof body.doctorName === 'string' ? body.doctorName.trim() : body.doctorName;
+      }
       if (Array.isArray(body.specialties)) config.specialties = body.specialties;
       if (body.workingHours && typeof body.workingHours === 'object') config.workingHours = body.workingHours;
       if (Array.isArray(body.holidays)) config.holidays = body.holidays.map(String);

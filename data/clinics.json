@@ -207,6 +207,82 @@
           }
         }
       ]
+    },
+    {
+      "id": "cabinet-bensalem-sousse",
+      "type": "cabinet",
+      "name": "Cabinet Dr. Ben Salem — Cardiologie",
+      "doctorName": { "ar": "بن سالم", "fr": "Ben Salem", "en": "Ben Salem" },
+      "city": "Sousse",
+      "country": "Tunisia",
+      "timezone": "Africa/Tunis",
+      "currency": "EUR",
+      "whatsapp": {
+        "phoneNumberId": "1000000003",
+        "displayPhone": "+216 73 000 333"
+      },
+      "handoff": {
+        "name": "Secrétariat du cabinet",
+        "phone": "+216 73 000 334"
+      },
+      "languages": ["ar", "fr", "en"],
+      "specialties": [
+        {
+          "id": "cardiology",
+          "labels": { "ar": "أمراض القلب", "fr": "Cardiologie", "en": "Cardiology" },
+          "synonyms": ["heart", "cardio", "cardiaque", "قلب", "قلبي", "coeur", "cardiologie", "tension", "ضغط"]
+        }
+      ],
+      "workingHours": {
+        "sun": null,
+        "mon": ["08:00", "17:00"],
+        "tue": ["08:00", "17:00"],
+        "wed": ["08:00", "17:00"],
+        "thu": ["08:00", "17:00"],
+        "fri": ["08:00", "12:30"],
+        "sat": ["08:30", "12:30"]
+      },
+      "pricing": {
+        "cardiology": { "consultation_eur": 25, "estimate_eur": [25, 220] }
+      },
+      "faq": [
+        {
+          "id": "hours",
+          "keywords": ["hours", "horaires", "ouvert", "open", "ساعات", "وقت", "متى", "دوام"],
+          "answer": {
+            "ar": "أوقات العيادة: من الاثنين للخميس من 8:00 للـ17:00، الجمعة من 8:00 للـ12:30، والسبت من 8:30 للـ12:30. الأحد مغلق.",
+            "fr": "Horaires du cabinet : lundi à jeudi 8h00–17h00, vendredi 8h00–12h30, samedi 8h30–12h30. Fermé le dimanche.",
+            "en": "Practice hours: Monday–Thursday 8:00–17:00, Friday 8:00–12:30, Saturday 8:30–12:30. Closed Sunday."
+          }
+        },
+        {
+          "id": "payment",
+          "keywords": ["payment", "paiement", "pay", "cash", "carte", "card", "دفع", "خلاص", "بطاقة", "cnam", "تأمين", "assurance"],
+          "answer": {
+            "ar": "الخلاص كاش ولا بالبطاقة. نتعاملو مع الكنام (CNAM) — جيب معاك بطاقة العلاج.",
+            "fr": "Paiement en espèces ou par carte. Le cabinet est conventionné CNAM — apportez votre carte de soins.",
+            "en": "Payment by cash or card. The practice works with CNAM insurance — bring your care card."
+          }
+        },
+        {
+          "id": "first_visit",
+          "keywords": ["first", "premiere", "première", "bring", "amener", "documents", "أول", "مرة", "نجيب", "وثائق", "ecg", "analyses", "تحاليل"],
+          "answer": {
+            "ar": "لأول زيارة، جيب معاك التحاليل والفحوصات القديمة (ECG، إيكو…) وقائمة الأدوية اللي تاخذ فيها.",
+            "fr": "Pour une première visite, apportez vos anciens examens (ECG, écho…) et la liste de vos médicaments.",
+            "en": "For a first visit, bring your previous tests (ECG, echo…) and your current medication list."
+          }
+        },
+        {
+          "id": "location",
+          "keywords": ["where", "address", "adresse", "location", "وين", "عنوان", "فين", "maps"],
+          "answer": {
+            "ar": "العيادة في وسط سوسة، شارع الاستقلال، الطابق الثاني فوق الصيدلية المركزية.",
+            "fr": "Le cabinet est au centre de Sousse, avenue de l'Indépendance, 2e étage au-dessus de la pharmacie centrale.",
+            "en": "The practice is in central Sousse, Avenue de l'Indépendance, 2nd floor above the central pharmacy."
+          }
+        }
+      ]
     }
   ]
 }

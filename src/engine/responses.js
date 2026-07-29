@@ -11,6 +11,19 @@ const DICT = {
       `👋 Welcome to ${v.clinic}. I'm the clinic's virtual assistant.\nI can help you with:\n• 📅 Booking an appointment\n• 💶 Pricing\n• ✈️ Travel & accommodation\n• ❓ Your questions\nTo reach a human, type "agent".`,
   },
 
+  // Cabinet persona (D1): the bot is THE DOCTOR'S assistant, by name. No travel
+  // bullet — a cabinet is a local practice, not a medical-tourism desk. The
+  // handoff trigger words stay IDENTICAL to the clinic greeting so intent
+  // detection keeps working («موظف» / « conseiller » / "agent").
+  greetingCabinet: {
+    ar: (v) =>
+      `👋 أهلاً بيك في ${v.cabinet}. أنا مساعد الدكتور ${v.doctor} الآلي.\nننجم نعاونك في:\n• 📅 حجز موعد مع الدكتور\n• 💶 الأسعار\n• ❓ أسئلة عامة\nإذا تحب تحكي مع موظف اكتب «موظف».`,
+    fr: (v) =>
+      `👋 Bienvenue au ${v.cabinet}. Je suis l'assistant virtuel du Dr ${v.doctor}.\nJe peux vous aider pour :\n• 📅 Prendre rendez-vous avec le Dr ${v.doctor}\n• 💶 Les tarifs\n• ❓ Vos questions\nPour parler à un conseiller, écrivez « conseiller ».`,
+    en: (v) =>
+      `👋 Welcome to ${v.cabinet}. I'm Dr ${v.doctor}'s virtual assistant.\nI can help you with:\n• 📅 Booking an appointment with Dr ${v.doctor}\n• 💶 Pricing\n• ❓ Your questions\nTo reach a human, type "agent".`,
+  },
+
   bookingIntro: {
     ar: () => `📅 بالباهي، نبداو حجز الموعد. باش نسقسيك على شوية معلومات.`,
     fr: () => `📅 Très bien, commençons la prise de rendez-vous. Quelques informations à réunir.`,
@@ -73,13 +86,15 @@ const DICT = {
     en: (v) => `⚠️ Note: the time you asked for wasn't available, so we set the nearest slot: ${v.when}. If it doesn't suit you, reply "no" and we'll find another.`,
   },
 
+  // v.doctor is OPTIONAL (cabinet persona, D1): when present the recap names the
+  // doctor; when absent the rendered text is byte-identical to pre-D1 output.
   confirmSummary: {
     ar: (v) =>
-      `📝 نراجعو الحجز:\n• الاختصاص: ${v.specialty}\n• الموعد: ${v.when}\n• الاسم: ${v.name}\n• المدينة: ${v.origin}\n• الهاتف: ${v.contact}\n\nنأكدو؟ اكتب «نعم» للتأكيد أو «لا» للإلغاء.`,
+      `📝 نراجعو الحجز:${v.doctor ? `\n• الطبيب: الدكتور ${v.doctor}` : ''}\n• الاختصاص: ${v.specialty}\n• الموعد: ${v.when}\n• الاسم: ${v.name}\n• المدينة: ${v.origin}\n• الهاتف: ${v.contact}\n\nنأكدو؟ اكتب «نعم» للتأكيد أو «لا» للإلغاء.`,
     fr: (v) =>
-      `📝 Récapitulatif :\n• Spécialité : ${v.specialty}\n• Rendez-vous : ${v.when}\n• Nom : ${v.name}\n• Ville : ${v.origin}\n• Téléphone : ${v.contact}\n\nJe confirme ? Écrivez « oui » pour valider ou « non » pour annuler.`,
+      `📝 Récapitulatif :${v.doctor ? `\n• Médecin : Dr ${v.doctor}` : ''}\n• Spécialité : ${v.specialty}\n• Rendez-vous : ${v.when}\n• Nom : ${v.name}\n• Ville : ${v.origin}\n• Téléphone : ${v.contact}\n\nJe confirme ? Écrivez « oui » pour valider ou « non » pour annuler.`,
     en: (v) =>
-      `📝 Let's confirm:\n• Specialty: ${v.specialty}\n• Appointment: ${v.when}\n• Name: ${v.name}\n• City: ${v.origin}\n• Phone: ${v.contact}\n\nConfirm? Type "yes" to book or "no" to cancel.`,
+      `📝 Let's confirm:${v.doctor ? `\n• Doctor: Dr ${v.doctor}` : ''}\n• Specialty: ${v.specialty}\n• Appointment: ${v.when}\n• Name: ${v.name}\n• City: ${v.origin}\n• Phone: ${v.contact}\n\nConfirm? Type "yes" to book or "no" to cancel.`,
   },
   confirmRetry: {
     ar: () => `جاوبني بـ «نعم» للتأكيد أو «لا» للإلغاء من فضلك.`,
@@ -130,6 +145,18 @@ const DICT = {
       `✅ Appointment confirmed! Reference: *${v.ref}*\n\n🏥 ${v.clinic}\n• ${v.specialty}\n• 📅 ${v.when}\n• 👤 ${v.name} (${v.origin})\n• 📞 ${v.contact}\n\nOur international-patients team will contact you about travel and the invitation letter. Urgent: ${v.handoff}. Thank you and get well soon! 🌿`,
   },
 
+  // Cabinet confirmation (D1): names the doctor and closes like a local
+  // practice (the secretariat follows up) — never the international-patients /
+  // invitation-letter closing, which would be nonsense for a cabinet.
+  bookedCabinet: {
+    ar: (v) =>
+      `✅ تأكد الموعد مع الدكتور ${v.doctor}! رقم الحجز: *${v.ref}*\n\n🩺 ${v.clinic}\n• 📅 ${v.when}\n• 👤 ${v.name}\n• 📞 ${v.contact}\n\nإذا لزم أي تبديل، الكاتبة باش تتواصل معاك. للاستعجال: ${v.handoff}. سلامتك! 🌿`,
+    fr: (v) =>
+      `✅ Rendez-vous confirmé avec le Dr ${v.doctor} ! Référence : *${v.ref}*\n\n🩺 ${v.clinic}\n• 📅 ${v.when}\n• 👤 ${v.name}\n• 📞 ${v.contact}\n\nLe secrétariat vous contactera si besoin. Urgence : ${v.handoff}. Bon rétablissement ! 🌿`,
+    en: (v) =>
+      `✅ Appointment confirmed with Dr ${v.doctor}! Reference: *${v.ref}*\n\n🩺 ${v.clinic}\n• 📅 ${v.when}\n• 👤 ${v.name}\n• 📞 ${v.contact}\n\nThe office will contact you if anything changes. Urgent: ${v.handoff}. Get well soon! 🌿`,
+  },
+
   cancelled: {
     ar: () => `تم إلغاء الحجز. إذا بديت تحب تحجز من جديد اكتب «موعد». 🙏`,
     fr: () => `Rendez-vous annulé. Pour recommencer, écrivez « rendez-vous ». 🙏`,
@@ -145,6 +172,14 @@ const DICT = {
     ar: (v) => `👩‍⚕️ باش نوصلك بفريق ${v.name}. تنجم تتواصل مباشرة على: ${v.phone}. الفريق باش يرد عليك في أقرب وقت.`,
     fr: (v) => `👩‍⚕️ Je vous mets en relation avec ${v.name}. Contact direct : ${v.phone}. L'équipe vous répondra au plus vite.`,
     en: (v) => `👩‍⚕️ I'm connecting you with ${v.name}. Direct line: ${v.phone}. The team will reply shortly.`,
+  },
+
+  // Cabinet handoff (D1): the human behind a cabinet is the doctor's
+  // secretariat, and the line names the doctor.
+  handoffCabinet: {
+    ar: (v) => `👩‍⚕️ باش نوصلك بسكرتارية عيادة الدكتور ${v.doctor}. تنجم تتواصل مباشرة على: ${v.phone}. باش يردو عليك في أقرب وقت.`,
+    fr: (v) => `👩‍⚕️ Je vous mets en relation avec le secrétariat du Dr ${v.doctor}. Contact direct : ${v.phone}. On vous répond au plus vite.`,
+    en: (v) => `👩‍⚕️ I'm connecting you with Dr ${v.doctor}'s office. Direct line: ${v.phone}. They'll reply shortly.`,
   },
 
   pricingList: {

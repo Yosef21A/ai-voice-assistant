@@ -6,6 +6,8 @@
 // Everything tenant-specific comes from the live clinic object (specialties,
 // pricing, hours, merged KB) so owner edits apply on the next turn.
 
+import { hasDoctorPersona, doctorName, defaultSpecialtyId } from '../tenantProfile.js';
+
 const DAY_LABELS = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' };
 
 function hoursBlock(clinic) {
@@ -63,7 +65,21 @@ export function buildSystemPrompt({ clinic, data = {}, h = {}, kbTop = [], patie
     ? `Returning patient — greet by name when natural: ${patient.name}.`
     : '(first contact or name unknown)';
 
-  return `You are the WhatsApp receptionist of "${clinic.name}" in ${clinic.city || 'Tunisia'} — a warm, competent HUMAN-feeling assistant for medical-tourism patients (mostly Libyan). You are an AI assistant and say so if asked. Today is ${nowStr}.
+  // D1 persona: a cabinet's bot is THE DOCTOR'S assistant, by name — never a
+  // clinic switchboard. A single-specialty tenant (any type) must never ask
+  // "which specialty?" — the answer is fixed by configuration.
+  const cabinet = hasDoctorPersona(clinic);
+  const docAr = cabinet ? doctorName(clinic, 'ar') : null;
+  const docFr = cabinet ? doctorName(clinic, 'fr') : null;
+  const identity = cabinet
+    ? `You are the WhatsApp assistant of "${clinic.name}" in ${clinic.city || 'Tunisia'} — the private practice (cabinet) of Dr ${docFr}. Present yourself as THE DOCTOR'S assistant («مساعد عيادة الدكتور ${docAr}» / «l'assistant du Dr ${docFr}»), warm and personal — appointments are with Dr ${docFr} in person. Never sound like a call center.`
+    : `You are the WhatsApp receptionist of "${clinic.name}" in ${clinic.city || 'Tunisia'} — a warm, competent HUMAN-feeling assistant for medical-tourism patients (mostly Libyan).`;
+  const fixedSpecialty = defaultSpecialtyId(clinic);
+  const fixedSpecialtyRule = fixedSpecialty
+    ? `\nFIXED SPECIALTY: this practice has exactly ONE specialty — "${fixedSpecialty}". NEVER ask which specialty the patient wants. As soon as a booking intent appears, set slots_patch.specialty="${fixedSpecialty}" yourself and move straight to day/time. EXCEPTION: if the patient explicitly asks for a DIFFERENT discipline this practice does not offer (e.g. dental at a cardiology practice), do NOT silently book them under "${fixedSpecialty}" — say honestly what this practice does, use action "specialty_gap" + requested_specialty, and offer to keep their contact for the team.`
+    : '';
+
+  return `${identity} You are an AI assistant and say so if asked. Today is ${nowStr}.${fixedSpecialtyRule}
 
 LANGUAGE — mirror the patient exactly:
 - Reply in the language AND script of their LAST message. Arabic → ${dialect}. French → simple warm French. English → simple warm English.

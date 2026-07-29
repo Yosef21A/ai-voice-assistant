@@ -13,6 +13,14 @@ const DEFAULT_WH = {
   thu: ['08:30', '17:30'], fri: ['08:30', '13:00'], sat: ['09:00', '13:00'],
 };
 
+// doctorName is stored as a plain string or an {ar,fr,en} object (same
+// convention as specialty labels); the form edits FR + optional AR fields.
+function doctorNameToDraft(dn) {
+  if (!dn) return { doctorNameFr: '', doctorNameAr: '' };
+  if (typeof dn === 'string') return { doctorNameFr: dn, doctorNameAr: '' };
+  return { doctorNameFr: dn.fr || dn.en || '', doctorNameAr: dn.ar || '' };
+}
+
 /** Canonical config → editable draft. Missing sections get sane defaults. */
 export function configToDraft(config = {}) {
   const persona = config.persona || {};
@@ -20,6 +28,12 @@ export function configToDraft(config = {}) {
   const esc = config.escalation || {};
   const notif = config.notifications || {};
   return {
+    // D1 cabinet mode: practice type + doctor persona name. doctorNameRaw keeps
+    // the stored value verbatim so a profile save round-trips keys the form
+    // doesn't edit (e.g. a seeded `en` label).
+    type: ['clinic', 'cabinet', 'facilitator'].includes(config.type) ? config.type : 'clinic',
+    doctorNameRaw: config.doctorName ?? null,
+    ...doctorNameToDraft(config.doctorName),
     name: config.name || '', city: config.city || '', country: config.country || '',
     timezone: config.timezone || 'Africa/Tunis', currency: config.currency || 'EUR',
     address: config.address || '', googleMapsUrl: config.googleMapsUrl || '', phone: config.phone || '',
@@ -56,11 +70,24 @@ export function configToDraft(config = {}) {
 
 // Slice extractors — a wizard step / settings tab saves only what it owns so
 // concurrent edits never clobber unrelated config.
-export const profilePatch = (d) => ({
-  name: d.name, city: d.city, country: d.country, timezone: d.timezone, currency: d.currency,
-  address: d.address, googleMapsUrl: d.googleMapsUrl, phone: d.phone,
-  specialties: d.specialties, workingHours: d.workingHours, holidays: d.holidays,
-});
+export const profilePatch = (d) => {
+  const patch = {
+    name: d.name, city: d.city, country: d.country, timezone: d.timezone, currency: d.currency,
+    address: d.address, googleMapsUrl: d.googleMapsUrl, phone: d.phone,
+    specialties: d.specialties, workingHours: d.workingHours, holidays: d.holidays,
+    type: d.type || 'clinic',
+  };
+  // doctorName travels ONLY for cabinets — a clinic profile save must not write
+  // (or clear) a field its form never shows. Editing merges over the stored
+  // object so untouched keys (a seeded `en` label) survive the round-trip.
+  if (d.type === 'cabinet') {
+    const fr = (d.doctorNameFr || '').trim();
+    const ar = (d.doctorNameAr || '').trim();
+    const base = d.doctorNameRaw && typeof d.doctorNameRaw === 'object' ? d.doctorNameRaw : null;
+    patch.doctorName = ar || base ? { ...(base || {}), fr, ar } : fr;
+  }
+  return patch;
+};
 export const personaPatch = (d) => ({ languages: d.persona.spoken, persona: d.persona });
 export const tourismPatch = (d) => ({ tourism: d.tourism });
 export const escalationPatch = (d) => ({ escalation: d.escalation });
@@ -79,12 +106,29 @@ export const notificationsPatch = (d) => ({
 export function ProfileForm({ value, onChange }) {
   const { t, lang } = useI18n();
   const set = (patch) => onChange({ ...value, ...patch });
+  const isCabinet = value.type === 'cabinet';
   const selectedIds = new Set((value.specialties || []).map((s) => s.id));
   const toggleSpec = (id) => {
+    // Cabinet (D1): a doctor's practice has ONE specialty — radio semantics.
+    // Clicking the active chip is a no-op: a radio never deselects to zero,
+    // because a cabinet with no specialty would ask an unanswerable question.
+    if (isCabinet) {
+      if (!selectedIds.has(id)) set({ specialties: [specialtyObject(id)] });
+      return;
+    }
     const next = selectedIds.has(id)
       ? value.specialties.filter((s) => s.id !== id)
       : [...value.specialties, specialtyObject(id)];
     set({ specialties: next });
+  };
+  // Switching clinic→cabinet with several specialties keeps only the first so
+  // the saved config always matches the single-specialty contract.
+  const setType = (type) => {
+    const patch = { type };
+    if (type === 'cabinet' && (value.specialties || []).length > 1) {
+      patch.specialties = [value.specialties[0]];
+    }
+    set(patch);
   };
   const setDay = (day, idx, v) => {
     const cur = value.workingHours[day] || ['09:00', '17:00'];
@@ -97,14 +141,35 @@ export function ProfileForm({ value, onChange }) {
 
   return (
     <div className="stack">
+      <Field label={t('profile.type')}>
+        <Segmented
+          ariaLabel={t('profile.type')}
+          value={isCabinet ? 'cabinet' : 'clinic'}
+          onChange={setType}
+          options={[
+            { value: 'clinic', label: t('profile.typeClinic') },
+            { value: 'cabinet', label: t('profile.typeCabinet') },
+          ]}
+        />
+      </Field>
       <div className="row-wrap" style={{ gap: 'var(--sp-3)' }}>
-        <Field label={t('profile.clinicName')} htmlFor="f-name">
+        <Field label={isCabinet ? t('profile.cabinetName') : t('profile.clinicName')} htmlFor="f-name">
           <input id="f-name" className="control" value={value.name} onChange={(e) => set({ name: e.target.value })} />
         </Field>
         <Field label={t('profile.phone')} htmlFor="f-phone">
           <input id="f-phone" className="control" value={value.phone} onChange={(e) => set({ phone: e.target.value })} />
         </Field>
       </div>
+      {isCabinet ? (
+        <div className="row-wrap" style={{ gap: 'var(--sp-3)' }}>
+          <Field label={t('profile.doctorName')} hint={t('profile.doctorNameHint')} htmlFor="f-doc">
+            <input id="f-doc" className="control" value={value.doctorNameFr} onChange={(e) => set({ doctorNameFr: e.target.value })} placeholder="Ben Salem" />
+          </Field>
+          <Field label={t('profile.doctorNameAr')} htmlFor="f-doc-ar" optional optionalText={t('common.optional')}>
+            <input id="f-doc-ar" className="control" dir="rtl" value={value.doctorNameAr} onChange={(e) => set({ doctorNameAr: e.target.value })} placeholder="بن سالم" />
+          </Field>
+        </div>
+      ) : null}
       <div className="row-wrap" style={{ gap: 'var(--sp-3)' }}>
         <Field label={t('profile.city')} htmlFor="f-city">
           <input id="f-city" className="control" value={value.city} onChange={(e) => set({ city: e.target.value })} />
@@ -123,7 +188,10 @@ export function ProfileForm({ value, onChange }) {
         <input id="f-maps" className="control" inputMode="url" value={value.googleMapsUrl} onChange={(e) => set({ googleMapsUrl: e.target.value })} />
       </Field>
 
-      <Field label={t('profile.specialties')} hint={t('profile.specialtiesHint')}>
+      <Field
+        label={isCabinet ? t('profile.specialtyCabinet') : t('profile.specialties')}
+        hint={isCabinet ? t('profile.specialtyCabinetHint') : t('profile.specialtiesHint')}
+      >
         <div className="chips">
           {SPECIALTY_CATALOG.map((s) => (
             <ChipToggle key={s.id} active={selectedIds.has(s.id)} onClick={() => toggleSpec(s.id)}>
@@ -166,13 +234,29 @@ export function ProfileForm({ value, onChange }) {
 
 // ── Persona ─────────────────────────────────────────────────────────────────
 const LANG_ORDER = ['ar', 'fr', 'en'];
-function defaultGreeting(lang, who) {
+function defaultGreeting(lang, who, doctor) {
+  // Cabinet (D1): the default persona is the DOCTOR'S assistant, by name.
+  if (doctor) {
+    return {
+      ar: `أهلاً وسهلاً 👋 أنا مساعد عيادة الدكتور ${doctor} على واتساب. كيفاش ننجّم نعاونك اليوم؟`,
+      fr: `Bonjour 👋 je suis l'assistant du Dr ${doctor} sur WhatsApp. Comment puis-je vous aider ?`,
+      en: `Hello 👋 I'm Dr ${doctor}'s assistant on WhatsApp. How can I help you today?`,
+    }[lang];
+  }
   const name = who || { ar: 'المساعد', fr: "l'assistant", en: 'the assistant' }[lang];
   return {
     ar: `أهلاً وسهلاً 👋 أنا ${name}، مساعد العيادة على واتساب. كيفاش ننجّم نعاونك اليوم؟`,
     fr: `Bonjour 👋 je suis ${name} de la clinique sur WhatsApp. Comment puis-je vous aider ?`,
     en: `Hello 👋 I'm ${name} for the clinic on WhatsApp. How can I help you today?`,
   }[lang];
+}
+
+// Doctor display name for the greeting preview, per preview language.
+function draftDoctor(value, lang) {
+  if (value.type !== 'cabinet') return null;
+  const fr = (value.doctorNameFr || '').trim();
+  const ar = (value.doctorNameAr || '').trim();
+  return (lang === 'ar' ? ar || fr : fr || ar) || null;
 }
 
 export function PersonaForm({ value, onChange, clinicName }) {
@@ -186,7 +270,9 @@ export function PersonaForm({ value, onChange, clinicName }) {
     if (!next.length) return; // keep at least one language
     setP({ spoken: LANG_ORDER.filter((x) => next.includes(x)) });
   };
-  const greetPreview = (p.greeting && p.greeting.trim()) || defaultGreeting(previewLang, p.botName || clinicName);
+  const greetPreview =
+    (p.greeting && p.greeting.trim()) ||
+    defaultGreeting(previewLang, p.botName || clinicName, draftDoctor(value, previewLang));
 
   return (
     <div className="stack">
@@ -214,7 +300,7 @@ export function PersonaForm({ value, onChange, clinicName }) {
         />
       </Field>
       <Field label={t('persona.greeting')} hint={t('persona.greetingHint')} htmlFor="p-greet">
-        <textarea id="p-greet" className="control" dir={dirOf(p.greeting)} rows={3} value={p.greeting} onChange={(e) => setP({ greeting: e.target.value })} placeholder={defaultGreeting('fr', p.botName || clinicName)} />
+        <textarea id="p-greet" className="control" dir={dirOf(p.greeting)} rows={3} value={p.greeting} onChange={(e) => setP({ greeting: e.target.value })} placeholder={defaultGreeting('fr', p.botName || clinicName, draftDoctor(value, 'fr'))} />
       </Field>
 
       <div className="card pad-sm" style={{ background: 'var(--bg-2)' }}>

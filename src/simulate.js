@@ -110,6 +110,24 @@ const frenchFlow = {
   ],
 };
 
+// D1 cabinet mode: a single-doctor practice. The bot speaks as the doctor's
+// assistant and NEVER asks "which specialty?" — note the script goes straight
+// from booking intent to the day/time answer.
+const cabinetFlow = {
+  title: '🩺  Cabinet mode · Cabinet Dr. Ben Salem — Cardiologie (Sousse)',
+  phoneNumberId: '1000000003',
+  from: '21655000004',
+  script: [
+    'أهلا',
+    'نحب ناخذ موعد مع الدكتور',
+    'نهار الثلاثاء الساعة 9 صباحاً',
+    'اسمي علي بن عمر',
+    'من سوسة',
+    'رقمي +216 22 123 456',
+    'نعم',
+  ],
+};
+
 // A short English showcase (no booking): pricing, travel, FAQ, handoff.
 const englishShowcase = {
   title: '🇬🇧  English concierge showcase · El Amen (pricing / travel / FAQ / handoff)',
@@ -141,6 +159,7 @@ async function main() {
 
   const arAppt = await runFlow(arabicFlow);
   const frAppt = await runFlow(frenchFlow);
+  const cabAppt = await runFlow(cabinetFlow);
   await runFlow(englishShowcase);
   await runFlow(emergencyShowcase);
 
@@ -153,7 +172,12 @@ async function main() {
 
   // Validate the demo actually did its job (non-zero exit on failure).
   const problems = [];
-  if (appts.length < 2) problems.push(`expected >= 2 appointments, got ${appts.length}`);
+  if (appts.length < 3) problems.push(`expected >= 3 appointments, got ${appts.length}`);
+  // D1: the cabinet booking must exist, on the cabinet tenant, under its single
+  // specialty — proof the flow completed WITHOUT a specialty question.
+  const cab = appts.find((a) => a.clinicId === 'cabinet-bensalem-sousse');
+  if (!cab) problems.push('cabinet scenario booked no appointment');
+  else if (cab.specialty !== 'cardiology') problems.push(`cabinet appointment specialty ${cab.specialty}, expected cardiology`);
   for (const a of appts) {
     const clinic = store.getClinicById(a.clinicId);
     const d = new Date(a.datetimeISO);
@@ -175,6 +199,9 @@ async function main() {
   if (arAppt && frAppt) {
     line(`      AR ref ${arAppt.ref} · ${arAppt.specialtyLabel} · ${arAppt.datetimeISO}`);
     line(`      FR ref ${frAppt.ref} · ${frAppt.specialtyLabel} · ${frAppt.datetimeISO}`);
+  }
+  if (cabAppt) {
+    line(`      🩺 cabinet ref ${cabAppt.ref} · Dr Ben Salem · ${cabAppt.datetimeISO} (no specialty question asked)`);
   }
   hr();
 }
