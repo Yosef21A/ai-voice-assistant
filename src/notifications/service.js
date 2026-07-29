@@ -37,6 +37,14 @@ const EVENT_META = {
     emergency: false,
     subject: (e) => e.conversationId || refOf(e.appointment) || 'booking',
   },
+  // V2: patient cancelled via a reminder — the freed slot is time-critical, so
+  // it rides the booking toggle (an owner who wants booking news wants this).
+  'appointment.cancelled': {
+    key: 'booking',
+    aliases: ['booking', 'appointment', 'bookings'],
+    emergency: false,
+    subject: (e) => `cancel:${refOf(e.appointment) || e.conversationId || 'appointment'}`,
+  },
   'lead.hot': {
     key: 'hotLead',
     aliases: ['hotLead', 'hot_lead', 'lead', 'leads'],

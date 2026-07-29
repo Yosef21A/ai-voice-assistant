@@ -316,6 +316,53 @@ export function computeAnalytics(storeData = {}, range = {}) {
   }
   const leadConversion = pipelineLeads.length ? wonLeads / pipelineLeads.length : null;
 
+  // ── reminders & no-shows (V2) ──────────────────────────────────────────────
+  // Reminder outcomes (range-filtered on the row's creation) — the renewal
+  // pitch in four numbers. `confirmed`/`cancelled`/`reschedule` are patient
+  // REPLIES to a reminder; `no_answer` means the appointment time passed in
+  // silence; `skipped_window` is a reminder Meta's 24h rule forbade us to send.
+  const remRows = (storeData.reminders || []).filter((r) => inRange(r.createdAt));
+  const reminderOutcomes = {
+    sent: 0, confirmed: 0, cancelled: 0, reschedule: 0,
+    no_answer: 0, skipped_window: 0, failed: 0,
+  };
+  for (const r of remRows) {
+    if (r.status !== 'sent' && r.status in reminderOutcomes) reminderOutcomes[r.status] += 1;
+    // Every row that reached the patient counts as "sent" regardless of what
+    // the patient did next — replies are outcomes ON TOP of a send. 'closed'
+    // means the appointment was resolved by staff before the patient answered.
+    if (['sent', 'confirmed', 'cancelled', 'reschedule', 'no_answer', 'closed'].includes(r.status)) {
+      reminderOutcomes.sent += 1;
+    }
+  }
+
+  // Weekly no-show trend over PAST appointments in range (by appointment date,
+  // Monday-keyed weeks): rate = no_show / (done + no_show) — cancelled slots
+  // were refilled or freed, they are not "did not come".
+  const weekKey = (d) => {
+    const day = new Date(d);
+    const dow = (day.getDay() + 6) % 7; // Monday = 0
+    day.setDate(day.getDate() - dow);
+    day.setHours(0, 0, 0, 0);
+    return day.toISOString().slice(0, 10);
+  };
+  const trendBuckets = new Map();
+  const nowMs = Date.now();
+  for (const a of (storeData.appointments || []).filter(realAppt)) {
+    const iso = a.datetimeISO ?? a.datetimeIso;
+    const t = iso ? new Date(iso).getTime() : NaN;
+    if (Number.isNaN(t) || t > nowMs || !inRange(iso)) continue;
+    if (a.status !== 'done' && a.status !== 'no_show') continue;
+    const key = weekKey(iso);
+    const b = trendBuckets.get(key) || { week: key, done: 0, noShow: 0 };
+    if (a.status === 'done') b.done += 1;
+    else b.noShow += 1;
+    trendBuckets.set(key, b);
+  }
+  const noShowTrend = [...trendBuckets.values()]
+    .sort((a, b) => a.week.localeCompare(b.week))
+    .map((b) => ({ ...b, ratePct: Math.round((b.noShow / (b.done + b.noShow)) * 100) }));
+
   return {
     ...digest,
     tz,
@@ -334,6 +381,8 @@ export function computeAnalytics(storeData = {}, range = {}) {
     pipelineValue,
     pipelineOpen: pipelineLeads.length - (leadsByStatus.lost || 0) - wonLeads,
     leadConversion,
+    reminderOutcomes,
+    noShowTrend,
     workingHours: cfg.workingHours || null, // lets the UI draw the after-hours band
   };
 }
@@ -385,13 +434,14 @@ const TRANSCRIPT_CHUNK = 20; // listMessages concurrency bound (no unbounded fan
 /** Fetch + aggregate the full dashboard analytics. */
 export async function collectAnalytics(store, tenant, range = {}) {
   const tenantId = tenant.id;
-  const [conversations, appointments, leads, events, kbEntries, unanswered] = await Promise.all([
+  const [conversations, appointments, leads, events, kbEntries, unanswered, reminders] = await Promise.all([
     safeList(() => store.conversations.list(tenantId)),
     safeList(() => store.appointments.list(tenantId)),
     safeList(() => store.leads.list(tenantId)),
     safeList(() => store.events.list(tenantId, { type: 'message.analyzed', limit: EVENTS_FETCH_LIMIT })),
     safeList(() => store.kbEntries.list(tenantId, { status: 'active' })),
     safeList(() => store.unanswered.list(tenantId, {})),
+    safeList(() => store.reminders.list(tenantId, {})), // absent on PG until P1-G → []
   ]);
 
   // Transcripts only for conversations active in the window; most recent first,
@@ -413,7 +463,7 @@ export async function collectAnalytics(store, tenant, range = {}) {
   }
 
   return computeAnalytics(
-    { tenant, conversations, appointments, leads, events, kbEntries, unanswered, messagesByConvo },
+    { tenant, conversations, appointments, leads, events, kbEntries, unanswered, reminders, messagesByConvo },
     range
   );
 }

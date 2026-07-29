@@ -135,6 +135,17 @@ export function tenantRouter({ store, requireRole }) {
       if (body.notifications && typeof body.notifications === 'object') {
         config.notifications = { ...(config.notifications || {}), ...body.notifications };
       }
+      // V2 reminder toggles — booleans only, so a malformed body can't smuggle
+      // arbitrary structure into the scheduler's config.
+      if (body.reminders && typeof body.reminders === 'object') {
+        const r = body.reminders;
+        config.reminders = {
+          ...(config.reminders || {}),
+          ...(r.enabled != null ? { enabled: !!r.enabled } : {}),
+          ...(r.t48 != null ? { t48: !!r.t48 } : {}),
+          ...(r.t3 != null ? { t3: !!r.t3 } : {}),
+        };
+      }
 
       // The engine's merged FAQ state must NEVER be persisted or restored via
       // Settings: kbLive rebuilds clinic.faq from _baseFaq + active kb_entries.

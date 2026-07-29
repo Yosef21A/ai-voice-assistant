@@ -19,8 +19,10 @@ import { sendAs, publicMessage } from './outbound.js';
 import { analyzeInbound } from '../notifications/index.js';
 import { normalizeQuestion, isSandboxWaId } from '../stats/index.js';
 import { detectLanguage, resolveLanguage } from '../engine/language.js';
+import { detectYesNo } from '../engine/slots.js';
 import { t } from '../engine/responses.js';
 import { estimateMaxBytes } from '../voice/policy.js';
+import { parseReminderAction, applyReminderReply } from '../reminders/index.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
 // interprets media medically — it confirms receipt and promises a human.
@@ -156,6 +158,32 @@ export async function ingestInbound(
     });
   }
 
+  // ── reminder button replies (V2) ──────────────────────────────────────────
+  // The button ID is the contract (`rem:c|x|r:<apptId>`), resolved
+  // deterministically before the engine — a tap on "Annuler ❌" must cancel THAT
+  // appointment, never wander into an LLM turn. The status update applies even
+  // during a human takeover (the tap is unambiguous data); only the bot's ack
+  // respects the pause.
+  const remAction = parseReminderAction(inbound.interactiveId);
+  // RESCHEDULE needs the bot to ask a follow-up question — during a takeover /
+  // emergency pause that question would be suppressed, silently cancelling the
+  // slot with nothing said. Leave the tap for the human driving the chat.
+  if (remAction && !(convo.aiPaused && remAction.action === 'reschedule')) {
+    const resolved = await applyReminderReply(
+      { store, bus, clinic, convo, patientWaId: inbound.from, now: new Date(inbound.timestamp || Date.now()) },
+      remAction
+    );
+    if (resolved.handled) {
+      if (!convo.aiPaused && resolved.replyText) {
+        await sendAs('bot', conversationId, () =>
+          sender.sendText(clinic, inbound.from, resolved.replyText)
+        );
+      }
+      return { tenantId, conversationId, reminder: resolved.outcome };
+    }
+    // Unresolvable (appointment gone/terminal/past): fall through to the engine.
+  }
+
   // Human takeover: the bot stays silent while a staff member is driving.
   if (convo.aiPaused) return { tenantId, conversationId, paused: true };
 
@@ -221,6 +249,49 @@ export async function ingestInbound(
   }
   // A caption rides along: fall through — the engine and the emergency/lead
   // detectors treat it as the turn's text (guardrails stay active).
+
+  // Typed reminder replies (V2): a patient who ANSWERS the reminder in words
+  // ("نعم" / "non") instead of tapping resolves the same way — but ONLY when the
+  // reminder is still the conversation's LIVE question:
+  //   - no booking flow owns the turn,
+  //   - the emergency preflight above found nothing (a cry for help that
+  //     happens to contain a no-word must reach the safety path),
+  //   - and no bot message was sent AFTER the reminder — the bot's own FAQ
+  //     replies end with yes/no questions ("تحب تحجز موعد؟"), and a "نعم" to one
+  //     of those must not silently confirm an appointment.
+  // Kind matters too: the T-3 body asks "on your way?" — a typed "no" there
+  // means "running late", never "cancel"; only the T-48 question carries that
+  // meaning. Button taps stay explicit and are exempt from all of this.
+  const lastRem = convo.lastReminder;
+  if (
+    !remAction &&
+    lastRem?.apptId &&
+    Date.now() - new Date(lastRem.at || 0).getTime() < 24 * 3600 * 1000 &&
+    convo.state?.flow !== 'booking'
+  ) {
+    const yn = detectYesNo(turn.text);
+    const wantsCancel = yn === 'no' && lastRem.kind !== 't3';
+    if (yn === 'yes' || wantsCancel) {
+      const msgs = await store.conversations.listMessages(tenantId, conversationId, {});
+      const lastOut = msgs.filter((m) => m.direction === 'outbound').pop();
+      const superseded =
+        lastOut && new Date(lastOut.ts).getTime() > new Date(lastRem.at).getTime() + 5000;
+      if (!superseded) {
+        const resolved = await applyReminderReply(
+          { store, bus, clinic, convo, patientWaId: inbound.from, now: new Date(inbound.timestamp || Date.now()) },
+          { action: yn === 'yes' ? 'confirm' : 'cancel', apptId: lastRem.apptId }
+        );
+        if (resolved.handled) {
+          if (resolved.replyText) {
+            await sendAs('bot', conversationId, () =>
+              sender.sendText(clinic, inbound.from, resolved.replyText)
+            );
+          }
+          return { tenantId, conversationId, reminder: resolved.outcome };
+        }
+      }
+    }
+  }
 
   const out = await engine.handleMessage(turn);
 

@@ -231,6 +231,55 @@ export function Stats() {
             </div>
           </div>
 
+          {/* Reminders & no-shows (V2) — the renewal pitch in numbers. */}
+          <div className="row-wrap" style={{ gap: 'var(--sp-3)', alignItems: 'stretch' }}>
+            <div className="card grow">
+              <span className="section-label">{t('stats.remTitle')}</span>
+              {(stats.reminderOutcomes?.sent || 0) + (stats.reminderOutcomes?.skipped_window || 0) === 0 ? (
+                <div className="small muted" style={{ marginTop: 'var(--sp-2)' }}>{t('stats.remEmpty')}</div>
+              ) : (
+                <>
+                  <div className="statgrid" style={{ marginTop: 'var(--sp-2)' }}>
+                    {[
+                      [t('stats.remSent'), stats.reminderOutcomes.sent],
+                      [t('stats.remConfirmed'), stats.reminderOutcomes.confirmed],
+                      [t('stats.remCancelled'), stats.reminderOutcomes.cancelled + stats.reminderOutcomes.reschedule],
+                      [t('stats.remNoAnswer'), stats.reminderOutcomes.no_answer],
+                    ].map(([label, value]) => (
+                      <div key={label} className="card pad-sm stat">
+                        <div className="num">{value}</div>
+                        <div className="tiny muted">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {stats.reminderOutcomes.skipped_window > 0 ? (
+                    <div className="tiny muted" style={{ marginTop: 'var(--sp-2)' }}>
+                      {t('stats.remSkipped', { n: stats.reminderOutcomes.skipped_window })}
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="card grow">
+              <span className="section-label">{t('stats.noShowTrend')}</span>
+              {(stats.noShowTrend || []).length === 0 ? (
+                <div className="small muted" style={{ marginTop: 'var(--sp-2)' }}>{t('stats.sinceTracking')}</div>
+              ) : (
+                <div className="stack-2" style={{ marginTop: 'var(--sp-3)' }}>
+                  {stats.noShowTrend.slice(-8).map((w) => (
+                    <div key={w.week} className="frow">
+                      <span className="small dim mono">{w.week.slice(5)}</span>
+                      <div className="fbar">
+                        <div className="fill" style={{ width: `${w.ratePct}%`, background: 'var(--warn)' }} />
+                      </div>
+                      <span className="small mono">{w.ratePct}% · {w.noShow}/{w.done + w.noShow}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="row-wrap" style={{ gap: 'var(--sp-3)', alignItems: 'stretch' }}>
             {/* Top questions. */}
             <div className="card grow">

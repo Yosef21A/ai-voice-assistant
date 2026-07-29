@@ -29,6 +29,7 @@ import { createApiRouter } from './api/index.js';
 import { createOutboundRecorder } from './api/outbound.js';
 import { ingestInbound } from './api/ingest.js';
 import { analyzeInbound, createNotificationService } from './notifications/index.js';
+import { createReminderService } from './reminders/index.js';
 import { normalizeDigits } from './engine/text.js';
 
 /**
@@ -85,6 +86,9 @@ export function normalizeWhatsApp(body) {
           // stored transcripts all see one digit alphabet (live failure F4).
           text: normalizeDigits(text || media?.caption || ''),
           media,
+          // Interactive reply payload id (V2 reminders route on `rem:*` ids —
+          // the TITLE is display copy, the ID is the contract).
+          interactiveId: m.interactive?.button_reply?.id ?? m.button?.payload ?? null,
           phoneNumberId,
           messageId: m.id,
           timestamp: Number(m.timestamp) * 1000 || Date.now(),
@@ -158,6 +162,13 @@ export function createApp(opts = {}) {
   // emergency.detected into WhatsApp alerts on the owner's phone. It never throws
   // back into a bus handler. Stopped on shutdown; tests await notifier.settled().
   const notifier = opts.notifier || createNotificationService({ bus, sender, store });
+
+  // Appointment reminders (V2 no-show killer): deterministic scheduler over the
+  // appointments store. NOT started here — createApp() runs on ANY import of
+  // this module (test helpers included), and an import must never start a
+  // wall-clock scheduler against real runtime data. The run-directly block
+  // below starts it; tests drive reminders.tick(now) themselves.
+  const reminders = opts.reminders || createReminderService({ store, sender, bus, config });
 
   const app = express();
   // Capture the raw body so we can verify Meta's HMAC signature.
@@ -301,7 +312,7 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, kbReady };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, kbReady };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.
@@ -310,6 +321,7 @@ export const { app, config, store, provider, engine, bus, sender, mediaClient, a
 
 // Only listen when run directly (not when imported by tests).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  composed.reminders.start(); // scheduler runs ONLY in the real server process
   const server = app.listen(config.port, () => {
     console.log(`omen-clinic-agent listening on http://localhost:${config.port}`);
     console.log(`  provider: ${provider.name}   store: ${store.name}   tenants: ${
@@ -327,6 +339,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(`\n[server] ${signal} received — shutting down`);
     try {
       notifier.stop();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      composed.reminders.stop();
     } catch {
       /* best-effort */
     }

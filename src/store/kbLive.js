@@ -72,9 +72,35 @@ export async function mergeTenantKb(store, tenantId) {
   return true;
 }
 
+/**
+ * Persisted tenant config (Settings/wizard saves land in the tenants
+ * collection) → live clinic objects. Without this, every owner edit — persona,
+ * hours, reminder toggles, quiet hours — silently REVERTED to the clinics.json
+ * seed on restart: PUT /api/tenant patches the live object, but boot rebuilt it
+ * from the seed alone (V2 review finding). Owner edits win over seed values;
+ * faq/_baseFaq never ride along (the KB merge below owns those).
+ */
+export async function hydrateTenantConfigs(store) {
+  if (typeof store.listClinics !== 'function' || typeof store.tenants?.getById !== 'function') return;
+  for (const clinic of store.listClinics() || []) {
+    try {
+      const t = await store.tenants.getById(clinic.id);
+      if (t?.config && typeof t.config === 'object') {
+        const { faq, _baseFaq, ...cfg } = t.config;
+        Object.assign(clinic, cfg);
+      }
+    } catch {
+      /* a broken tenant must not block the others */
+    }
+  }
+}
+
 /** Boot-time hydration for every registered clinic. Never throws. */
 export async function hydrateAllClinicsKb(store) {
   if (typeof store.listClinics !== 'function') return;
+  // Config first (owner edits win over the seed), THEN the KB merge — it
+  // snapshots _baseFaq off the hydrated clinic.
+  await hydrateTenantConfigs(store);
   for (const clinic of store.listClinics() || []) {
     try {
       await mergeTenantKb(store, clinic.id);

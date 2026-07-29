@@ -107,6 +107,28 @@ const BOOKING = {
     `✅ New booking\n👤 ${v.patient}\n🩺 ${v.specialty}\n📅 ${v.when}\n🔖 ${v.ref}`,
 };
 
+// V2: a patient cancelled via the reminder — the freed slot is actionable NOW.
+const CANCELLED = {
+  ar: (v) =>
+    `❌ المريض لغى الموعد\n👤 ${v.patient}\n📅 ${v.when}\n🔖 ${v.ref}\n💡 الموعد تحرر — عيّط للي في قائمة الانتظار.`,
+  fr: (v) =>
+    `❌ Rendez-vous annulé par le patient\n👤 ${v.patient}\n📅 ${v.when}\n🔖 ${v.ref}\n💡 Créneau libéré — appelez la liste d'attente.`,
+  en: (v) =>
+    `❌ Appointment cancelled by the patient\n👤 ${v.patient}\n📅 ${v.when}\n🔖 ${v.ref}\n💡 Slot freed — call the waitlist.`,
+};
+
+/** Patient-cancellation alert (V2 reminders). */
+export function formatCancellation({ tenant, appointment = {}, lang } = {}) {
+  const L = lang || resolveOwnerLang(tenant);
+  const iso = appointment.datetimeISO || appointment.datetimeIso || appointment.datetime;
+  const body = pick(L, CANCELLED)({
+    patient: val(appointment.patientName || appointment.name),
+    when: formatDateTime(iso, { tz: tenantTimezone(tenant), lang: L }),
+    ref: val(appointment.ref || appointment.id),
+  });
+  return withClinicTag(body, tenant);
+}
+
 /** New-booking alert (patient, specialty, datetime, ref). */
 export function formatBooking({ tenant, appointment = {}, lang } = {}) {
   const L = lang || resolveOwnerLang(tenant);
@@ -273,6 +295,8 @@ export function formatAlert(type, data = {}) {
   switch (type) {
     case 'appointment.created':
       return formatBooking(data);
+    case 'appointment.cancelled':
+      return formatCancellation(data);
     case 'lead.hot':
       return formatHotLead(data);
     case 'handoff.requested':

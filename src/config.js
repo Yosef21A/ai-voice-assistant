@@ -113,6 +113,15 @@ export function getConfig(overrides = {}) {
     voiceMaxTranscriptChars: Number(process.env.VOICE_MAX_TRANSCRIPT_CHARS) || 1500,
     voiceBreakerThreshold: Number(process.env.VOICE_BREAKER_THRESHOLD) || 3,
     voiceBreakerCooldownMs: Number(process.env.VOICE_BREAKER_COOLDOWN_MS) || 60000,
+    // ── appointment reminders (V2 no-show killer) ──────────────────────────
+    // Scheduler cadence; 0 disables the timer entirely (tests drive tick()
+    // directly). Per-tenant kind toggles live in tenant config `reminders`.
+    // Out-of-window reminders are logged, never sent — the compliant template
+    // path ships with the production number (P2-H / RUNBOOK §E).
+    remindersIntervalMs:
+      process.env.REMINDERS_INTERVAL_MS != null
+        ? Number(process.env.REMINDERS_INTERVAL_MS) || 0
+        : 60000,
     dataDir: DATA_DIR,
     runtimeDir: RUNTIME_DIR,
     clinicsFile: CLINICS_FILE,

@@ -19,7 +19,7 @@ import { LEAD_OPEN as LEAD_OPEN_STATUS } from '../../../leads/status.js';
 const COLLECTIONS = [
   'patients', 'conversations', 'messages', 'appointments',
   'leads', 'kb_entries', 'events', 'notification_prefs', 'tenants', 'users',
-  'unanswered',
+  'unanswered', 'reminders',
 ];
 
 /**
@@ -220,7 +220,7 @@ export function createJsonStore({
     async update(tenantId, id, patch = {}) {
       const c = db.conversations.find((x) => x.id === id && x.clinicId === tenantId);
       if (!c) return null;
-      for (const k of ['status', 'aiPaused', 'lang', 'state', 'lastMessageAt']) {
+      for (const k of ['status', 'aiPaused', 'lang', 'state', 'lastMessageAt', 'lastReminder']) {
         if (k in patch) c[k] = patch[k];
       }
       c.updatedAt = now();
@@ -600,6 +600,50 @@ export function createJsonStore({
     },
   };
 
+  // ── reminders (V2 no-show killer) ─────────────────────────────────────────
+  // ONE row per (appointment, kind) is the dedupe contract: its existence means
+  // that reminder was already actioned (sent / skipped / failed) and must never
+  // fire again. Patient replies then move the row's status
+  // (sent → confirmed | cancelled | reschedule | no_answer).
+  const reminders = {
+    async record(tenantId, data = {}) {
+      if (!data.apptId || !data.kind) throw new Error('reminders.record: apptId and kind required');
+      const rec = {
+        ...data,
+        id: data.id || randomUUID(),
+        tenantId,
+        status: data.status || 'sent',
+        createdAt: data.createdAt || now(),
+        updatedAt: now(),
+      };
+      db.reminders.push(rec);
+      persist('reminders');
+      return rec;
+    },
+    async find(tenantId, apptId, kind) {
+      return (
+        db.reminders.find(
+          (r) => r.tenantId === tenantId && r.apptId === apptId && r.kind === kind
+        ) || null
+      );
+    },
+    async list(tenantId, filter = {}) {
+      return db.reminders.filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          (filter.status === undefined || r.status === filter.status) &&
+          (filter.apptId === undefined || r.apptId === filter.apptId)
+      );
+    },
+    async update(tenantId, id, patch = {}) {
+      const r = db.reminders.find((x) => x.id === id && x.tenantId === tenantId);
+      if (!r) return null;
+      Object.assign(r, patch, { updatedAt: now() });
+      persist('reminders');
+      return r;
+    },
+  };
+
   // ── users (dashboard logins) ──────────────────────────────────────────────
   // Added in P1-C. Email is globally unique (lower-cased); every other read is
   // tenant-scoped. Passwords are hashed by src/auth before they reach here.
@@ -675,6 +719,7 @@ export function createJsonStore({
     leads,
     kbEntries,
     unanswered,
+    reminders,
     events,
     notificationPrefs,
     async health() {

@@ -65,6 +65,12 @@ export function configToDraft(config = {}) {
       // Money line (P2-A): average booking value; '' in the draft = not set.
       avgProcedureValue: notif.avgProcedureValue ?? '',
     },
+    // V2 appointment reminders — default ON (the no-show killer is the pitch).
+    reminders: {
+      enabled: config.reminders?.enabled !== false,
+      t48: config.reminders?.t48 !== false,
+      t3: config.reminders?.t3 !== false,
+    },
   };
 }
 
@@ -100,6 +106,7 @@ export const notificationsPatch = (d) => ({
         ? null
         : Number(d.notifications.avgProcedureValue),
   },
+  reminders: d.reminders,
 });
 
 // ── Profile ─────────────────────────────────────────────────────────────────
@@ -434,6 +441,22 @@ export function NotificationsForm({ value, onChange }) {
           {digests.map(([k, label]) => (
             <Switch key={k} id={`n-${k}`} checked={!!n.events[k]} onChange={(v) => setEvent(k, v)} label={label} />
           ))}
+        </div>
+      </Field>
+      <Field label={t('settings.reminders')} hint={t('settings.remindersHint')}>
+        <div className="stack-2">
+          <Switch
+            id="n-rem48"
+            checked={!!value.reminders.t48}
+            onChange={(v) => onChange({ ...value, reminders: { ...value.reminders, t48: v, enabled: v || value.reminders.t3 } })}
+            label={t('settings.rem48')}
+          />
+          <Switch
+            id="n-rem3"
+            checked={!!value.reminders.t3}
+            onChange={(v) => onChange({ ...value, reminders: { ...value.reminders, t3: v, enabled: v || value.reminders.t48 } })}
+            label={t('settings.rem3')}
+          />
         </div>
       </Field>
       <Field label={t('settings.recipients')} hint={t('settings.recipientsHint')} htmlFor="n-rcpt">

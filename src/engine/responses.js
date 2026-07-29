@@ -174,6 +174,58 @@ const DICT = {
     en: (v) => `👩‍⚕️ I'm connecting you with ${v.name}. Direct line: ${v.phone}. The team will reply shortly.`,
   },
 
+  // ── appointment reminders (V2 no-show killer) ────────────────────────────
+  // Sent with interactive confirm/cancel/reschedule buttons; the bodies are
+  // deterministic templates (never LLM prose). v.doctor is the optional cabinet
+  // persona, same convention as confirmSummary.
+  reminder48: {
+    ar: (v) =>
+      `📅 تذكير من ${v.clinic}: عندك موعد ${v.when}${v.doctor ? ` مع الدكتور ${v.doctor}` : ''}.\nرقم الحجز: *${v.ref}*.\nتنجم تأكد، تلغي، ولا تبدل الوقت 👇`,
+    fr: (v) =>
+      `📅 Rappel de ${v.clinic} : vous avez rendez-vous ${v.when}${v.doctor ? ` avec le Dr ${v.doctor}` : ''}.\nRéférence : *${v.ref}*.\nConfirmez, annulez ou changez l'horaire 👇`,
+    en: (v) =>
+      `📅 Reminder from ${v.clinic}: you have an appointment ${v.when}${v.doctor ? ` with Dr ${v.doctor}` : ''}.\nReference: *${v.ref}*.\nConfirm, cancel or reschedule 👇`,
+  },
+  reminder3: {
+    ar: (v) =>
+      `🕒 موعدك اليوم ${v.when}${v.doctor ? ` مع الدكتور ${v.doctor}` : ` في ${v.clinic}`}. جاي في الطريق؟ 🙌`,
+    fr: (v) =>
+      `🕒 Votre rendez-vous est aujourd'hui ${v.when}${v.doctor ? ` avec le Dr ${v.doctor}` : ` à ${v.clinic}`}. Vous êtes en route ? 🙌`,
+    en: (v) =>
+      `🕒 Your appointment is today ${v.when}${v.doctor ? ` with Dr ${v.doctor}` : ` at ${v.clinic}`}. On your way? 🙌`,
+  },
+  // Button titles (WhatsApp caps reply-button titles at 20 chars).
+  btnReminderConfirm: {
+    ar: () => `نأكد ✅`,
+    fr: () => `Je confirme ✅`,
+    en: () => `Confirm ✅`,
+  },
+  btnReminderCancel: {
+    ar: () => `نلغي ❌`,
+    fr: () => `Annuler ❌`,
+    en: () => `Cancel ❌`,
+  },
+  btnReminderResched: {
+    ar: () => `نبدل الوقت 🔄`,
+    fr: () => `Changer l'heure 🔄`,
+    en: () => `Reschedule 🔄`,
+  },
+  reminderConfirmedAck: {
+    ar: (v) => `تمام، موعدك مأكد ✅ نستناوك ${v.when}. سلامتك!`,
+    fr: (v) => `Parfait, votre rendez-vous est confirmé ✅ On vous attend ${v.when}. À bientôt !`,
+    en: (v) => `Great, your appointment is confirmed ✅ See you ${v.when}!`,
+  },
+  reminderCancelledAck: {
+    ar: () => `تم إلغاء الموعد ❌ إذا تحب وقت آخر اكتبلي «موعد» ونحجزولك من جديد. 🙏`,
+    fr: () => `Rendez-vous annulé ❌ Pour un autre créneau, écrivez « rendez-vous » et on vous en trouve un. 🙏`,
+    en: () => `Appointment cancelled ❌ Want another time? Type "appointment" and we'll rebook you. 🙏`,
+  },
+  reminderReschedAsk: {
+    ar: () => `باهي، نبدلولك الوقت 🔄 أي نهار وأي ساعة يناسبوك؟`,
+    fr: () => `D'accord, on change l'horaire 🔄 Quel jour et quelle heure vous conviennent ?`,
+    en: () => `Sure, let's reschedule 🔄 What day and time suit you?`,
+  },
+
   // Cabinet handoff (D1): the human behind a cabinet is the doctor's
   // secretariat, and the line names the doctor.
   handoffCabinet: {
