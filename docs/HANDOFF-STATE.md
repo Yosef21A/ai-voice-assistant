@@ -63,6 +63,24 @@ cloudflared tunnel --url http://localhost:3000   # public tunnel
 - `npm start` must be restarted whenever `.env` changes.
 - Keep `npm test` green (272 pass / 1 skip baseline) before/after every change.
 
+## Session 2026-07-29/30 outcome (SESSION-ORDERS executed end to end)
+All eight ordered slices shipped, each adversarially reviewed pre-commit:
+D1 cabinet mode (574be92) · V2 reminders (a82e3d8) · D2 facilitator MVP
+(6741fb5) · V4 smart follow-ups (76e456d) · P2-F hardening (3a5ba4a) ·
+P1-G Postgres primary (3e8d8c5) · V6 copilot + V7 CRM sync (e8983ee).
+Suite: **356 pass / 0 fail / 2 skipped** (the two PG suites without
+DATABASE_URL; with it — verified against a disposable docker Postgres 16 —
+**360/0/0** including an engine-on-SQL booking e2e). Simulate: 4 scenarios +
+emergency showcase, offline-green. Verified LIVE via /simulate on the running
+Gemini server: cabinet persona (Dr Ben Salem, no specialty question) and
+facilitator qualification (rich lead + same-day-offer promise).
+**Still blocked on Youssef:** the ~24h token expired Jul 25 → outbound sends
+401 AND `subscribed_apps` can't be checked/re-posted (needs a valid token) —
+a live WhatsApp Web test message produced no webhook, almost certainly that
+known regression. On return: regenerate token (Étape 1 popup) → paste in
+`.env` → restart → `curl -X POST …/subscribed_apps` (§ THE BUG) → resend test.
+Webhook callback re-pointed + verified for the current tunnel already.
+
 ## Build roadmap after verification (in order)
 1. **P1-G** — engine async on the store interface → `DATABASE_URL` flips Postgres to primary (schema/adapter/tests already exist from P1-A).
 2. **Libyan-dialect + LLM polish** — per-tenant KB injected into the Anthropic provider prompts; tighten AR replies (Libyan colloquial), keep booking deterministic.
