@@ -30,6 +30,7 @@ import { createOutboundRecorder } from './api/outbound.js';
 import { ingestInbound } from './api/ingest.js';
 import { analyzeInbound, createNotificationService } from './notifications/index.js';
 import { createReminderService } from './reminders/index.js';
+import { createFollowupService } from './followups/index.js';
 import { normalizeDigits } from './engine/text.js';
 
 /**
@@ -169,6 +170,9 @@ export function createApp(opts = {}) {
   // wall-clock scheduler against real runtime data. The run-directly block
   // below starts it; tests drive reminders.tick(now) themselves.
   const reminders = opts.reminders || createReminderService({ store, sender, bus, config });
+  // Smart follow-ups (V4): same lifecycle contract as reminders — created here,
+  // started only by the run-directly block, tick(now)-driven in tests.
+  const followups = opts.followups || createFollowupService({ store, sender, bus, config });
 
   const app = express();
   // Capture the raw body so we can verify Meta's HMAC signature.
@@ -312,7 +316,7 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, kbReady };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, followups, kbReady };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.
@@ -321,7 +325,8 @@ export const { app, config, store, provider, engine, bus, sender, mediaClient, a
 
 // Only listen when run directly (not when imported by tests).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  composed.reminders.start(); // scheduler runs ONLY in the real server process
+  composed.reminders.start(); // schedulers run ONLY in the real server process
+  composed.followups.start();
   const server = app.listen(config.port, () => {
     console.log(`omen-clinic-agent listening on http://localhost:${config.port}`);
     console.log(`  provider: ${provider.name}   store: ${store.name}   tenants: ${
@@ -344,6 +349,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
     try {
       composed.reminders.stop();
+      composed.followups.stop();
     } catch {
       /* best-effort */
     }

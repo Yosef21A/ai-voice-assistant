@@ -259,6 +259,15 @@ export function Stats() {
                   ) : null}
                 </>
               )}
+              {stats.nudges?.sent > 0 ? (
+                <div className="small dim" style={{ marginTop: 'var(--sp-3)' }}>
+                  {t('stats.nudgeLine', {
+                    sent: stats.nudges.sent,
+                    replied: stats.nudges.replied,
+                    converted: stats.nudges.converted,
+                  })}
+                </div>
+              ) : null}
             </div>
             <div className="card grow">
               <span className="section-label">{t('stats.noShowTrend')}</span>

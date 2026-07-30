@@ -220,7 +220,7 @@ export function createJsonStore({
     async update(tenantId, id, patch = {}) {
       const c = db.conversations.find((x) => x.id === id && x.clinicId === tenantId);
       if (!c) return null;
-      for (const k of ['status', 'aiPaused', 'lang', 'state', 'lastMessageAt', 'lastReminder']) {
+      for (const k of ['status', 'aiPaused', 'lang', 'state', 'lastMessageAt', 'lastReminder', 'nudge', 'nudgeOptOut']) {
         if (k in patch) c[k] = patch[k];
       }
       c.updatedAt = now();

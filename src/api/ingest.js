@@ -23,6 +23,7 @@ import { detectYesNo } from '../engine/slots.js';
 import { t } from '../engine/responses.js';
 import { estimateMaxBytes } from '../voice/policy.js';
 import { parseReminderAction, applyReminderReply } from '../reminders/index.js';
+import { resolveNudgeReply } from '../followups/index.js';
 import { isFacilitator } from '../engine/tenantProfile.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
@@ -301,6 +302,38 @@ export async function ingestInbound(
     }
   }
 
+  // Nudge bookkeeping (V4): the first reply after a nudge marks it answered
+  // (stats). A DECLINE right after a nudge — and only when the nudge is still
+  // the conversation's live question — is an instant, permanent opt-out with
+  // one warm ack. Same superseded-guard discipline as reminder replies.
+  if (convo.nudge && !convo.nudge.replied) {
+    const nudgeFresh = Date.now() - new Date(convo.nudge.at || 0).getTime() < 24 * 3600 * 1000;
+    // Opt-out ONLY on a short, pure decline with no active flow. detectYesNo
+    // matches a "لا" ANYWHERE, and a resume-nudge answer like "لا نجمش الخميس،
+    // الاثنين أحسن" is a mid-flow CORRECTION the engine must handle — never a
+    // permanent opt-out (V4 review finding).
+    const pureDecline =
+      nudgeFresh &&
+      !convo.state?.flow &&
+      String(turn.text || '').trim().split(/\s+/).length <= 4 &&
+      detectYesNo(turn.text) === 'no';
+    let ynNudge = pureDecline ? 'no' : null;
+    if (ynNudge === 'no') {
+      const msgs = await store.conversations.listMessages(tenantId, conversationId, {});
+      const lastOut = msgs.filter((m) => m.direction === 'outbound').pop();
+      if (lastOut && new Date(lastOut.ts).getTime() > new Date(convo.nudge.at).getTime() + 5000) {
+        ynNudge = null; // a newer bot message owns this "no"
+      }
+    }
+    const resolved = await resolveNudgeReply({ store, clinic, convo, yn: ynNudge });
+    if (resolved.handled) {
+      await sendAs('bot', conversationId, () =>
+        sender.sendText(clinic, inbound.from, resolved.replyText)
+      );
+      return { tenantId, conversationId, nudge: 'opt_out' };
+    }
+  }
+
   const out = await engine.handleMessage(turn);
 
   // Per-turn analysis event (P2-A): intent + language + a short snippet power
@@ -478,6 +511,12 @@ export async function ingestInbound(
 
   if (out.appointment) {
     bus.publish('appointment.created', { tenantId, conversationId, appointment: out.appointment });
+    // V4 conversion tracking: a booking in a nudged conversation credits the nudge.
+    if (convo.nudge && !convo.nudge.converted) {
+      await store.conversations
+        .update(tenantId, conversationId, { nudge: { ...convo.nudge, converted: true } })
+        .catch(() => {});
+    }
   }
 
   if (out.handoff) {

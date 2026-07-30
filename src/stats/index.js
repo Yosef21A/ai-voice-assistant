@@ -363,6 +363,19 @@ export function computeAnalytics(storeData = {}, range = {}) {
     .sort((a, b) => a.week.localeCompare(b.week))
     .map((b) => ({ ...b, ratePct: Math.round((b.noShow / (b.done + b.noShow)) * 100) }));
 
+  // Smart follow-ups (V4): nudge funnel — sent → replied → converted (+ opt-outs).
+  const nudges = { sent: 0, replied: 0, converted: 0, optOut: 0 };
+  for (const c of conversations) {
+    if (c.nudge && inRange(c.nudge.at)) {
+      nudges.sent += 1;
+      if (c.nudge.replied) nudges.replied += 1;
+      if (c.nudge.converted) nudges.converted += 1;
+      // Opt-outs scoped to the same window as their nudge, so the funnel can
+      // never display more opt-outs than sends.
+      if (c.nudgeOptOut) nudges.optOut += 1;
+    }
+  }
+
   return {
     ...digest,
     tz,
@@ -383,6 +396,7 @@ export function computeAnalytics(storeData = {}, range = {}) {
     leadConversion,
     reminderOutcomes,
     noShowTrend,
+    nudges,
     workingHours: cfg.workingHours || null, // lets the UI draw the after-hours band
   };
 }

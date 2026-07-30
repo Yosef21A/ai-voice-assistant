@@ -171,6 +171,19 @@ export function tenantRouter({ store, requireRole }) {
           ...(r.t3 != null ? { t3: !!r.t3 } : {}),
         };
       }
+      // V4 follow-up toggles — same boolean discipline (+ a bounded number).
+      if (body.followups && typeof body.followups === 'object') {
+        const f = body.followups;
+        const hours = Number(f.leadSilentHours);
+        config.followups = {
+          ...(config.followups || {}),
+          ...(f.enabled != null ? { enabled: !!f.enabled } : {}),
+          ...(f.leadSilent != null ? { leadSilent: !!f.leadSilent } : {}),
+          ...(f.resumeFlow != null ? { resumeFlow: !!f.resumeFlow } : {}),
+          ...(f.postVisit != null ? { postVisit: !!f.postVisit } : {}),
+          ...(hours >= 1 && hours <= 72 ? { leadSilentHours: hours } : {}),
+        };
+      }
 
       // The engine's merged FAQ state must NEVER be persisted or restored via
       // Settings: kbLive rebuilds clinic.faq from _baseFaq + active kb_entries.

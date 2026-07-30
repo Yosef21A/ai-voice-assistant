@@ -174,6 +174,42 @@ const DICT = {
     en: (v) => `👩‍⚕️ I'm connecting you with ${v.name}. Direct line: ${v.phone}. The team will reply shortly.`,
   },
 
+  // ── smart follow-ups (V4) — ONE gentle nudge, never a campaign ───────────
+  // v.doctor optional (cabinet persona); v.procedure optional.
+  nudgeLead: {
+    ar: (v) =>
+      `🙌 نحب نطمن عليك${v.procedure ? ` بخصوص ${v.procedure}` : ''} — تحب نحجزولك${v.doctor ? ` مع الدكتور ${v.doctor}` : ''} ولا عندك سؤال؟ نحن هنا 🤍`,
+    fr: (v) =>
+      `🙌 On pense à vous${v.procedure ? ` au sujet de ${v.procedure}` : ''} — on vous réserve un rendez-vous${v.doctor ? ` avec le Dr ${v.doctor}` : ''}, ou vous avez une question ? On est là 🤍`,
+    en: (v) =>
+      `🙌 Just checking in${v.procedure ? ` about ${v.procedure}` : ''} — shall we book you in${v.doctor ? ` with Dr ${v.doctor}` : ''}, or do you have a question? We're here 🤍`,
+  },
+  nudgeLeadFacilitator: {
+    ar: (v) => `🤝 ${v.agency} في الخدمة${v.procedure ? ` — بخصوص ${v.procedure}` : ''}: ملفك عندنا وموجودين نكملو في أي وقت. تحب نكملو؟`,
+    fr: (v) => `🤝 ${v.agency} à votre service${v.procedure ? ` — au sujet de ${v.procedure}` : ''} : votre dossier est chez nous, on peut continuer quand vous voulez. On reprend ?`,
+    en: (v) => `🤝 ${v.agency} at your service${v.procedure ? ` — about ${v.procedure}` : ''}: your file is with us and we can continue any time. Shall we?`,
+  },
+  nudgeResume: {
+    ar: (v) => `👋 كنا في نص الحجز${v.doctor ? ` مع الدكتور ${v.doctor}` : ''} — كل شيء محفوظ، نكملو؟`,
+    fr: (v) => `👋 On était en pleine réservation${v.doctor ? ` avec le Dr ${v.doctor}` : ''} — tout est gardé, on continue ?`,
+    en: (v) => `👋 We were mid-booking${v.doctor ? ` with Dr ${v.doctor}` : ''} — everything's saved, shall we continue?`,
+  },
+  nudgeResumeFacilitator: {
+    ar: () => `👋 كنا ناخذو في تفاصيل ملفك — كل شيء محفوظ، نكملو؟`,
+    fr: () => `👋 On prenait les détails de votre dossier — tout est gardé, on continue ?`,
+    en: () => `👋 We were taking your file details — everything's saved, shall we continue?`,
+  },
+  nudgePostVisit: {
+    ar: (v) => `🌿 نتمناو تكون بخير${v.name ? ` سي ${v.name}` : ''} بعد زيارتك${v.doctor ? ` للدكتور ${v.doctor}` : ''}. إذا عندك أي سؤال بعد الزيارة نحن هنا — وإذا الخدمة عجبتك، كلمة منك تفرحنا 🙏`,
+    fr: (v) => `🌿 On espère que vous allez bien${v.name ? `, ${v.name},` : ''} après votre visite${v.doctor ? ` chez le Dr ${v.doctor}` : ''}. Une question post-visite ? On est là — et si tout s'est bien passé, un petit avis nous ferait plaisir 🙏`,
+    en: (v) => `🌿 We hope you're feeling well${v.name ? `, ${v.name},` : ''} after your visit${v.doctor ? ` with Dr ${v.doctor}` : ''}. Any post-visit questions? We're here — and if you were happy, a quick review would mean a lot 🙏`,
+  },
+  nudgeOptOutAck: {
+    ar: () => `ماشي مشكل 🙏 ما نعاودوش نزعجوك. نبقاو هنا وقت ما تحتاجنا.`,
+    fr: () => `Pas de souci 🙏 On ne vous relancera plus. On reste là quand vous aurez besoin.`,
+    en: () => `No problem 🙏 We won't nudge you again. We're here whenever you need us.`,
+  },
+
   // ── facilitator mode (D2) — agency concierge qualification ───────────────
   // An agency books nothing locally; it QUALIFIES and promises a same-day
   // offer. The promise line is the product's spec wording.

@@ -27,8 +27,9 @@ export function makeTestApp(overrides = {}, appOpts = {}) {
     anthropicApiKey: '',
     geminiApiKey: '',
     conversationMode: 'classic',
-    // No self-ticking timers under test: reminder tests call tick(now) directly.
+    // No self-ticking timers under test: reminder/followup tests call tick(now).
     remindersIntervalMs: 0,
+    followupsIntervalMs: 0,
     ...overrides,
   });
   const bus = createBus();

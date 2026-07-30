@@ -100,6 +100,13 @@ export function configToDraft(config = {}) {
       t48: config.reminders?.t48 !== false,
       t3: config.reminders?.t3 !== false,
     },
+    // V4 smart follow-ups — one gentle nudge per conversation, ever.
+    followups: {
+      enabled: config.followups?.enabled !== false,
+      leadSilent: config.followups?.leadSilent !== false,
+      resumeFlow: config.followups?.resumeFlow !== false,
+      postVisit: config.followups?.postVisit !== false,
+    },
   };
 }
 
@@ -141,6 +148,7 @@ export const notificationsPatch = (d) => ({
         : Number(d.notifications.avgProcedureValue),
   },
   reminders: d.reminders,
+  followups: d.followups,
 });
 
 // ── Profile ─────────────────────────────────────────────────────────────────
@@ -504,6 +512,27 @@ export function NotificationsForm({ value, onChange }) {
             onChange={(v) => onChange({ ...value, reminders: { ...value.reminders, t3: v, enabled: v || value.reminders.t48 } })}
             label={t('settings.rem3')}
           />
+        </div>
+      </Field>
+      <Field label={t('settings.followups')} hint={t('settings.followupsHint')}>
+        <div className="stack-2">
+          {[
+            ['leadSilent', t('settings.fuLeadSilent')],
+            ['resumeFlow', t('settings.fuResume')],
+            ['postVisit', t('settings.fuPostVisit')],
+          ].map(([k, label]) => (
+            <Switch
+              key={k}
+              id={`fu-${k}`}
+              checked={!!value.followups[k]}
+              onChange={(v) => {
+                const fu = { ...value.followups, [k]: v };
+                fu.enabled = fu.leadSilent || fu.resumeFlow || fu.postVisit;
+                onChange({ ...value, followups: fu });
+              }}
+              label={label}
+            />
+          ))}
         </div>
       </Field>
       <Field label={t('settings.recipients')} hint={t('settings.recipientsHint')} htmlFor="n-rcpt">

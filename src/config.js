@@ -122,6 +122,11 @@ export function getConfig(overrides = {}) {
       process.env.REMINDERS_INTERVAL_MS != null
         ? Number(process.env.REMINDERS_INTERVAL_MS) || 0
         : 60000,
+    // ── smart follow-ups (V4) — one nudge per conversation, ever ───────────
+    followupsIntervalMs:
+      process.env.FOLLOWUPS_INTERVAL_MS != null
+        ? Number(process.env.FOLLOWUPS_INTERVAL_MS) || 0
+        : 5 * 60 * 1000,
     dataDir: DATA_DIR,
     runtimeDir: RUNTIME_DIR,
     clinicsFile: CLINICS_FILE,
