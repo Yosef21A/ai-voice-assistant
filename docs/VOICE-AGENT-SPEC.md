@@ -6,6 +6,26 @@
 - Access caveat: full calling may be gated by number/tier (test numbers may not accept calls). **Gate G0 decides the build path — check before building.**
 - PSTN ("normal phone calls") is a SEPARATE rail (Twilio/Vonage + a number). Tunisia local numbers are hard to get on CPaaS; pilot reality: WhatsApp calls ARE how Libyan patients call clinics anyway. PSTN = demo-grade later, not pilot-critical.
 
+## G0 findings (2026-07-31) — GATE DECIDED: Path B (local WebRTC harness first)
+Probed fresh Meta docs + third-party integrations (webrtc.ventures walkthrough, pipecat, 360dialog, arslan1317/whatsapp-calling reference impl). The API probe against OUR number is blocked today — token expired (OAuthException 190 confirmed 2026-07-31); `scripts/probe-calling.js` is ready to run the moment a fresh token lands in `.env` (add `--enable` to attempt enablement).
+
+**Signaling contract (Graph API, verified):**
+- Webhook field `calls` (already SUBSCRIBED on our app). `connect` event:
+  `{ "calls": [{ "id": "wacid.…", "from": "<user>", "to": "<biz>", "event": "connect", "direction": "USER_INITIATED", "timestamp": "…", "session": { "sdp_type": "offer", "sdp": "<RFC 8866 SDP>" } }] }`
+- `terminate` event: `{ id, event: "terminate", status: "Completed"|"Failed", start_time, end_time, duration }` — sent whichever side hangs up.
+- Business answers via `POST /<PHONE_NUMBER_ID>/calls` with `{ messaging_product: "whatsapp", call_id, action, session? }`:
+  `pre_accept` (send SDP answer early → WebRTC handshake happens pre-accept, audio flows instantly, no clipping) → `accept` (same SDP answer, + optional `biz_opaque_callback_data`) — also `reject` and `terminate` (no session). All return `{ success: true }`.
+- **Window: ~30–60s** from connect webhook to accept, else caller sees "Not Answered" + terminate webhook.
+- DTMF: only 8000 clock rate telephone-event in Meta's SDP. Messages can flow on the same conversation DURING a call (degrade path is real).
+
+**Media contract:** WebRTC — ICE + DTLS-SRTP. Codecs: Opus, + PCMA/PCMU (G.711) since Mar 2026. SDES-SRTP (skips ICE/STUN/DTLS entirely) exists but ONLY on the SIP signaling path, not Graph. 1,000 concurrent calls/WABA cap.
+
+**Enablement (the gate):** `POST /<PHONE_NUMBER_ID>/settings` body `{"calling":{"status":"ENABLED"}}`. Calling is **disabled by default on test numbers**; production enablement requires the number's messaging tier ≥ 2,000 unique recipients/day (ours is a 5-recipient test number). Sandbox accounts waive the tier requirement but are **Tech Partners only** (that's our Phase-3 track anyway). Expectation: our test number will refuse enablement → **Outcome B**.
+
+**Decision:** Build V1 against a **local harness speaking the EXACT Graph contract** — a harness endpoint that POSTs a synthetic `calls` connect webhook (real SDP offer from a local WebRTC peer) and a mock Graph `/calls` endpoint that accepts pre_accept/accept and completes the handshake. The voice-call stack (signaling state machine, SDP answer, RTP loop, brain) is then 100% real; flipping to real WhatsApp calls = pointing the webhook at Meta + the sender at graph.facebook.com. Re-run the probe when the token returns; if enablement unexpectedly succeeds → live call test immediately.
+
+**Media lib decision:** `werift` 0.24.2 — pure-TypeScript WebRTC for Node (ICE/DTLS/SRTP/RTP, zero native deps; repo rule: boring, portable). Opus decode/encode NOT needed for V1 echo (loop RTP payloads); V2 uses `opusscript` (WASM) or G.711 (PCMA/PCMU, trivial codec — now supported by Meta) for the PCM bridge to the realtime brain. `wrtc`/node-webrtc rejected: native binaries, unmaintained, Windows-hostile.
+
 ## Architecture (one brain, new mouth)
 ```
 WhatsApp call → Meta calls webhook (offer/SDP or call event)
