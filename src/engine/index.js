@@ -85,11 +85,13 @@ export function createEngine({ store, provider, config }) {
     const tenantMode = clinic.conversationMode || config.conversationMode;
     const useLlm = tenantMode === 'llm' && typeof provider.generateStructured === 'function';
     let result = null;
+    let llmFellBack = false;
     if (useLlm) {
       try {
         result = await handleLlmTurn(ctx);
       } catch (err) {
         result = null; // classic fallback below
+        llmFellBack = true; // surfaced by ingest as an owner-visible degradation signal
         try {
           store.events
             ?.append?.(clinic.id, {
@@ -153,6 +155,7 @@ export function createEngine({ store, provider, config }) {
       appointment: result.appointment || null,
       handoff: result.handoff || null,
       facilitatorLead,
+      llmFellBack: llmFellBack || undefined,
       state: convo.state || null,
       // P2-B: false only when the bot had NO real answer (unknown intent, or a
       // FAQ ask that matched nothing) — feeds the "bot didn't know" queue.

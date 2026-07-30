@@ -127,6 +127,12 @@ export function getConfig(overrides = {}) {
       process.env.FOLLOWUPS_INTERVAL_MS != null
         ? Number(process.env.FOLLOWUPS_INTERVAL_MS) || 0
         : 5 * 60 * 1000,
+    // ── ops (P2-F) ─────────────────────────────────────────────────────────
+    // One JSON line per request (skips /health). On in production; opt-in
+    // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.
+    logRequests:
+      process.env.LOG_REQUESTS === '1' ||
+      (process.env.NODE_ENV === 'production' && process.env.LOG_REQUESTS !== 'off'),
     dataDir: DATA_DIR,
     runtimeDir: RUNTIME_DIR,
     clinicsFile: CLINICS_FILE,

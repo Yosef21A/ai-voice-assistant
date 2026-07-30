@@ -1,6 +1,7 @@
 node_modules/
 data/runtime/
 data/runtime-sim/
+backups/
 .env
 *.log
 npm-debug.log*

@@ -100,13 +100,49 @@ export function createAuth({ store, config }) {
     })
   );
 
+  // Brute-force gate (P2-F): 10 failures per (ip, email) per 15 min → 429.
+  // In-memory is enough for the single-process pilot; success clears the slot.
+  const loginFails = new Map(); // key -> { count, windowStart }
+  const LOGIN_MAX_FAILS = 10;
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  const loginKey = (req, email) => `${req.ip || req.socket?.remoteAddress || '?'}|${String(email || '').toLowerCase()}`;
+  const loginBlocked = (key) => {
+    const rec = loginFails.get(key);
+    if (!rec) return false;
+    if (Date.now() - rec.windowStart >= LOGIN_WINDOW_MS) {
+      loginFails.delete(key);
+      return false;
+    }
+    return rec.count >= LOGIN_MAX_FAILS;
+  };
+  const loginFailed = (key) => {
+    const now = Date.now();
+    const rec = loginFails.get(key);
+    if (!rec || now - rec.windowStart >= LOGIN_WINDOW_MS) {
+      loginFails.set(key, { count: 1, windowStart: now });
+      if (loginFails.size > 5000) {
+        for (const [k, v] of loginFails) if (now - v.windowStart >= LOGIN_WINDOW_MS) loginFails.delete(k);
+      }
+    } else {
+      rec.count += 1;
+    }
+  };
+
   router.post(
     '/login',
     asyncHandler(async (req, res) => {
       const { email, password } = req.body || {};
+      const key = loginKey(req, email);
+      if (loginBlocked(key)) {
+        return res.status(429).json({ error: 'too many attempts — try again later' });
+      }
       const user = await store.users.getByEmail(email);
       const ok = user && user.status === 'active' && (await verifyPassword(password, user.passwordHash));
-      if (!ok) return res.status(401).json({ error: 'invalid credentials' }); // no user enumeration
+      if (!ok) {
+        loginFailed(key);
+        return res.status(401).json({ error: 'invalid credentials' }); // no user enumeration
+      }
+      loginFails.delete(key);
       await store.users.touchLogin(user.tenantId, user.id);
       setSessionCookie(res, user);
       res.json({ user: sanitizeUser(user) });

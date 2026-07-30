@@ -39,6 +39,10 @@ export default {
   },
   langName: { ar: 'العربية', fr: 'Français', en: 'English' },
   conn: { live: 'مباشر', offline: 'غير متصل' },
+  alerts: {
+    wa_token_expired: 'انتهت صلاحية رمز واتساب — البوت ما عادش ينجم يبعث رسائل. جدّدو من لوحة Meta.',
+    llm_degraded: 'الذكاء الاصطناعي متوقف مؤقتاً (الحصة؟) — البوت يجاوب بالنمط الكلاسيكي.',
+  },
   auth: {
     brandTag: 'كونسيرج العيادة', welcome: 'مرحباً',
     subtitle: 'موظف الاستقبال على واتساب لعيادتك.',

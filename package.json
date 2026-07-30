@@ -17,6 +17,7 @@
     "digest:daily": "node scripts/run-digest.js daily",
     "digest:weekly": "node scripts/run-digest.js weekly",
     "media:purge": "node scripts/purge-media.js",
+    "backup": "node scripts/backup-data.js",
     "web:dev": "vite --config web/vite.config.js",
     "web:build": "vite build --config web/vite.config.js"
   },

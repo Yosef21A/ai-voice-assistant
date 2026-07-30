@@ -75,6 +75,17 @@ export function conversationsRouter({ store, sender, bus }) {
         actor: `staff:${req.user.id}`,
         patch,
       });
+      // Durable audit row (P2-F): who took over / released, and when.
+      try {
+        await store.events.append(req.tenantId, {
+          type: paused ? 'staff.takeover' : 'staff.release',
+          actor: `staff:${req.user.id}`,
+          conversationId: convo.id,
+          payload: { email: req.user.email || null },
+        });
+      } catch {
+        /* audit is best-effort */
+      }
       res.json({ conversation: publicConversation(updated) });
     })
   );
@@ -113,6 +124,17 @@ export function conversationsRouter({ store, sender, bus }) {
         sender.sendText(clinic, toWaId, text)
       );
       if (!result.ok) return res.status(502).json({ error: 'send failed', detail: result.error });
+      // Durable audit row (P2-F): staff message sends are accountable actions.
+      try {
+        await store.events.append(req.tenantId, {
+          type: 'staff.send',
+          actor: `staff:${req.user.id}`,
+          conversationId: convo.id,
+          payload: { chars: text.length },
+        });
+      } catch {
+        /* audit is best-effort */
+      }
       res.status(201).json({ ok: true, waMessageId: result.waMessageId ?? null });
     })
   );

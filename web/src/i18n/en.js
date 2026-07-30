@@ -39,6 +39,10 @@ export default {
   },
   langName: { ar: 'العربية', fr: 'Français', en: 'English' },
   conn: { live: 'Live', offline: 'Offline' },
+  alerts: {
+    wa_token_expired: 'WhatsApp token expired — the bot cannot send messages. Regenerate it in the Meta console.',
+    llm_degraded: 'AI temporarily unavailable (quota?) — the bot is answering in classic mode.',
+  },
   auth: {
     brandTag: 'Clinic Concierge', welcome: 'Welcome',
     subtitle: 'Your clinic’s WhatsApp receptionist.',

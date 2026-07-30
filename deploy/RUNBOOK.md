@@ -680,6 +680,13 @@ Restore = `tar -xzf backups/data-YYYY-MM-DD.tgz -C /opt/omen-clinic-agent` then
 another host or object storage) on the same schedule — a local-only backup dies
 with the droplet.
 
+Cross-platform alternative (no tar; works on the Windows dev box too):
+`npm run backup` copies `data/` → `backups/data-YYYYMMDD-HHMMSS/` and prunes to
+the newest `BACKUP_KEEP` (default 14) snapshots. Same cron slot:
+```cron
+15 2 * * * cd /opt/omen-clinic-agent && npm run backup >> logs/backup.log 2>&1
+```
+
 ### F6. Rollback
 Both paths preserve bookings, because `data/runtime/` and `.env` are git-ignored
 and live outside version control.

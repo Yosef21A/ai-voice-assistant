@@ -25,6 +25,7 @@ import { estimateMaxBytes } from '../voice/policy.js';
 import { parseReminderAction, applyReminderReply } from '../reminders/index.js';
 import { resolveNudgeReply } from '../followups/index.js';
 import { isFacilitator } from '../engine/tenantProfile.js';
+import { THROTTLE_REPLY } from './inboundGuard.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
 // interprets media medically — it confirms receipt and promises a human.
@@ -46,7 +47,7 @@ const safeFilename = (name) =>
   String(name || '').replace(/[\\/\u0000-\u001f]/g, '').slice(0, 120) || null;
 
 export async function ingestInbound(
-  { store, engine, sender, bus, mediaClient, transcriber, config = {} },
+  { store, engine, sender, bus, mediaClient, transcriber, config = {}, guard, alerts },
   inbound
 ) {
   const clinic =
@@ -55,6 +56,33 @@ export async function ingestInbound(
     store.getDefaultClinic();
   if (!clinic) return { skipped: 'no-tenant' };
   const tenantId = clinic.id;
+
+  // ── inbound guard (P2-F): dedupe + rate limit, BEFORE any work ────────────
+  // A Meta redelivery must be a no-op (not a second engine turn advancing a
+  // booking with a stale answer), and a message flood must not burn LLM spend.
+  if (guard) {
+    if (guard.isDuplicate(inbound.messageId)) {
+      return { tenantId, skipped: 'duplicate' };
+    }
+    const admit = guard.admit(inbound.from);
+    if (admit !== 'ok') {
+      if (admit === 'throttle_notice') {
+        const detected = detectLanguage(inbound.text);
+        const lang = ['ar', 'fr', 'en'].includes(detected) ? detected : 'ar';
+        await sender.sendText(clinic, inbound.from, THROTTLE_REPLY[lang]); // non-throwing contract
+      }
+      try {
+        await store.events.append(tenantId, {
+          type: 'inbound.throttled',
+          actor: 'guard',
+          payload: { waId: inbound.from, action: admit },
+        });
+      } catch {
+        /* best-effort audit */
+      }
+      return { tenantId, skipped: 'rate_limited' };
+    }
+  }
 
   // Ensure the conversation row exists; the engine shares this exact record.
   let convo = await store.conversations.get(tenantId, inbound.from);
@@ -315,6 +343,7 @@ export async function ingestInbound(
     const pureDecline =
       nudgeFresh &&
       !convo.state?.flow &&
+      turn.source !== 'voice' && // a misheard "لا" must never opt a patient out
       String(turn.text || '').trim().split(/\s+/).length <= 4 &&
       detectYesNo(turn.text) === 'no';
     let ynNudge = pureDecline ? 'no' : null;
@@ -335,6 +364,13 @@ export async function ingestInbound(
   }
 
   const out = await engine.handleMessage(turn);
+
+  // LLM degradation surfacing (P2-F): the engine fell back to classic (quota,
+  // timeout, retired model — it has happened silently before). The patient got
+  // an answer either way; the OWNER gets one throttled toast per window.
+  if (out.llmFellBack && alerts) {
+    alerts.fire(tenantId, 'llm_degraded', 'engine fell back to classic mode');
+  }
 
   // Per-turn analysis event (P2-A): intent + language + a short snippet power
   // the analytics screen (topIntents / topQuestions / funnel) and the P2-B

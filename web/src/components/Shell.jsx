@@ -7,6 +7,7 @@ import { api } from '../api/client.js';
 import { useI18n } from '../context/I18nContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useTenant } from '../context/TenantContext.jsx';
+import { useToast } from '../context/ToastContext.jsx';
 import { useEventStream, useStreamEvent } from '../context/EventStreamContext.jsx';
 import { useRoute } from '../router.js';
 import { Inbox as InboxIcon, Calendar, Book, Chart, Plane, Settings as SettingsIcon, Logout, Wand, glyph } from './icons.jsx';
@@ -84,6 +85,15 @@ export function Shell() {
   useStreamEvent('conversation.updated', scheduleCount);
   useStreamEvent('handoff.requested', scheduleCount);
   useStreamEvent('message.in', scheduleCount);
+
+  // System alerts (P2-F): expired WhatsApp token / degraded LLM become a toast
+  // the owner actually sees — the failure modes that used to be silent.
+  const toast = useToast();
+  useStreamEvent('system.alert', useCallback((e) => {
+    const kind = e?.kind;
+    if (kind === 'wa_token_expired') toast.err(t(`alerts.${kind}`));
+    else if (kind === 'llm_degraded') toast.warn(t(`alerts.${kind}`));
+  }, [toast, t]));
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
   // Live "to train" badge on the Knowledge nav item (P2-B).

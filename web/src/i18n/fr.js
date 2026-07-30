@@ -39,6 +39,10 @@ export default {
   },
   langName: { ar: 'العربية', fr: 'Français', en: 'English' },
   conn: { live: 'En direct', offline: 'Hors ligne' },
+  alerts: {
+    wa_token_expired: 'Jeton WhatsApp expiré — le bot ne peut plus envoyer de messages. Régénérez-le dans la console Meta.',
+    llm_degraded: 'IA momentanément indisponible (quota ?) — le bot répond en mode classique.',
+  },
   auth: {
     brandTag: 'Concierge de clinique', welcome: 'Bienvenue',
     subtitle: 'Le réceptionniste WhatsApp de votre clinique.',

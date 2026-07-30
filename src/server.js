@@ -28,6 +28,8 @@ import { createAuth } from './auth/index.js';
 import { createApiRouter } from './api/index.js';
 import { createOutboundRecorder } from './api/outbound.js';
 import { ingestInbound } from './api/ingest.js';
+import { createInboundGuard } from './api/inboundGuard.js';
+import { createSystemAlerts } from './api/alerts.js';
 import { analyzeInbound, createNotificationService } from './notifications/index.js';
 import { createReminderService } from './reminders/index.js';
 import { createFollowupService } from './followups/index.js';
@@ -126,11 +128,23 @@ export function createApp(opts = {}) {
   const provider = opts.provider || getProvider(config);
   const engine = opts.engine || createEngine({ store, provider, config });
   const bus = opts.bus || createBus();
+  // Owner-visible failure surfacing (P2-F): expired WhatsApp token + LLM
+  // degradation become SSE toasts + audit events instead of silent log lines.
+  const alerts = opts.alerts || createSystemAlerts({ bus, store });
+
+  const recordOutbound = createOutboundRecorder({ store, bus });
   const sender =
     opts.sender ||
     createSender({
       transport: config.whatsappTransport || undefined,
-      onOutbound: createOutboundRecorder({ store, bus }),
+      onOutbound: async (rec) => {
+        await recordOutbound(rec);
+        // A Graph auth failure (401/expired ~24h token) on ANY send: the bot
+        // looks alive but answers nobody — exactly what the owner must hear.
+        if (rec && rec.ok === false && rec.error?.code === 'auth') {
+          alerts.fire(rec.tenantId, 'wa_token_expired', rec.error.message);
+        }
+      },
       outboxFile: path.join(config.runtimeDir, 'outbox.json'),
     });
   // Inbound media downloader (P2-D) — same transport gating as the sender, so
@@ -174,9 +188,37 @@ export function createApp(opts = {}) {
   // started only by the run-directly block, tick(now)-driven in tests.
   const followups = opts.followups || createFollowupService({ store, sender, bus, config });
 
+  // Inbound guard (P2-F): dedupe + rate limiting shared by every webhook turn.
+  const guard = opts.guard || createInboundGuard();
+
   const app = express();
-  // Capture the raw body so we can verify Meta's HMAC signature.
-  app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+  // Minimal security headers at the app layer (nginx adds HSTS/CSP in prod,
+  // but dev/tunnel deployments must not go naked). CSP is left to nginx — a
+  // wrong app-level CSP would break the SPA silently.
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
+  // Structured request log (zero-dep, one JSON line per request). Off by
+  // default under tests; `npm start` turns it on via config.
+  if (config.logRequests) {
+    app.use((req, res, next) => {
+      const t0 = Date.now();
+      res.on('finish', () => {
+        if (req.path === '/health') return; // monitoring noise
+        console.log(
+          JSON.stringify({ t: new Date().toISOString(), m: req.method, p: req.path, s: res.statusCode, ms: Date.now() - t0 })
+        );
+      });
+      next();
+    });
+  }
+  // Capture the raw body so we can verify Meta's HMAC signature. The explicit
+  // limit matches nginx's client_max_body_size (256k) so the edge and the app
+  // agree; oversize bodies get a proper 413 from the error handler below.
+  app.use(express.json({ limit: '256kb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
   // ── webhook (Meta) ──────────────────────────────────────────────────────────
   app.get('/webhook', (req, res) => {
@@ -198,7 +240,7 @@ export function createApp(opts = {}) {
       for (const inbound of normalizeWhatsApp(req.body)) {
         if (!inbound.text && !inbound.media) continue; // statuses / unsupported types
         // Persist + reply via the ONE sender + emit bus events; respects ai_paused.
-        await ingestInbound({ store, engine, sender, bus, mediaClient, transcriber, config }, inbound);
+        await ingestInbound({ store, engine, sender, bus, mediaClient, transcriber, config, guard, alerts }, inbound);
       }
     } catch (err) {
       console.error('[webhook] processing error:', err);
@@ -251,7 +293,7 @@ export function createApp(opts = {}) {
   });
 
   // ── /health ───────────────────────────────────────────────────────────────────
-  app.get('/health', (_req, res) => {
+  app.get('/health', async (_req, res) => {
     const clinics =
       typeof store.listClinics === 'function'
         ? store.listClinics().map((c) => ({
@@ -260,7 +302,33 @@ export function createApp(opts = {}) {
             phoneNumberId: c.whatsapp?.phoneNumberId,
           }))
         : [];
-    res.json({ ok: true, provider: provider.name, store: store.name, clinics });
+    // P2-F: `ok` means the process can actually DO ITS JOB, not just serve
+    // HTTP — the store must accept writes (a full disk on the JSON store is
+    // the classic silent killer), and known degradations are reported.
+    let storeWritable = true;
+    try {
+      const h = await store.health();
+      if (h && h.ok === false) storeWritable = false;
+      if (store.name === 'json') {
+        const probe = path.join(config.runtimeDir, '.health-probe');
+        fs.writeFileSync(probe, String(Date.now()));
+        fs.unlinkSync(probe);
+      }
+    } catch {
+      storeWritable = false;
+    }
+    const degraded = {
+      llm: alerts.recent('llm_degraded'),
+      waToken: alerts.recent('wa_token_expired'),
+    };
+    res.status(storeWritable ? 200 : 503).json({
+      ok: storeWritable,
+      provider: provider.name,
+      store: store.name,
+      storeWritable,
+      degraded,
+      clinics,
+    });
   });
 
   // ── dashboard API (public auth bootstrap, then the gated tenant-scoped API) ───
@@ -311,8 +379,13 @@ export function createApp(opts = {}) {
   // Central JSON error handler — asyncHandler funnels rejected promises here.
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
-    console.error('[api] error:', err?.message || err);
     if (res.headersSent) return;
+    // An oversize body is the CLIENT's problem — a generic 500 here would make
+    // Meta retry an oversize webhook forever (P2-F).
+    if (err?.type === 'entity.too.large' || err?.status === 413) {
+      return res.status(413).json({ error: 'payload too large' });
+    }
+    console.error('[api] error:', err?.message || err);
     res.status(500).json({ error: 'internal error' });
   });
 
@@ -324,7 +397,30 @@ const composed = createApp();
 export const { app, config, store, provider, engine, bus, sender, mediaClient, auth, notifier } = composed;
 
 // Only listen when run directly (not when imported by tests).
+// Boot-time configuration sanity (P2-F): actionable warnings for the silent
+// misconfigurations that already bit this project. Real server process only —
+// imports (tests) must stay quiet.
+function warnBootConfig(cfg) {
+  const warn = (msg) => console.warn(`[boot] ${msg}`);
+  if (!process.env.WHATSAPP_TOKEN && (cfg.whatsappTransport || 'auto') !== 'mock') {
+    warn('WHATSAPP_TOKEN is not set → outbound WhatsApp runs on the MOCK transport (no real sends).');
+  }
+  if (!cfg.verifyToken) {
+    warn('WHATSAPP_VERIFY_TOKEN is not set → the Meta webhook handshake (GET /webhook) will fail.');
+  }
+  if (!cfg.appSecret) {
+    warn('WHATSAPP_APP_SECRET is not set → webhook signatures are NOT verified (dev-only posture).');
+  }
+  if (!cfg.geminiApiKey && !cfg.anthropicApiKey && cfg.conversationMode === 'llm') {
+    warn('CONVERSATION_MODE=llm but no LLM API key is set → every turn will run the classic flow.');
+  }
+  if (process.env.NODE_ENV === 'production' && !process.env.APP_SECRET) {
+    warn('APP_SECRET is unset in production → session cookies use the insecure dev default.');
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  warnBootConfig(config);
   composed.reminders.start(); // schedulers run ONLY in the real server process
   composed.followups.start();
   const server = app.listen(config.port, () => {
