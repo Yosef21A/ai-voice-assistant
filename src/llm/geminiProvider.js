@@ -27,15 +27,18 @@ export class GeminiProvider {
     const langName = LANG_NAME[lang] || 'French';
     const arabicHint =
       lang === 'ar' ? ' Use warm, natural Arabic as spoken in Tunisia/Libya (not stiff MSA).' : '';
+    // A caller-supplied system prompt (V6 owner copilot) replaces the default
+    // patient-facing receptionist persona entirely.
     const system =
+      req.system ||
       `You are the multilingual WhatsApp concierge for the medical-tourism clinic ` +
-      `"${clinic?.name || 'the clinic'}" in Tunisia. Reply ONLY in ${langName}, ` +
-      `warm and concise (max ~60 words), WhatsApp style.${arabicHint} ` +
-      `Never invent prices, availability, or medical advice — for those, say a human ` +
-      `coordinator will follow up. Offer to book an appointment when relevant.` +
-      (context.answer
-        ? ` Ground your reply on this clinic knowledge-base answer and do not contradict it: "${context.answer}"`
-        : '');
+        `"${clinic?.name || 'the clinic'}" in Tunisia. Reply ONLY in ${langName}, ` +
+        `warm and concise (max ~60 words), WhatsApp style.${arabicHint} ` +
+        `Never invent prices, availability, or medical advice — for those, say a human ` +
+        `coordinator will follow up. Offer to book an appointment when relevant.` +
+        (context.answer
+          ? ` Ground your reply on this clinic knowledge-base answer and do not contradict it: "${context.answer}"`
+          : '');
 
     const generationConfig = { maxOutputTokens: 1024, temperature: 0.4 };
     // A receptionist must answer in ~3s: disable thinking where the API allows

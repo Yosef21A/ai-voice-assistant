@@ -107,6 +107,11 @@ export function configToDraft(config = {}) {
       resumeFlow: config.followups?.resumeFlow !== false,
       postVisit: config.followups?.postVisit !== false,
     },
+    // V7 CRM sync — signed outbound webhooks.
+    crm: {
+      webhookUrl: config.crm?.webhookUrl || '',
+      secret: config.crm?.secret || '',
+    },
   };
 }
 
@@ -149,6 +154,7 @@ export const notificationsPatch = (d) => ({
   },
   reminders: d.reminders,
   followups: d.followups,
+  crm: d.crm,
 });
 
 // ── Profile ─────────────────────────────────────────────────────────────────
@@ -550,6 +556,26 @@ export function NotificationsForm({ value, onChange }) {
             <span className="small muted">{t('settings.quietTo')}</span>
             <input type="time" className="control" style={{ width: 120 }} disabled={!n.quietHours.enabled} value={n.quietHours.to} onChange={(e) => setQuiet({ to: e.target.value })} />
           </span>
+        </div>
+      </Field>
+      <Field label={t('settings.crm')} hint={t('settings.crmHint')}>
+        <div className="stack-2">
+          <input
+            className="control" inputMode="url" dir="ltr" placeholder="https://script.google.com/…/exec"
+            value={value.crm.webhookUrl}
+            onChange={(e) => onChange({ ...value, crm: { ...value.crm, webhookUrl: e.target.value } })}
+          />
+          <input
+            className="control" dir="ltr" placeholder={t('settings.crmSecret')}
+            value={value.crm.secret}
+            onChange={(e) => onChange({ ...value, crm: { ...value.crm, secret: e.target.value } })}
+          />
+        </div>
+      </Field>
+      <Field label={t('settings.export')} hint={t('settings.exportHint')}>
+        <div className="row" style={{ gap: 'var(--sp-2)' }}>
+          <a className="btn ghost sm" href="/api/export/appointments.csv" download>📅 {t('settings.exportAppointments')}</a>
+          <a className="btn ghost sm" href="/api/export/leads.csv" download>🔥 {t('settings.exportLeads')}</a>
         </div>
       </Field>
       <p className="tiny muted">{t('settings.sliceNote')}</p>

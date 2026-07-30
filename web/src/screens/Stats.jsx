@@ -12,6 +12,72 @@ import { Chart } from '../components/icons.jsx';
 const RANGES = [7, 30, 90];
 const LANG_COLORS = { ar: 'var(--brass)', fr: 'var(--info)', en: 'var(--ok)', other: 'var(--text-mute)' };
 
+/** V6 owner copilot: a tiny grounded Q&A box ("ask your clinic"). */
+function Copilot() {
+  const { t } = useI18n();
+  const [q, setQ] = useState('');
+  const [thread, setThread] = useState([]); // {role:'q'|'a', text}
+  const [busy, setBusy] = useState(false);
+  const endRef = useRef(null);
+  useEffect(() => { endRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [thread]);
+
+  const ask = async () => {
+    const question = q.trim();
+    if (!question || busy) return;
+    setQ('');
+    setThread((th) => [...th, { role: 'q', text: question }]);
+    setBusy(true);
+    try {
+      const { answer } = await api.copilotAsk(question);
+      setThread((th) => [...th, { role: 'a', text: answer || t('stats.copilotError') }]);
+    } catch {
+      setThread((th) => [...th, { role: 'a', text: t('stats.copilotError') }]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <span className="section-label">{t('stats.copilotTitle')}</span>
+      {thread.length > 0 ? (
+        <div className="stack-2" style={{ marginTop: 'var(--sp-3)', maxHeight: 260, overflowY: 'auto' }}>
+          {thread.map((m, i) => (
+            <div
+              key={i}
+              className="small"
+              dir="auto"
+              style={{
+                padding: 'var(--sp-2) var(--sp-3)', borderRadius: 8, maxWidth: '85%',
+                background: m.role === 'q' ? 'var(--surface-3)' : 'var(--bg-2)',
+                alignSelf: m.role === 'q' ? 'flex-end' : 'flex-start',
+                border: m.role === 'a' ? '1px solid var(--border)' : 'none',
+              }}
+            >
+              {m.text}
+            </div>
+          ))}
+          {busy ? <div className="tiny muted">{t('stats.copilotThinking')}</div> : null}
+          <div ref={endRef} />
+        </div>
+      ) : (
+        <div className="small muted" style={{ marginTop: 'var(--sp-2)' }}>{t('stats.copilotHint')}</div>
+      )}
+      <div className="row" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-3)' }}>
+        <input
+          className="control grow" dir="auto" value={q} maxLength={500}
+          placeholder={t('stats.copilotPlaceholder')}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') ask(); }}
+        />
+        <button className="btn" type="button" disabled={busy || !q.trim()} onClick={ask}>
+          {t('stats.copilotSend')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Hour → "typically closed" from the weekly schedule (closed ≥ 4 of 7 days). */
 function typicallyClosed(workingHours) {
   const closed = Array.from({ length: 24 }, () => 0);
@@ -230,6 +296,9 @@ export function Stats() {
               <div className="tiny muted" style={{ marginTop: 'var(--sp-3)' }}>{t('stats.sinceTracking')}</div>
             </div>
           </div>
+
+          {/* Owner copilot (V6): ask your clinic — grounded on these numbers. */}
+          <Copilot />
 
           {/* Reminders & no-shows (V2) — the renewal pitch in numbers. */}
           <div className="row-wrap" style={{ gap: 'var(--sp-3)', alignItems: 'stretch' }}>

@@ -33,6 +33,7 @@ import { createSystemAlerts } from './api/alerts.js';
 import { analyzeInbound, createNotificationService } from './notifications/index.js';
 import { createReminderService } from './reminders/index.js';
 import { createFollowupService } from './followups/index.js';
+import { createCrmSync } from './crm/index.js';
 import { normalizeDigits } from './engine/text.js';
 
 /**
@@ -192,6 +193,9 @@ export function createApp(opts = {}) {
   // Smart follow-ups (V4): same lifecycle contract as reminders — created here,
   // started only by the run-directly block, tick(now)-driven in tests.
   const followups = opts.followups || createFollowupService({ store, sender, bus, config });
+  // CRM sync (V7): signed outbound webhooks per tenant. A pure bus consumer —
+  // a free no-op until a tenant configures crm.webhookUrl in Settings.
+  const crm = opts.crm || createCrmSync({ bus, store });
 
   // Inbound guard (P2-F): dedupe + rate limiting shared by every webhook turn.
   const guard = opts.guard || createInboundGuard();
@@ -394,7 +398,7 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, followups, kbReady };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, followups, crm, kbReady };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.

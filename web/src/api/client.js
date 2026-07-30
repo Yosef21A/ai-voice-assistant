@@ -94,6 +94,7 @@ export const api = {
   updateLead: (id, patch) => request('PATCH', `/api/leads/${encodeURIComponent(id)}`, patch),
   // ── sandbox test-drive ──────────────────────────────────────────────────────
   sandboxMessage: (text) => request('POST', '/api/sandbox/message', { text }),
+  copilotAsk: (question) => request('POST', '/api/copilot', { question }),
   sandboxReset: () => request('DELETE', '/api/sandbox'),
 };
 

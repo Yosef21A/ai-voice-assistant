@@ -85,6 +85,37 @@ function validate(body) {
       errs.push('doctorName must be a string or an {ar,fr,en} object of strings');
     }
   }
+  if (body.crm != null) {
+    const c = body.crm;
+    let urlOk = c?.webhookUrl == null || c.webhookUrl === '';
+    if (!urlOk) {
+      try {
+        const u = new URL(String(c.webhookUrl));
+        const host = u.hostname.toLowerCase();
+        // SSRF guard: the SERVER fetches this URL — it must never point back
+        // into the box or the private network (localhost API, cloud metadata…).
+        const priv =
+          host === 'localhost' ||
+          host === '0.0.0.0' ||
+          host.endsWith('.local') ||
+          /^127\./.test(host) ||
+          /^10\./.test(host) ||
+          /^192\.168\./.test(host) ||
+          /^169\.254\./.test(host) ||
+          /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+          host === '::1' || host === '[::1]';
+        urlOk = ['http:', 'https:'].includes(u.protocol) && !priv;
+      } catch {
+        urlOk = false;
+      }
+    }
+    if (typeof c !== 'object' || Array.isArray(c) || !urlOk) {
+      errs.push('crm.webhookUrl must be a public http(s) URL');
+    }
+    if (c?.secret != null && (typeof c.secret !== 'string' || c.secret.length > 200)) {
+      errs.push('crm.secret must be a string');
+    }
+  }
   return errs;
 }
 
@@ -169,6 +200,14 @@ export function tenantRouter({ store, requireRole }) {
           ...(r.enabled != null ? { enabled: !!r.enabled } : {}),
           ...(r.t48 != null ? { t48: !!r.t48 } : {}),
           ...(r.t3 != null ? { t3: !!r.t3 } : {}),
+        };
+      }
+      // V7 CRM sync: outbound webhook URL + signing secret.
+      if (body.crm && typeof body.crm === 'object') {
+        config.crm = {
+          ...(config.crm || {}),
+          ...(body.crm.webhookUrl != null ? { webhookUrl: String(body.crm.webhookUrl).trim() } : {}),
+          ...(body.crm.secret != null ? { secret: String(body.crm.secret) } : {}),
         };
       }
       // V4 follow-up toggles — same boolean discipline (+ a bounded number).

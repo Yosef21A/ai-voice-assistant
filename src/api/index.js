@@ -9,6 +9,8 @@ import { appointmentsRouter } from './appointments.js';
 import { leadsRouter } from './leads.js';
 import { sandboxRouter } from './sandbox.js';
 import { statsRouter } from './stats.js';
+import { copilotRouter } from './copilot.js';
+import { exportRouter } from './export.js';
 import { mediaRouter } from './media.js';
 import { streamHandler } from './stream.js';
 
@@ -27,6 +29,8 @@ export function createApiRouter({ store, engine, sender, bus, config, auth, prov
   router.use('/leads', leadsRouter({ store, bus }));
   router.use('/sandbox', sandboxRouter({ store, engine }));
   router.use('/stats', statsRouter({ store }));
+  router.use('/copilot', copilotRouter({ store, provider, requireRole }));
+  router.use('/export', exportRouter({ store, requireRole }));
   router.use('/media', mediaRouter({ store, config }));
 
   return router;
