@@ -151,6 +151,11 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
       if ('lang' in patch) add('lang', patch.lang);
       if ('state' in patch) add('state', patch.state == null ? null : JSON.stringify(patch.state), '::jsonb');
       if ('lastMessageAt' in patch) add('last_message_at', patch.lastMessageAt);
+      // V2/V4 bookkeeping (P1-G): same whitelist the JSON adapter honors —
+      // silently dropping these would re-nudge patients forever after cutover.
+      if ('lastReminder' in patch) add('last_reminder', patch.lastReminder == null ? null : JSON.stringify(patch.lastReminder), '::jsonb');
+      if ('nudge' in patch) add('nudge', patch.nudge == null ? null : JSON.stringify(patch.nudge), '::jsonb');
+      if ('nudgeOptOut' in patch) add('nudge_opt_out', !!patch.nudgeOptOut);
       if (!sets.length) return this.getById(tenantId, id);
       const { rows } = await q(
         `UPDATE conversations SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = $2 RETURNING *`,
@@ -425,6 +430,64 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     },
   };
 
+  // ── reminders (V2 no-show killer) — dedupe enforced by the DB unique key ───
+  const reminders = {
+    async record(tenantId, data = {}) {
+      if (!data.apptId || !data.kind) throw new Error('reminders.record: apptId and kind required');
+      const { rows } = await q(
+        `INSERT INTO reminders (tenant_id, appt_id, ref, kind, status, appt_iso, "to", lang, attempts, error, sent_at)
+         VALUES ($1,$2,$3,$4,COALESCE($5,'sent'),$6,$7,$8,COALESCE($9,1),$10,$11)
+         ON CONFLICT (tenant_id, appt_id, kind) DO UPDATE SET
+           status = EXCLUDED.status, attempts = EXCLUDED.attempts,
+           error = EXCLUDED.error, sent_at = COALESCE(EXCLUDED.sent_at, reminders.sent_at)
+         RETURNING *`,
+        [
+          tenantId, data.apptId, data.ref ?? null, data.kind, data.status ?? null,
+          data.apptIso ?? null, data.to ?? null, data.lang ?? null, data.attempts ?? null,
+          data.error ?? null, data.sentAt ?? null,
+        ]
+      );
+      return row2obj(rows[0]);
+    },
+    async find(tenantId, apptId, kind) {
+      const { rows } = await q(
+        'SELECT * FROM reminders WHERE tenant_id = $1 AND appt_id = $2 AND kind = $3',
+        [tenantId, apptId, kind]
+      );
+      return row2obj(rows[0]); // row2obj camelCases appt_id → apptId
+    },
+    async list(tenantId, filter = {}) {
+      const cond = ['tenant_id = $1'];
+      const params = [tenantId];
+      if (filter.status !== undefined) { params.push(filter.status); cond.push(`status = $${params.length}`); }
+      if (filter.apptId !== undefined) { params.push(filter.apptId); cond.push(`appt_id = $${params.length}`); }
+      const { rows } = await q(`SELECT * FROM reminders WHERE ${cond.join(' AND ')} ORDER BY created_at`, params);
+      return rows2obj(rows);
+    },
+    async update(tenantId, id, patch = {}) {
+      const cols = {
+        status: ['status', ''], attempts: ['attempts', ''], error: ['error', ''],
+        sentAt: ['sent_at', ''], respondedAt: ['responded_at', ''],
+      };
+      const sets = [];
+      const params = [tenantId, id];
+      for (const [k, [c, cast]] of Object.entries(cols)) {
+        if (!(k in patch)) continue;
+        params.push(patch[k]);
+        sets.push(`${c} = $${params.length}${cast}`);
+      }
+      if (!sets.length) {
+        const { rows } = await q('SELECT * FROM reminders WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
+        return row2obj(rows[0]);
+      }
+      const { rows } = await q(
+        `UPDATE reminders SET ${sets.join(', ')} WHERE tenant_id = $1 AND id = $2 RETURNING *`,
+        params
+      );
+      return row2obj(rows[0]);
+    },
+  };
+
   const events = {
     async append(tenantId, event = {}) {
       const { rows } = await q(
@@ -529,16 +592,178 @@ export function createPostgresStore({ databaseUrl, poolMax } = {}) {
     },
   };
 
+  // ── legacy ENGINE surface (P1-G) ────────────────────────────────────────────
+  //
+  // The engine (and the tenant live-patch / KB merge / schedulers) reads
+  // clinics through the SAME synchronous calls the JSON adapter exposes. Here
+  // those reads hit an in-memory CLINIC CACHE hydrated once from the tenants
+  // table (see ready below) — which preserves the "live clinic object"
+  // semantics the whole app relies on: PUT /api/tenant Object.assigns the live
+  // object, kbLive re-merges clinic.faq, the engine reads it next turn.
+  //
+  // The runtime collections (conversations/appointments/patients) bridge to
+  // SQL as ASYNC legacy methods — the engine awaits every store call, and on
+  // the JSON adapter those awaits resolve plain values (a no-op).
+  //
+  // Engine conversation memory ({role,text,ts} turns + V2/V4 bookkeeping)
+  // lives in conversations.engine_messages/nudge/... columns (sql/002_p1g.sql).
+  const ENGINE_MESSAGES_CAP = 500; // bound the jsonb row; humanize reads last 12
+
+  let clinicsCache = [];
+  const ready = (async () => {
+    try {
+      const rows = await tenants.list();
+      clinicsCache = rows.map((t) => ({
+        // The persisted config IS the clinic (same convention as clinics.json);
+        // top-level identity fields win over any stale copies inside config.
+        ...(t.config && typeof t.config === 'object' ? t.config : {}),
+        id: t.id,
+        name: t.name,
+        whatsapp: {
+          ...(t.config?.whatsapp || {}),
+          phoneNumberId: t.phoneNumberId ?? t.config?.whatsapp?.phoneNumberId ?? null,
+        },
+      }));
+    } catch (e) {
+      console.error('[store:pg] clinic cache hydration failed:', e.message);
+    }
+    return clinicsCache;
+  })();
+
+  const legacyConvo = (row) =>
+    row && {
+      ...row,
+      clinicId: row.tenantId,
+      waId: row.patientWaId,
+      messages: Array.isArray(row.engineMessages) ? row.engineMessages : [],
+      nudgeOptOut: !!row.nudgeOptOut,
+      facilitatorAlerted: !!row.facilitatorAlerted,
+      // Staleness (F9) runs on the ENGINE's injectable clock, not the DB's.
+      updatedAt: row.engineUpdatedAt ?? row.updatedAt,
+    };
+
+  const legacyAppt = (row) =>
+    row && {
+      ...row,
+      clinicId: row.tenantId,
+      datetimeISO:
+        row.datetimeIso instanceof Date ? row.datetimeIso.toISOString() : row.datetimeIso ?? null,
+    };
+
+  const legacy = {
+    listClinics() {
+      return clinicsCache;
+    },
+    getClinicById(id) {
+      return clinicsCache.find((c) => c.id === id) || null;
+    },
+    getClinicByPhoneNumberId(pnid) {
+      if (pnid == null) return null;
+      return clinicsCache.find((c) => String(c.whatsapp?.phoneNumberId) === String(pnid)) || null;
+    },
+    getDefaultClinic() {
+      return clinicsCache[0] || null;
+    },
+    async upsertPatient(clinicId, waId, patch = {}) {
+      return patients.upsert(clinicId, waId, patch);
+    },
+    async getConversation(clinicId, waId) {
+      const row = await conversations.get(clinicId, waId);
+      return legacyConvo(row);
+    },
+    async newConversation(clinicId, waId) {
+      const row = await conversations.create(clinicId, { patientWaId: waId });
+      return legacyConvo(row);
+    },
+    async saveConversation(convo) {
+      if (!convo?.id) return convo;
+      const tenantId = convo.clinicId ?? convo.tenantId;
+      const messages = Array.isArray(convo.messages)
+        ? convo.messages.slice(-ENGINE_MESSAGES_CAP)
+        : [];
+      await q(
+        `UPDATE conversations SET
+           lang = $3, state = $4::jsonb, engine_messages = $5::jsonb,
+           nudge = $6::jsonb, nudge_opt_out = $7, last_reminder = $8::jsonb,
+           facilitator_alerted = $9, engine_updated_at = $10
+         WHERE tenant_id = $1 AND id = $2`,
+        [
+          tenantId, convo.id, convo.lang ?? null,
+          convo.state == null ? null : JSON.stringify(convo.state),
+          JSON.stringify(messages),
+          convo.nudge == null ? null : JSON.stringify(convo.nudge),
+          !!convo.nudgeOptOut,
+          convo.lastReminder == null ? null : JSON.stringify(convo.lastReminder),
+          !!convo.facilitatorAlerted,
+          convo.updatedAt ?? null,
+        ]
+      );
+      return convo;
+    },
+    async createAppointment(appt = {}) {
+      const row = await appointments.create(appt.clinicId ?? appt.tenantId, appt);
+      return legacyAppt(row);
+    },
+    async listAppointments(filter = {}) {
+      if (filter.clinicId) {
+        const rows = await appointments.list(filter.clinicId, {});
+        return rows.map(legacyAppt);
+      }
+      const { rows } = await q('SELECT * FROM appointments ORDER BY created_at');
+      return rows2obj(rows).map(legacyAppt);
+    },
+  };
+
+  // The engine-facing conversations.get/getById must ALSO carry the legacy
+  // fields (ingest reads convo.nudge/lastReminder/state off the async surface).
+  const conversationsBridged = {
+    ...conversations,
+    async get(tenantId, patientWaId) {
+      return legacyConvo(await conversations.get(tenantId, patientWaId));
+    },
+    async getById(tenantId, id) {
+      return legacyConvo(await conversations.getById(tenantId, id));
+    },
+    async create(tenantId, opts) {
+      return legacyConvo(await conversations.create(tenantId, opts));
+    },
+    async list(tenantId, filter) {
+      return (await conversations.list(tenantId, filter)).map(legacyConvo);
+    },
+    async update(tenantId, id, patch) {
+      return legacyConvo(await conversations.update(tenantId, id, patch));
+    },
+  };
+
+  const appointmentsBridged = {
+    ...appointments,
+    async create(tenantId, data) {
+      return legacyAppt(await appointments.create(tenantId, data));
+    },
+    async list(tenantId, filter) {
+      return (await appointments.list(tenantId, filter)).map(legacyAppt);
+    },
+    async get(tenantId, id) {
+      return legacyAppt(await appointments.get(tenantId, id));
+    },
+    async updateStatus(tenantId, id, status) {
+      return legacyAppt(await appointments.updateStatus(tenantId, id, status));
+    },
+  };
+
   return {
     name: 'postgres',
+    ready, // await before serving traffic — hydrates the clinic cache
+    ...legacy,
     tenants,
     users,
     patients,
-    conversations,
-    appointments,
+    conversations: conversationsBridged,
+    appointments: appointmentsBridged,
     leads,
     kbEntries,
     unanswered,
+    reminders,
     events,
     notificationPrefs,
     async health() {

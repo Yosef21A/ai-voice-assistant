@@ -204,7 +204,7 @@ async function main() {
   hr();
   line('  📋  STORED APPOINTMENTS');
   hr();
-  const appts = store.listAppointments();
+  const appts = await store.listAppointments(); // no-op await on the JSON adapter
   line(JSON.stringify(appts, null, 2));
   line('');
 

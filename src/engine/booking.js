@@ -107,12 +107,15 @@ function advanceBooking(ctx, opts = {}) {
   return { intent: 'book_appointment', replies };
 }
 
-function genRef(clinic, store, now) {
+// Async since P1-G: listAppointments is a SQL query on the Postgres adapter
+// (and a plain array on JSON — awaiting it is a no-op).
+async function genRef(clinic, store, now) {
   const prefix = clinic.id.split('-').map((w) => w[0]).join('').toUpperCase().slice(0, 3);
   const yy = String(now.getFullYear()).slice(2);
   const mm = String(now.getMonth() + 1).padStart(2, '0');
   const dd = String(now.getDate()).padStart(2, '0');
-  const seq = String(store.listAppointments({ clinicId: clinic.id }).length + 1).padStart(3, '0');
+  const appts = await store.listAppointments({ clinicId: clinic.id });
+  const seq = String(appts.length + 1).padStart(3, '0');
   return `${prefix}-${yy}${mm}${dd}-${seq}`;
 }
 
@@ -207,10 +210,10 @@ export function continueBooking(ctx) {
   return startBooking(ctx);
 }
 
-export function finalizeBooking(ctx) {
+export async function finalizeBooking(ctx) {
   const { convo, clinic, lang, store, inbound, now } = ctx;
   const d = convo.state.data;
-  const ref = genRef(clinic, store, now);
+  const ref = await genRef(clinic, store, now);
   const spLabel = specialtyLabel(clinic, d.specialty, lang);
   const when = formatWhen(new Date(d.slotIso), lang);
 
@@ -237,7 +240,7 @@ export function finalizeBooking(ctx) {
     status: 'confirmed',
     createdAt: now.toISOString(),
   };
-  store.createAppointment(appt);
+  await store.createAppointment(appt);
   convo.state = null; // flow complete
 
   // Cabinet persona (D1): the confirmation names the doctor and closes like a

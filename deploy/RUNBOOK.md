@@ -811,18 +811,31 @@ Migrate when **any** of these becomes true:
 - **Reliability features**: an outbound send queue with retries + **idempotency
   on Meta's `message.id`**, templated-reminder scheduling at scale, analytics.
 
-**How — the seam is deliberately tiny.** `src/store/index.js` is the *single*
-interface to reimplement. Keep the same method names — `listClinics`,
-`getClinicById`, `getClinicByPhoneNumberId`, `getDefaultClinic`, `upsertPatient`,
-`getConversation`, `newConversation`, `saveConversation`, `createAppointment`,
-`listAppointments` — backed by **Postgres** (tenants + patients + conversations +
-appointments tables; move clinics out of the seed file into a table with an admin
-API) and, optionally, **Redis** for hot per-patient conversation state and the
-outbound send queue. Nothing in `server.js` or `engine/*` changes — they only
-ever call those store methods. Once persistence is external and shared you can
-raise `instances`, enable cluster mode, and add 2+ app hosts to the Nginx
-`upstream omen_clinic_agent` block — at which point make sends idempotent on
-`message.id` so retries are safe across instances.
+**How — DONE in P1-G. The cutover is a config flip:**
+The Postgres adapter now implements the FULL surface, including the legacy
+engine methods (clinic reads served from an in-memory registry hydrated from
+the `tenants` table at boot; engine turn history + V2/V4 bookkeeping in
+`conversations.engine_messages/nudge/last_reminder/...`, reminders in their own
+table with DB-level dedupe). The engine awaits every store call, so the same
+code runs both adapters.
+
+Cutover procedure (run during a quiet window):
+```bash
+# 1. schema + registry into Postgres
+DATABASE_URL=postgres://... npm run db:migrate
+DATABASE_URL=postgres://... npm run db:seed
+# 2. import the pilot's JSON runtime (idempotent; re-runnable)
+DATABASE_URL=postgres://... node scripts/db-import-json.js
+# 3. flip the flag and reload
+echo 'DATABASE_URL=postgres://...' >> .env && pm2 reload omen-clinic-agent
+# 4. verify: GET /health shows store "postgres"; drive one test booking
+```
+Rollback = remove `DATABASE_URL` from `.env` + reload (the JSON files were
+never touched). Both suites run green in PG mode:
+`DATABASE_URL=... npm test` → the two Postgres suites un-skip.
+Once on Postgres you can raise `instances`/cluster mode and add app hosts to
+the Nginx `upstream` — reminder dedupe is already DB-enforced; make outbound
+sends idempotent on `message.id` before going multi-instance.
 
 ---
 

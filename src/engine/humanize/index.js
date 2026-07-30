@@ -50,7 +50,7 @@ export async function handleLlmTurn(ctx) {
   // ENUM-constrained variant (buildLlmRequest), which prevents flash models
   // from looping on the specialty string field.
   const plan = coercePlan(await callStructured(ctx.provider, request));
-  let result = executePlan(ctx, plan);
+  let result = await executePlan(ctx, plan);
 
   if (result.__repeat) {
     // Never-repeat policy: one regenerate with a vary hint, else the fallback
@@ -63,12 +63,12 @@ export async function handleLlmTurn(ctx) {
           system: request.system + VARY_HINT,
         })
       );
-      const second = executePlan(ctx, retryPlan);
+      const second = await executePlan(ctx, retryPlan);
       result = second.__repeat ? applyVariation(ctx, second) : second;
     } catch {
       // Re-run the original plan on the restored state, then vary the reply so
       // the patient never sees the same bubble twice.
-      result = applyVariation(ctx, executePlan(ctx, plan));
+      result = applyVariation(ctx, await executePlan(ctx, plan));
     }
   }
   delete result.__repeat;

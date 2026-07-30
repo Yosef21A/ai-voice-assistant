@@ -27,6 +27,11 @@ export function makeTestApp(overrides = {}, appOpts = {}) {
     anthropicApiKey: '',
     geminiApiKey: '',
     conversationMode: 'classic',
+    // A machine-global DATABASE_URL (e.g. while running the PG suites) must
+    // never flip app-level tests onto Postgres — they assert on isolated
+    // JSON runtime dirs (P1-G).
+    databaseUrl: '',
+    store: '',
     // No self-ticking timers under test: reminder/followup tests call tick(now).
     remindersIntervalMs: 0,
     followupsIntervalMs: 0,

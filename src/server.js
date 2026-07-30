@@ -170,7 +170,12 @@ export function createApp(opts = {}) {
   // in-memory clinic on boot so wizard KB + trained answers survive restarts.
   // Fire-and-forget (createApp stays sync) — converges in ms; tests that need
   // determinism can `await composed.kbReady`.
-  const kbReady = hydrateAllClinicsKb(store).catch(() => {});
+  // P1-G: the Postgres adapter hydrates its in-memory clinic cache first
+  // (store.ready); the JSON adapter has no such step. KB + persisted-config
+  // hydration then run over the loaded registry, same as before.
+  const kbReady = Promise.resolve(store.ready)
+    .then(() => hydrateAllClinicsKb(store))
+    .catch(() => {});
 
   // Owner-notification worker (P1-E, wired here in P1-F): one subscriber on the
   // shared bus turns appointment.created / lead.hot / handoff.requested /
@@ -421,6 +426,10 @@ function warnBootConfig(cfg) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   warnBootConfig(config);
+  // P1-G: never serve traffic before the clinic registry is hydrated —
+  // getClinicByPhoneNumberId on an empty cache would route every webhook to a
+  // null tenant. Instant on JSON; one SELECT on Postgres.
+  await composed.kbReady;
   composed.reminders.start(); // schedulers run ONLY in the real server process
   composed.followups.start();
   const server = app.listen(config.port, () => {

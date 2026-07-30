@@ -175,9 +175,10 @@ export function applyVariation(ctx, result) {
 /**
  * Execute a coerced plan. Mutates convo.state / the store deterministically and
  * returns the classic route() result shape (+ gap/adminNotify/kbQuestion for
- * the ingest layer).
+ * the ingest layer). Async since P1-G — the ONE store write (finalizeBooking)
+ * awaits the adapter.
  */
-export function executePlan(ctx, plan) {
+export async function executePlan(ctx, plan) {
   const { convo, clinic } = ctx;
   const state = ensureState(convo);
   const data = state.data;
@@ -308,7 +309,7 @@ export function executePlan(ctx, plan) {
     // recap below, which IS the read-back, so the very next "نعم" completes the
     // booking. Cost on a clean voice booking: zero extra turns.
     if (h.awaitingConfirm && agreed && !blocksFinalize(data)) {
-      const fin = finalizeBooking(ctx); // the ONE appointment write + booked recap
+      const fin = await finalizeBooking(ctx); // the ONE appointment write + booked recap
       const appt = fin.appointment;
       convo.state = {
         flow: null,

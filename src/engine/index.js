@@ -42,10 +42,12 @@ export function createEngine({ store, provider, config }) {
       store.getClinicById(inbound.tenantId) ||
       store.getDefaultClinic();
 
-    store.upsertPatient(clinic.id, inbound.from, { lastSeen: now.toISOString() });
+    // P1-G: every legacy store call is awaited — a no-op on the JSON adapter
+    // (plain values), a SQL round-trip on Postgres.
+    await store.upsertPatient(clinic.id, inbound.from, { lastSeen: now.toISOString() });
     const convo =
-      store.getConversation(clinic.id, inbound.from) ||
-      store.newConversation(clinic.id, inbound.from);
+      (await store.getConversation(clinic.id, inbound.from)) ||
+      (await store.newConversation(clinic.id, inbound.from));
 
     const detected = detectLanguage(inbound.text);
     const lang = resolveLanguage(detected, convo.lang, clinic);
@@ -122,7 +124,7 @@ export function createEngine({ store, provider, config }) {
     const finalLang = result.lang || lang;
     convo.lang = finalLang;
     convo.updatedAt = now.toISOString();
-    store.saveConversation(convo);
+    await store.saveConversation(convo);
     if (result.appointment) {
       const a = result.appointment;
       // Patient memory (P2-HUMANIZE §2.10): only defined fields — the JSON
@@ -132,7 +134,7 @@ export function createEngine({ store, provider, config }) {
       if (a.originCountry) patch.originCountry = a.originCountry;
       if (a.contact) patch.contact = a.contact;
       if (finalLang) patch.lang = finalLang;
-      store.upsertPatient(clinic.id, inbound.from, patch);
+      await store.upsertPatient(clinic.id, inbound.from, patch);
     }
 
     // Facilitator (D2): every turn exposes the current qualification snapshot —
@@ -143,7 +145,7 @@ export function createEngine({ store, provider, config }) {
     const facilitatorLead = isFacilitator(clinic)
       ? facilitatorLeadFrom(clinic, convo, finalLang)
       : null;
-    if (facilitatorLead) store.saveConversation(convo);
+    if (facilitatorLead) await store.saveConversation(convo);
 
     return {
       clinicId: clinic.id,
