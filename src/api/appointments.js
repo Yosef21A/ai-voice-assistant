@@ -32,6 +32,16 @@ const publicAppt = (a) => {
 export function appointmentsRouter({ store, bus }) {
   const router = express.Router();
 
+  // D2: a facilitator tenant has NO local calendar — the whole surface is
+  // gated, matching the dashboard (Appointments hidden, Leads is home).
+  router.use((req, res, next) => {
+    const clinic = typeof store.getClinicById === 'function' ? store.getClinicById(req.tenantId) : null;
+    if (clinic?.type === 'facilitator') {
+      return res.status(404).json({ error: 'appointments are not available for facilitator accounts' });
+    }
+    next();
+  });
+
   router.get(
     '/',
     asyncHandler(async (req, res) => {

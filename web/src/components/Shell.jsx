@@ -6,6 +6,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import { useI18n } from '../context/I18nContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
+import { useTenant } from '../context/TenantContext.jsx';
 import { useEventStream, useStreamEvent } from '../context/EventStreamContext.jsx';
 import { useRoute } from '../router.js';
 import { Inbox as InboxIcon, Calendar, Book, Chart, Plane, Settings as SettingsIcon, Logout, Wand, glyph } from './icons.jsx';
@@ -27,16 +28,26 @@ const NAV = [
   { key: 'settings', icon: SettingsIcon },
 ];
 
-function screenFor(top) {
+// D2: an agency's dashboard is LEADS-FIRST — Leads is home, Appointments is
+// hidden (the tenant has no local calendar; the API 404s the surface too).
+const NAV_FACILITATOR = [
+  { key: 'leads', icon: Plane },
+  { key: 'inbox', icon: InboxIcon },
+  { key: 'stats', icon: Chart },
+  { key: 'knowledge', icon: Book },
+  { key: 'settings', icon: SettingsIcon },
+];
+
+function screenFor(top, facilitator) {
   switch (top) {
     case 'leads': return <Leads />;
-    case 'appointments': return <Appointments />;
+    case 'appointments': return facilitator ? <Leads /> : <Appointments />;
     case 'stats': return <Stats />;
     case 'knowledge': return <Knowledge />;
     case 'settings': return <Settings />;
     case 'wizard': return <Wizard />;
-    case 'inbox':
-    default: return <Inbox />;
+    case 'inbox': return <Inbox />;
+    default: return facilitator ? <Leads /> : <Inbox />;
   }
 }
 
@@ -45,7 +56,11 @@ export function Shell() {
   const { user, logout } = useAuth();
   const { connected } = useEventStream();
   const route = useRoute();
-  const top = route.top || 'inbox';
+  const { config } = useTenant();
+  const facilitator = config?.type === 'facilitator';
+  const nav = facilitator ? NAV_FACILITATOR : NAV;
+  // Facilitator home is the Leads board; a stale /appointments hash falls back.
+  const top = route.top || (facilitator ? 'leads' : 'inbox');
   const [menuOpen, setMenuOpen] = useState(false);
   const [needsHuman, setNeedsHuman] = useState(0);
   const [unanswered, setUnanswered] = useState(0);
@@ -118,7 +133,7 @@ export function Shell() {
             <span className="brand-name">Omen <b>Concierge</b></span>
           </span>
         </div>
-        {NAV.map(({ key, icon: Icon }) => (
+        {nav.map(({ key, icon: Icon }) => (
           <button key={key} className={`nav-item${top === key ? ' active' : ''}`} onClick={() => go(key)} aria-current={top === key ? 'page' : undefined}>
             <Icon />
             <span>{t(`nav.${key}`)}</span>
@@ -157,12 +172,12 @@ export function Shell() {
         </header>
 
         <div className={`content${flush ? ' flush' : ''}`}>
-          {screenFor(top)}
+          {screenFor(top, facilitator)}
         </div>
       </main>
 
       <nav className="tabbar" aria-label="primary mobile">
-        {NAV.map(({ key, icon: Icon }) => (
+        {nav.map(({ key, icon: Icon }) => (
           <button key={key} className={top === key ? 'active' : ''} onClick={() => go(key)} aria-current={top === key ? 'page' : undefined}>
             <Icon />
             <span>{t(`nav.${key}`)}</span>

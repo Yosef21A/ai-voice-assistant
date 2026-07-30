@@ -51,6 +51,27 @@ function validate(body) {
   if (body.type != null && !TENANT_TYPES.has(body.type)) {
     errs.push('type must be clinic|cabinet|facilitator');
   }
+  if (body.partners != null) {
+    const ok =
+      Array.isArray(body.partners) &&
+      body.partners.every(
+        (p) =>
+          p &&
+          typeof p === 'object' &&
+          typeof p.name === 'string' &&
+          p.name.length <= 120 &&
+          (p.city == null || (typeof p.city === 'string' && p.city.length <= 80)) &&
+          (p.specialties == null ||
+            (Array.isArray(p.specialties) && p.specialties.every((s) => typeof s === 'string' && s.length <= 60)))
+      );
+    if (!ok) errs.push('partners must be an array of { name, city?, specialties?[] }');
+  }
+  if (
+    body.destinations != null &&
+    (!Array.isArray(body.destinations) || body.destinations.some((d) => typeof d !== 'string' || d.length > 80))
+  ) {
+    errs.push('destinations must be an array of strings');
+  }
   if (body.doctorName != null) {
     const dn = body.doctorName;
     const isLabelString = (v) => typeof v === 'string' && v.length <= 120;
@@ -113,6 +134,10 @@ export function tenantRouter({ store, requireRole }) {
       // D1 cabinet mode: tenant type + doctor persona name (engine reads both
       // off the clinic object — tenantProfile.js).
       if (body.type != null) config.type = body.type;
+      // D2 facilitator: informational partner list (lead-card routing hint —
+      // never messaged) + destination cities.
+      if (Array.isArray(body.partners)) config.partners = body.partners;
+      if (Array.isArray(body.destinations)) config.destinations = body.destinations.map(String);
       if (body.doctorName != null) {
         config.doctorName =
           typeof body.doctorName === 'string' ? body.doctorName.trim() : body.doctorName;

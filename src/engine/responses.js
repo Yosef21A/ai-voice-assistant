@@ -174,6 +174,58 @@ const DICT = {
     en: (v) => `👩‍⚕️ I'm connecting you with ${v.name}. Direct line: ${v.phone}. The team will reply shortly.`,
   },
 
+  // ── facilitator mode (D2) — agency concierge qualification ───────────────
+  // An agency books nothing locally; it QUALIFIES and promises a same-day
+  // offer. The promise line is the product's spec wording.
+  greetingFacilitator: {
+    ar: (v) =>
+      `👋 أهلاً بيك في ${v.agency}. أنا المساعد الآلي متاع الوكالة.\nنرافقوك من أول سؤال حتى للعلاج في تونس:\n• 🏥 نلقاولك أحسن عيادة\n• 💶 نجيبولك عروض أسعار\n• ✈️ نرتبولك السفر والإقامة\nإذا تحب تحكي مع موظف اكتب «موظف».`,
+    fr: (v) =>
+      `👋 Bienvenue chez ${v.agency}. Je suis l'assistant virtuel de l'agence.\nOn vous accompagne jusqu'aux soins en Tunisie :\n• 🏥 On vous trouve la meilleure clinique\n• 💶 On vous ramène des devis\n• ✈️ On organise voyage et séjour\nPour parler à un conseiller, écrivez « conseiller ».`,
+    en: (v) =>
+      `👋 Welcome to ${v.agency}. I'm the agency's virtual assistant.\nWe guide you all the way to treatment in Tunisia:\n• 🏥 We find you the best clinic\n• 💶 We bring you quotes\n• ✈️ We arrange travel & stay\nTo reach a human, type "agent".`,
+  },
+  qualifyIntro: {
+    ar: () => `🤝 باهي، خلينا ناخذو التفاصيل باش نلقاولك أحسن عيادة ونرجعولك بعرض اليوم إن شاء الله.`,
+    fr: () => `🤝 Parfait, prenons quelques détails — on vous trouve la meilleure clinique et on revient avec une offre aujourd'hui.`,
+    en: () => `🤝 Great — a few details and we'll find you the best clinic and come back with an offer today.`,
+  },
+  qualifyAskProcedure: {
+    ar: () => `🩺 شنية العملية ولا العلاج اللي تحب عليه؟ (تجميل، أسنان، عظام، قلب…)`,
+    fr: () => `🩺 Quelle intervention ou quel traitement recherchez-vous ? (esthétique, dentaire, orthopédie…)`,
+    en: () => `🩺 What procedure or treatment are you looking for? (cosmetic, dental, orthopedic…)`,
+  },
+  qualifyAskOrigin: {
+    ar: () => `📍 من أي مدينة وبلاد جاي؟ (مثال: طرابلس، ليبيا)`,
+    fr: () => `📍 De quelle ville et quel pays venez-vous ? (ex. : Tripoli, Libye)`,
+    en: () => `📍 Which city and country are you travelling from? (e.g. Tripoli, Libya)`,
+  },
+  qualifyAskWindow: {
+    ar: () => `📅 وقتاش تحب تسافر تقريباً؟ (الأسبوع الجاي، الشهر الجاي، الصيف…)`,
+    fr: () => `📅 Quand souhaitez-vous voyager, à peu près ? (la semaine prochaine, le mois prochain…)`,
+    en: () => `📅 Roughly when would you like to travel? (next week, next month, this summer…)`,
+  },
+  qualifyAskContact: {
+    ar: () => `📞 أعطيني رقم للتواصل، وإذا عندك تقرير طبي ولا صورة أشعة ابعثهملنا هنا 📎`,
+    fr: () => `📞 Un numéro pour vous joindre ? Et si vous avez un rapport médical ou une radio, envoyez-les ici 📎`,
+    en: () => `📞 A number to reach you on? And if you have a medical report or X-ray, send them here 📎`,
+  },
+  qualifyDone: {
+    ar: (v) => `يعطيك الصحة 🙏 ${v.agency} توّا تتحرك: نلقاولك أحسن عيادة ونرجعولك بعرض اليوم إن شاء الله. تنجم تبعتلنا تقرير طبي ولا أشعة في أي وقت 📎`,
+    fr: (v) => `Merci 🙏 ${v.agency} s'en occupe : on vous trouve la meilleure clinique et on revient avec une offre aujourd'hui. Vous pouvez envoyer rapport médical ou radios à tout moment 📎`,
+    en: (v) => `Thank you 🙏 ${v.agency} is on it: we'll find you the best clinic and come back with an offer today. You can send a medical report or X-rays any time 📎`,
+  },
+  qualifyFollowup: {
+    ar: () => `الفريق يخدم على ملفك 🙌 نرجعولك بالعرض في أقرب وقت. عندك سؤال آخر؟`,
+    fr: () => `L'équipe travaille sur votre dossier 🙌 On revient très vite avec l'offre. Une autre question ?`,
+    en: () => `The team is working on your file 🙌 We'll be back with the offer very soon. Anything else?`,
+  },
+  qualifyBudgetNote: {
+    ar: () => `💶 الأسعار تتفاوت حسب العيادة والحالة — باش نجيبولك عروض مفصلة بأسعار «تبدأ من» من أحسن العيادات، والرقم النهائي بعد تقييم الملف الطبي.`,
+    fr: () => `💶 Les prix varient selon la clinique et le dossier — on vous ramène des devis détaillés « à partir de » des meilleures cliniques ; le montant final vient après l'évaluation médicale.`,
+    en: () => `💶 Prices vary by clinic and case — we'll bring you detailed "from" quotes from the best clinics; the final figure comes after the medical review.`,
+  },
+
   // ── appointment reminders (V2 no-show killer) ────────────────────────────
   // Sent with interactive confirm/cancel/reschedule buttons; the bodies are
   // deterministic templates (never LLM prose). v.doctor is the optional cabinet

@@ -23,7 +23,7 @@ import { t } from '../engine/responses.js';
 import { formatWhen } from '../engine/datetime.js';
 import { inQuietHours } from '../notifications/service.js';
 import { isSandboxWaId } from '../stats/index.js';
-import { hasDoctorPersona, doctorName } from '../engine/tenantProfile.js';
+import { hasDoctorPersona, doctorName, isFacilitator } from '../engine/tenantProfile.js';
 
 const HOUR = 3600 * 1000;
 
@@ -80,6 +80,10 @@ export async function applyReminderReply(
   { action, apptId }
 ) {
   const tenantId = clinic.id;
+  // A facilitator has no calendar (D2): legacy appointment buttons are inert —
+  // the team handles any pre-conversion appointments by hand, and a reschedule
+  // must never seed a booking flow the facilitator router can't run.
+  if (isFacilitator(clinic)) return { handled: false };
   const appt = await store.appointments.get(tenantId, apptId);
   // Gone or already terminal → let the engine handle the turn conversationally.
   if (!appt || !['pending', 'confirmed'].includes(appt.status)) return { handled: false };
@@ -323,6 +327,9 @@ export function createReminderService({ store, sender, bus, config = {}, now, lo
     const counts = { sent: 0, skipped_window: 0, failed: 0, no_answer: 0 };
 
     for (const clinic of store.listClinics()) {
+      // Facilitator tenants have no calendar — nothing to remind (D2). Any
+      // legacy confirmed appointments from before a type switch are staff's.
+      if (isFacilitator(clinic)) continue;
       const cfg = reminderCfg(clinic);
       if (!cfg.enabled) continue;
       const quiet = clinic.notifications?.quietHours?.enabled ? clinic.notifications.quietHours : null;

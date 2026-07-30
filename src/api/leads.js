@@ -20,6 +20,10 @@ const publicLead = (l, waitingSince = null) =>
     notes: Array.isArray(l.notes) ? l.notes : [],
     reason: l.details?.reason ?? null,
     snippet: l.details?.snippet ?? null,
+    // D2 facilitator qualification extras (null for clinic leads).
+    originCity: l.details?.originCity ?? null,
+    travelWindow: l.details?.travelWindow ?? null,
+    budgetAsked: l.details?.budgetAsked ?? false,
     waitingSince, // ISO string when the patient is waiting on a human, else null
     createdAt: l.createdAt ?? null,
     updatedAt: l.updatedAt ?? null,

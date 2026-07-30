@@ -283,6 +283,95 @@
           }
         }
       ]
+    },
+    {
+      "id": "medtour-tripoli-sousse",
+      "type": "facilitator",
+      "name": "MedTour — Tripoli ⇄ Sousse",
+      "city": "Sousse",
+      "country": "Tunisia",
+      "timezone": "Africa/Tunis",
+      "currency": "EUR",
+      "whatsapp": {
+        "phoneNumberId": "1000000004",
+        "displayPhone": "+216 73 000 444"
+      },
+      "handoff": {
+        "name": "Équipe MedTour",
+        "phone": "+216 73 000 445"
+      },
+      "languages": ["ar", "fr", "en"],
+      "specialties": [
+        {
+          "id": "cosmetic_surgery",
+          "labels": { "ar": "جراحة التجميل", "fr": "Chirurgie esthétique", "en": "Cosmetic surgery" },
+          "synonyms": ["cosmetic", "plastic", "esthetique", "تجميل", "نحافة", "أنف", "انف", "rhino", "nez", "rhinoplastie", "liposuccion", "lifting"]
+        },
+        {
+          "id": "dental",
+          "labels": { "ar": "طب الأسنان", "fr": "Dentaire", "en": "Dental" },
+          "synonyms": ["teeth", "dentist", "dentiste", "dentaire", "أسنان", "سنان", "ضرس", "implant", "زرع", "hollywood smile"]
+        },
+        {
+          "id": "fertility",
+          "labels": { "ar": "علاج العقم", "fr": "Fertilité (PMA)", "en": "Fertility (IVF)" },
+          "synonyms": ["ivf", "fiv", "pma", "عقم", "إنجاب", "انجاب", "أطفال الأنابيب", "اطفال انابيب", "أنابيب"]
+        },
+        {
+          "id": "orthopedics",
+          "labels": { "ar": "جراحة العظام", "fr": "Orthopédie", "en": "Orthopedics" },
+          "synonyms": ["ortho", "knee", "hip", "عظام", "مفاصل", "ركبة", "genou", "orthopedie", "prothese"]
+        }
+      ],
+      "partners": [
+        { "name": "Clinique El Amen", "city": "Sousse", "specialties": ["cosmetic_surgery", "dental", "fertility", "orthopedics"] },
+        { "name": "Polyclinique Ennour", "city": "Sfax", "specialties": ["dental", "cosmetic_surgery", "orthopedics"] }
+      ],
+      "workingHours": {
+        "sun": ["09:00", "17:00"],
+        "mon": ["08:00", "20:00"],
+        "tue": ["08:00", "20:00"],
+        "wed": ["08:00", "20:00"],
+        "thu": ["08:00", "20:00"],
+        "fri": ["08:00", "20:00"],
+        "sat": ["09:00", "17:00"]
+      },
+      "travel": {
+        "airports": "Enfidha–Hammamet (NBE) or Monastir (MIR); road transfer from the Ras Ajdir border arranged",
+        "transfer": "Door-to-door pickup from Tripoli/Benghazi or the airport, included in every offer",
+        "accommodation": "Partner 3–5★ hotels and recovery apartments near the chosen clinic",
+        "companion": "One companion included; help with SIM, currency and local transport",
+        "visa": "Libyan nationals: short medical stays in Tunisia are generally visa-free; we prepare the clinic invitation letter with your file."
+      },
+      "faq": [
+        {
+          "id": "how_it_works",
+          "keywords": ["how", "comment", "كيفاش", "الخدمة", "process", "تخدمو", "marche"],
+          "answer": {
+            "ar": "نسمعو حالتك، نلقاولك أحسن عيادة عندنا، نرجعولك بعرض مفصل (سعر «يبدأ من»، طبيب، مدة)، وإذا يعجبك نرتبولك كل شيء: موعد، سفر، إقامة.",
+            "fr": "On écoute votre cas, on sélectionne la meilleure clinique partenaire, on revient avec une offre détaillée (prix « à partir de », médecin, durée), puis on organise tout : rendez-vous, voyage, séjour.",
+            "en": "We listen to your case, pick the best partner clinic, come back with a detailed offer ('from' price, doctor, duration), then arrange everything: appointment, travel, stay."
+          }
+        },
+        {
+          "id": "visa_invitation",
+          "keywords": ["visa", "تأشيرة", "فيزا", "invitation", "دعوة", "passport", "جواز", "حدود"],
+          "answer": {
+            "ar": "الليبيون في العادة يدخلوا تونس بدون تأشيرة للعلاج القصير، ونجهزولك رسالة الدعوة من العيادة مع ملفك.",
+            "fr": "Les patients libyens entrent normalement en Tunisie sans visa pour un séjour médical court ; la lettre d'invitation de la clinique est préparée avec votre dossier.",
+            "en": "Libyan patients normally enter Tunisia visa-free for short medical stays; the clinic invitation letter is prepared with your file."
+          }
+        },
+        {
+          "id": "payment",
+          "keywords": ["payment", "paiement", "pay", "دفع", "خلاص", "عربون", "acompte", "deposit"],
+          "answer": {
+            "ar": "ما تخلص حتى شيء للوكالة قبل ما تشوف العرض وتوافق. الخلاص يكون مباشرة للعيادة حسب العرض.",
+            "fr": "Vous ne payez rien à l'agence avant d'avoir vu et accepté l'offre. Le règlement se fait directement à la clinique selon le devis.",
+            "en": "You pay the agency nothing before seeing and accepting the offer. Payment goes directly to the clinic per the quote."
+          }
+        }
+      ]
     }
   ]
 }

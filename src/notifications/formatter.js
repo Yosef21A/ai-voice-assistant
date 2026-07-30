@@ -171,6 +171,13 @@ const LEAD_WHY = {
     fr: (v) => `Demande hors catalogue${v.proc ? ` (« ${v.proc} »)` : ''} — le bot a promis une réponse aujourd'hui. Répondez pour ne pas le perdre.`,
     en: (v) => `Asked for a treatment we don't list${v.proc ? ` ("${v.proc}")` : ''} — the bot promised an answer today. Reply so we don't lose them.`,
   },
+  // D2: a facilitator qualification completed — the concierge promised an
+  // offer TODAY, so this alert asks the agency to deliver one.
+  facilitator_qualified: {
+    ar: (v) => `ملف مكتمل${v.proc ? ` (${v.proc})` : ''}${v.country ? ` من ${v.country}` : ''} — البوت وعدو بعرض اليوم. جهزولو العرض.`,
+    fr: (v) => `Dossier qualifié${v.proc ? ` (${v.proc})` : ''}${v.country ? ` — ${v.country}` : ''} — le bot a promis une offre aujourd'hui. Préparez-la.`,
+    en: (v) => `Qualified file${v.proc ? ` (${v.proc})` : ''}${v.country ? ` from ${v.country}` : ''} — the bot promised an offer today. Prepare it.`,
+  },
 };
 
 const LEAD = {

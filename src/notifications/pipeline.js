@@ -162,6 +162,13 @@ export function analyzeInbound({
 
     // 2) HOT LEAD — revenue signal. Never fires on a completed booking turn
     //    (isHotLead guards that); the booking alert already covers those.
+    //    FACILITATOR tenants (D2) are exempt from the generic detector: at an
+    //    agency EVERY patient is a foreign-origin tourism inquiry, so the
+    //    detector fires mid-interview on the bot's own origin question — and
+    //    its lead.hot would then swallow the real 'facilitator_qualified'
+    //    alert in the notifier's per-conversation dedupe window. The dedicated
+    //    qualification alert (engine → ingest) is the ONE agency ping.
+    if (cfg?.type === 'facilitator') return out;
     const verdict = isHotLead(engineResult, cfg, text, { waId });
     if (verdict.hot) {
       const lead = {

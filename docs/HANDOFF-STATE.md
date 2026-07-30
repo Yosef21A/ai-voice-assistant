@@ -9,7 +9,7 @@
 | WABA id | `1038353382027655` |
 | Test number | **+1 (555) 177-7574** — phone_number_id `1153135121224452` |
 | Allow-listed recipient | +216 29 496 305 (Youssef, verified via OTP) — max 5 total |
-| Webhook callback | **rotates every session** — a free `trycloudflare` URL changes on every `cloudflared` restart, so it MUST be re-entered in the Meta console each time (see below). Last set 2026-07-29: `https://objectives-winston-accompanied-altered.trycloudflare.com/webhook` |
+| Webhook callback | **rotates every session** — a free `trycloudflare` URL changes on every `cloudflared` restart, so it MUST be re-entered in the Meta console each time (see below). Last set 2026-07-30: `https://soccer-led-tumor-england.trycloudflare.com/webhook` |
 | Console page | developers.facebook.com → app → WhatsApp → Étape 1 (api-testing-v2) |
 
 ## .env state (repo root, git-ignored — NEVER commit or print it)

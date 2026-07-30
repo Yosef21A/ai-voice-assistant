@@ -11,7 +11,13 @@ import { t } from './responses.js';
 import { normalizeDigits } from './text.js';
 import { handleLlmTurn } from './humanize/index.js';
 import { snapshotCritical, markVoiceProvisional } from './voiceSlots.js';
-import { hasDoctorPersona, doctorName } from './tenantProfile.js';
+import { hasDoctorPersona, doctorName, isFacilitator } from './tenantProfile.js';
+import {
+  startQualify,
+  continueQualify,
+  handleFacilitatorPricing,
+  facilitatorLeadFrom,
+} from './facilitator.js';
 
 // F9 state decay: a booking flow idle longer than this keeps its slots but
 // drops the "expected answer" lock — the next message is evaluated fresh.
@@ -127,6 +133,16 @@ export function createEngine({ store, provider, config }) {
       store.upsertPatient(clinic.id, inbound.from, patch);
     }
 
+    // Facilitator (D2): every turn exposes the current qualification snapshot —
+    // the ingest layer persists it as the ONE open lead per conversation and
+    // pings the owner exactly once when it becomes rich. Computed AFTER the
+    // turn so it sees this turn's captures, BEFORE save so the alert-once flag
+    // persists.
+    const facilitatorLead = isFacilitator(clinic)
+      ? facilitatorLeadFrom(clinic, convo, finalLang)
+      : null;
+    if (facilitatorLead) store.saveConversation(convo);
+
     return {
       clinicId: clinic.id,
       clinicName: clinic.name,
@@ -136,6 +152,7 @@ export function createEngine({ store, provider, config }) {
       replies,
       appointment: result.appointment || null,
       handoff: result.handoff || null,
+      facilitatorLead,
       state: convo.state || null,
       // P2-B: false only when the bot had NO real answer (unknown intent, or a
       // FAQ ask that matched nothing) — feeds the "bot didn't know" queue.
@@ -156,6 +173,10 @@ export function createEngine({ store, provider, config }) {
 async function route(ctx) {
   const { convo, text } = ctx;
   const gi = detectIntent(text);
+
+  // Facilitator tenants (D2): the appointment flow is UNREACHABLE — an agency
+  // has no local calendar. Booking/pricing intents become qualification.
+  if (isFacilitator(ctx.clinic)) return routeFacilitator(ctx, gi);
 
   // An active booking flow captures the turn, except for explicit interrupts.
   if (convo.state?.flow === 'booking') {
@@ -192,6 +213,47 @@ async function route(ctx) {
       return handleGreeting(ctx);
     default:
       return handleFallback(ctx);
+  }
+}
+
+// Facilitator routing (D2): same interrupts and knowledge paths as a clinic,
+// but every "I want treatment / how much" road leads to qualification.
+async function routeFacilitator(ctx, gi) {
+  const { convo, lang } = ctx;
+
+  if (gi.intent === 'human_handoff') return handleHandoff(ctx);
+  if (gi.intent === 'cancel') {
+    if (convo.state?.flow === 'qualify') {
+      convo.state = null;
+      return { intent: 'cancel', replies: [t(lang, 'cancelled')] };
+    }
+    return { intent: 'cancel', replies: [t(lang, 'nothingToCancel')] };
+  }
+  if (gi.intent === 'pricing_quote') return handleFacilitatorPricing(ctx);
+
+  // A live qualification captures the turn (whatever step it recorded — an
+  // LLM-written state carries no step and continueQualify self-heals).
+  if (convo.state?.flow === 'qualify') return continueQualify(ctx);
+
+  switch (gi.intent) {
+    case 'book_appointment':
+      return startQualify(ctx);
+    case 'travel_help':
+      return handleTravel(ctx);
+    case 'faq':
+      return handleFaq(ctx);
+    case 'greeting':
+      return {
+        intent: 'greeting',
+        replies: [t(lang, 'greetingFacilitator', { agency: ctx.clinic.name })],
+      };
+    default: {
+      // An unknown message that names a procedure IS a qualification opener
+      // ("نحب نعمل زرع أسنان في تونس") — never a dead "I didn't understand".
+      const sp = extractSpecialty(ctx.text, ctx.clinic);
+      if (sp) return startQualify(ctx);
+      return handleFallback(ctx);
+    }
   }
 }
 

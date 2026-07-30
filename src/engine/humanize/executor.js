@@ -27,7 +27,7 @@ import {
   blocksFinalize,
   markEchoed,
 } from '../voiceSlots.js';
-import { defaultSpecialtyId, hasDoctorPersona, doctorName } from '../tenantProfile.js';
+import { defaultSpecialtyId, hasDoctorPersona, doctorName, isFacilitator } from '../tenantProfile.js';
 
 const LANG_MAP = { ar: 'ar', fr: 'fr', en: 'en', 'ar-Latn': 'ar' };
 const WARM_LINE_MAX = 200;
@@ -198,10 +198,19 @@ export function executePlan(ctx, plan) {
   resolveVoiceConfirm(ctx, state, data, yn);
 
   const patch = applySlots(ctx, plan.slots_patch, data);
-  if (patch.any && state.flow !== 'booking') state.flow = 'booking';
+  // D2: a facilitator's slots feed a LEAD, never a booking — the flow is named
+  // 'qualify' so the classic fallback (engine/facilitator.js) resumes it
+  // seamlessly on any LLM failure, reading the SAME data fields.
+  const facilitator = isFacilitator(clinic);
+  if (patch.any && !state.flow) state.flow = facilitator ? 'qualify' : 'booking';
+  if (facilitator && state.flow === 'qualify' && patch.slotDate == null && plan.slots_patch?.datetimeText) {
+    // A travel window that didn't parse as a concrete slot is still the answer
+    // ("الشهر الجاي") — keep the patient's words for the lead card.
+    if (!data.travelWindow) data.travelWindow = String(plan.slots_patch.datetimeText).slice(0, 120);
+  }
   // Once a booking is live, backstop the LLM's slot extraction from the raw
   // message so a captured date/city/phone never gets stranded in the prose.
-  if (state.flow === 'booking') {
+  if (state.flow === 'booking' || state.flow === 'qualify') {
     // D1 deterministic twin of the prompt's FIXED SPECIALTY rule: a
     // single-specialty practice (or cabinet) books under its one specialty even
     // when the LLM forgets to patch it — nextStep() must never land on
@@ -220,7 +229,9 @@ export function executePlan(ctx, plan) {
     // A TYPED value for a field is authoritative and needs no read-back — drop
     // that field's provenance (and only that field's).
     clearTypedOverrides(ctx, data, changed);
-    state.step = nextStep(data);
+    // Booking step names on a QUALIFY state would confuse the classic
+    // fallback's interview — the facilitator router recomputes its own step.
+    if (!facilitator) state.step = nextStep(data);
   }
 
   const filtered = filterReply(plan.reply_text, { clinic, lang });
@@ -281,7 +292,10 @@ export function executePlan(ctx, plan) {
   }
 
   // ── booking: deterministic confirm / recap ────────────────────────────────
-  const complete = state.flow === 'booking' && nextStep(data) === 'confirm';
+  // Facilitators can NEVER reach this branch: no recap, no finalizeBooking —
+  // the appointment write is unreachable by construction (D2), even if the LLM
+  // emits propose_summary/confirm_booking against its instructions.
+  const complete = !facilitator && state.flow === 'booking' && nextStep(data) === 'confirm';
   if (complete) {
     const wantsConfirm = actions.has('confirm_booking');
     // Finalize ONLY after a recap was shown (awaitingConfirm) and the patient

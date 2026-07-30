@@ -23,6 +23,7 @@ import { detectYesNo } from '../engine/slots.js';
 import { t } from '../engine/responses.js';
 import { estimateMaxBytes } from '../voice/policy.js';
 import { parseReminderAction, applyReminderReply } from '../reminders/index.js';
+import { isFacilitator } from '../engine/tenantProfile.js';
 
 // Localized acknowledgment for received media (P2-D). GUARDRAIL: the bot never
 // interprets media medically — it confirms receipt and promises a human.
@@ -30,6 +31,13 @@ const MEDIA_ACK = {
   ar: 'وصلتنا 📎 الطبيب يطّلع عليها ويردّ عليك في أقرب وقت.',
   fr: 'Bien reçu 📎 Le médecin va l’examiner et revient vers vous rapidement.',
   en: 'Received 📎 The doctor will review it and get back to you shortly.',
+};
+// D2: an agency has no in-house doctor — its media promise routes to the
+// partner clinic instead. Same guardrail: receipt only, zero interpretation.
+const MEDIA_ACK_FACILITATOR = {
+  ar: 'وصلتنا 📎 نحوّلوها للعيادة المناسبة مع ملفك ونرجعولك بالرد في أقرب وقت.',
+  fr: 'Bien reçu 📎 On la transmet à la clinique adaptée avec votre dossier et on revient vers vous rapidement.',
+  en: 'Received 📎 We\'ll pass it to the right clinic with your file and get back to you shortly.',
 };
 
 // Display-only filename: never used for paths, stripped of anything path-like.
@@ -242,7 +250,7 @@ export async function ingestInbound(
     // A voice note we heard but could not understand gets the warm fallback,
     // never the generic 📎 ack — "the doctor will review it" is the wrong
     // promise for audio, and silence is the one thing we refuse.
-    let text = MEDIA_ACK[lang];
+    let text = (isFacilitator(clinic) ? MEDIA_ACK_FACILITATOR : MEDIA_ACK)[lang];
     if (voice && !voice.ok) text = t(lang, voice.reason === 'too_long' ? 'voiceTooLong' : 'voiceUnclear');
     await sendAs('bot', conversationId, () => sender.sendText(clinic, inbound.from, text));
     return { tenantId, conversationId, media: mediaMeta, voice: voice || undefined };
@@ -381,6 +389,47 @@ export async function ingestInbound(
       });
     } catch {
       /* the leads pipeline must never break the turn */
+    }
+  }
+
+  // Facilitator qualification (D2): the engine exposes the running snapshot;
+  // ONE open lead per conversation carries it, and the owner is pinged exactly
+  // once when it becomes rich (the engine's alert-once flag lives in convo
+  // state). Sandbox test-drives never leak into the pipeline.
+  if (out.facilitatorLead && !isSandboxWaId(inbound.from)) {
+    const fl = out.facilitatorLead;
+    const snippet = String(inbound.text || '').slice(0, 160);
+    try {
+      await store.leads.upsertOpen(tenantId, {
+        conversationId,
+        patientWaId: inbound.from,
+        procedure: fl.procedure || fl.procedureRaw || null,
+        originCountry: fl.originCountry || null,
+        details: {
+          reason: 'facilitator_qualified',
+          procedureLabel: fl.procedureLabel || null,
+          originCity: fl.originCity || fl.originRaw || null,
+          travelWindow: fl.travelWindow || null,
+          budgetAsked: fl.budgetAsked || false,
+          snippet,
+        },
+      });
+    } catch {
+      /* the leads pipeline must never break the turn */
+    }
+    if (fl.alert) {
+      bus.publish('lead.hot', {
+        tenantId,
+        conversationId,
+        lead: {
+          reason: 'facilitator_qualified',
+          procedure: fl.procedureLabel || fl.procedure || fl.procedureRaw || null,
+          country: fl.originCountry || null,
+          patientWaId: inbound.from,
+          conversationId,
+          snippet,
+        },
+      });
     }
   }
 

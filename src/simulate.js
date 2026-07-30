@@ -72,6 +72,26 @@ async function runFlow({ title, phoneNumberId, from, script }) {
       leadShown = true;
       line(`   🔥  hot lead detected → ${analysis.lead?.reason} (owner would be pinged once)`);
     }
+    // Facilitator qualification (D2): persist the snapshot exactly as the
+    // webhook ingest does — one open lead per conversation, updated per turn.
+    if (out.facilitatorLead) {
+      const fl = out.facilitatorLead;
+      await store.leads.upsertOpen(clinic.id, {
+        conversationId: `${clinic.id}:${from}`,
+        patientWaId: from,
+        procedure: fl.procedure || fl.procedureRaw || null,
+        originCountry: fl.originCountry || null,
+        details: {
+          reason: 'facilitator_qualified',
+          procedureLabel: fl.procedureLabel || null,
+          originCity: fl.originCity || fl.originRaw || null,
+          travelWindow: fl.travelWindow || null,
+          budgetAsked: fl.budgetAsked || false,
+          snippet: msg.slice(0, 160),
+        },
+      });
+      if (fl.alert) line('   🤝  file qualified → agency owner would be pinged: prepare the offer TODAY');
+    }
     if (!analysis.overrideReply && out.appointment) booked = out.appointment;
   }
   line('');
@@ -128,6 +148,23 @@ const cabinetFlow = {
   ],
 };
 
+// D2 facilitator mode: a medical-tourism agency. No booking flow exists — the
+// conversation QUALIFIES the patient (procedure → origin → travel window →
+// contact) and ends on the same-day-offer promise. The lead lands on the
+// agency's Leads board (persisted below exactly as the webhook ingest does).
+const facilitatorFlow = {
+  title: '🤝  Facilitator mode · MedTour — Tripoli ⇄ Sousse (agency concierge)',
+  phoneNumberId: '1000000004',
+  from: '218925550066',
+  script: [
+    'السلام عليكم',
+    'نحب نعمل زرع أسنان في تونس',
+    'من طرابلس، ليبيا',
+    'الشهر الجاي إن شاء الله',
+    'رقمي +218 92 555 0066',
+  ],
+};
+
 // A short English showcase (no booking): pricing, travel, FAQ, handoff.
 const englishShowcase = {
   title: '🇬🇧  English concierge showcase · El Amen (pricing / travel / FAQ / handoff)',
@@ -160,6 +197,7 @@ async function main() {
   const arAppt = await runFlow(arabicFlow);
   const frAppt = await runFlow(frenchFlow);
   const cabAppt = await runFlow(cabinetFlow);
+  await runFlow(facilitatorFlow);
   await runFlow(englishShowcase);
   await runFlow(emergencyShowcase);
 
@@ -178,6 +216,19 @@ async function main() {
   const cab = appts.find((a) => a.clinicId === 'cabinet-bensalem-sousse');
   if (!cab) problems.push('cabinet scenario booked no appointment');
   else if (cab.specialty !== 'cardiology') problems.push(`cabinet appointment specialty ${cab.specialty}, expected cardiology`);
+  // D2: the facilitator scenario must have produced a RICH lead — and no
+  // appointment (an agency has no calendar to book).
+  const facLeads = await store.leads.list('medtour-tripoli-sousse', {});
+  const facLead = facLeads[0];
+  if (!facLead) problems.push('facilitator scenario produced no lead');
+  else {
+    if (facLead.procedure !== 'dental') problems.push(`facilitator lead procedure ${facLead.procedure}, expected dental`);
+    if (facLead.originCountry !== 'Libya') problems.push(`facilitator lead country ${facLead.originCountry}, expected Libya`);
+    if (!facLead.details?.travelWindow) problems.push('facilitator lead missing travel window');
+  }
+  if (appts.some((a) => a.clinicId === 'medtour-tripoli-sousse')) {
+    problems.push('facilitator tenant must never book an appointment');
+  }
   for (const a of appts) {
     const clinic = store.getClinicById(a.clinicId);
     const d = new Date(a.datetimeISO);
@@ -202,6 +253,9 @@ async function main() {
   }
   if (cabAppt) {
     line(`      🩺 cabinet ref ${cabAppt.ref} · Dr Ben Salem · ${cabAppt.datetimeISO} (no specialty question asked)`);
+  }
+  if (facLead) {
+    line(`      🤝 facilitator lead · ${facLead.procedure} · ${facLead.details?.originCity || '?'} (${facLead.originCountry}) · window "${facLead.details?.travelWindow}" — offer promised today`);
   }
   hr();
 }

@@ -28,12 +28,25 @@ function groupThousands(n) {
   return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 }
 
-function LeadCard({ lead, lang, currency, note, value, savingNote, savingValue, on }) {
+// D2: informational routing hint — which partner clinics could take this
+// lead's procedure. Display only; the bot never messages a partner.
+function partnerCandidates(config, procedure) {
+  if (config?.type !== 'facilitator' || !procedure) return null;
+  const partners = Array.isArray(config.partners) ? config.partners : [];
+  const names = partners
+    .filter((p) => !Array.isArray(p.specialties) || !p.specialties.length || p.specialties.includes(procedure))
+    .map((p) => p.name)
+    .filter(Boolean);
+  return names.length ? names.join(', ') : null;
+}
+
+function LeadCard({ lead, lang, currency, note, value, savingNote, savingValue, on, tenantConfig }) {
   const { t } = useI18n();
   const waitingMs = lead.waitingSince ? Date.now() - new Date(lead.waitingSince).getTime() : null;
   const proc = lead.procedure ? specialtyLabel(lead.procedure, lang) : t('leads.unknownProcedure');
   const reason = lead.reason ? t(`leads.reason.${lead.reason}`) : null;
   const waNumber = String(lead.patientWaId || '').replace(/[^\d]/g, '');
+  const candidates = partnerCandidates(tenantConfig, lead.procedure);
 
   return (
     <div className="lead-card">
@@ -44,6 +57,13 @@ function LeadCard({ lead, lang, currency, note, value, savingNote, savingValue, 
         </div>
         {lead.originCountry ? <Badge kind="brass">{lead.originCountry}</Badge> : null}
       </div>
+
+      {lead.travelWindow ? (
+        <div className="tiny muted" dir={dirOf(lead.travelWindow)}>✈️ {lead.travelWindow}{lead.originCity ? ` · ${lead.originCity}` : ''}</div>
+      ) : null}
+      {candidates ? (
+        <div className="tiny" style={{ color: 'var(--brass, #c9a86a)' }}>🏥 {t('leads.partnersHint')}: {candidates}</div>
+      ) : null}
 
       {lead.snippet ? <div className="small dim lead-snippet" dir={dirOf(lead.snippet)}>“{lead.snippet}”</div> : null}
 
@@ -232,7 +252,7 @@ export function Leads() {
               <div className="lane-body">
                 {lanes[s].map((l) => (
                   <LeadCard
-                    key={l.id} lead={l} lang={lang} currency={currency}
+                    key={l.id} lead={l} lang={lang} currency={currency} tenantConfig={config}
                     note={notes[l.id] || ''} value={values[l.id] ?? (l.value ?? '')}
                     savingNote={!!saving[l.id]?.note} savingValue={!!saving[l.id]?.value} on={on}
                   />

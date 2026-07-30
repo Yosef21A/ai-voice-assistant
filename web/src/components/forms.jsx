@@ -21,6 +21,32 @@ function doctorNameToDraft(dn) {
   return { doctorNameFr: dn.fr || dn.en || '', doctorNameAr: dn.ar || '' };
 }
 
+// Partners (D2 facilitator) edit as one line per clinic: "Name — City — procs".
+export function partnersToText(partners) {
+  return (Array.isArray(partners) ? partners : [])
+    .map((p) => [p.name, p.city, (p.specialties || []).join(', ')].filter(Boolean).join(' — '))
+    .join('\n');
+}
+export function textToPartners(text) {
+  return String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      let [name, city, procs] = l.split('—').map((s) => s.trim());
+      // Two-segment line whose second part is a comma list is "Name — procs"
+      // (a city-less partner must round-trip, not grow a bogus city).
+      if (city && procs == null && city.includes(',')) {
+        procs = city;
+        city = null;
+      }
+      const p = { name: name || l };
+      if (city) p.city = city;
+      if (procs) p.specialties = procs.split(',').map((s) => s.trim()).filter(Boolean);
+      return p;
+    });
+}
+
 /** Canonical config → editable draft. Missing sections get sane defaults. */
 export function configToDraft(config = {}) {
   const persona = config.persona || {};
@@ -34,6 +60,9 @@ export function configToDraft(config = {}) {
     type: ['clinic', 'cabinet', 'facilitator'].includes(config.type) ? config.type : 'clinic',
     doctorNameRaw: config.doctorName ?? null,
     ...doctorNameToDraft(config.doctorName),
+    // D2 facilitator: destination cities + partner-clinic routing hints.
+    destinations: Array.isArray(config.destinations) ? config.destinations : [],
+    partnersText: partnersToText(config.partners),
     name: config.name || '', city: config.city || '', country: config.country || '',
     timezone: config.timezone || 'Africa/Tunis', currency: config.currency || 'EUR',
     address: config.address || '', googleMapsUrl: config.googleMapsUrl || '', phone: config.phone || '',
@@ -92,6 +121,11 @@ export const profilePatch = (d) => {
     const base = d.doctorNameRaw && typeof d.doctorNameRaw === 'object' ? d.doctorNameRaw : null;
     patch.doctorName = ar || base ? { ...(base || {}), fr, ar } : fr;
   }
+  // Facilitator fields travel only for agencies, same principle.
+  if (d.type === 'facilitator') {
+    patch.destinations = d.destinations;
+    patch.partners = textToPartners(d.partnersText);
+  }
   return patch;
 };
 export const personaPatch = (d) => ({ languages: d.persona.spoken, persona: d.persona });
@@ -114,6 +148,7 @@ export function ProfileForm({ value, onChange }) {
   const { t, lang } = useI18n();
   const set = (patch) => onChange({ ...value, ...patch });
   const isCabinet = value.type === 'cabinet';
+  const isFacilitator = value.type === 'facilitator';
   const selectedIds = new Set((value.specialties || []).map((s) => s.id));
   const toggleSpec = (id) => {
     // Cabinet (D1): a doctor's practice has ONE specialty — radio semantics.
@@ -151,16 +186,17 @@ export function ProfileForm({ value, onChange }) {
       <Field label={t('profile.type')}>
         <Segmented
           ariaLabel={t('profile.type')}
-          value={isCabinet ? 'cabinet' : 'clinic'}
+          value={value.type || 'clinic'}
           onChange={setType}
           options={[
             { value: 'clinic', label: t('profile.typeClinic') },
             { value: 'cabinet', label: t('profile.typeCabinet') },
+            { value: 'facilitator', label: t('profile.typeFacilitator') },
           ]}
         />
       </Field>
       <div className="row-wrap" style={{ gap: 'var(--sp-3)' }}>
-        <Field label={isCabinet ? t('profile.cabinetName') : t('profile.clinicName')} htmlFor="f-name">
+        <Field label={isCabinet ? t('profile.cabinetName') : isFacilitator ? t('profile.agencyName') : t('profile.clinicName')} htmlFor="f-name">
           <input id="f-name" className="control" value={value.name} onChange={(e) => set({ name: e.target.value })} />
         </Field>
         <Field label={t('profile.phone')} htmlFor="f-phone">
@@ -195,9 +231,20 @@ export function ProfileForm({ value, onChange }) {
         <input id="f-maps" className="control" inputMode="url" value={value.googleMapsUrl} onChange={(e) => set({ googleMapsUrl: e.target.value })} />
       </Field>
 
+      {isFacilitator ? (
+        <>
+          <Field label={t('profile.destinations')} hint={t('profile.destinationsHint')} htmlFor="f-dest">
+            <input id="f-dest" className="control" dir={dirOf(csvList(value.destinations))} value={csvList(value.destinations)} onChange={(e) => set({ destinations: parseList(e.target.value) })} placeholder="Sousse, Sfax, Tunis" />
+          </Field>
+          <Field label={t('profile.partners')} hint={t('profile.partnersHint')} htmlFor="f-part">
+            <textarea id="f-part" className="control" rows={3} value={value.partnersText} onChange={(e) => set({ partnersText: e.target.value })} placeholder={'Clinique El Amen — Sousse — dentaire, esthétique\nPolyclinique Ennour — Sfax — dentaire'} />
+          </Field>
+        </>
+      ) : null}
+
       <Field
-        label={isCabinet ? t('profile.specialtyCabinet') : t('profile.specialties')}
-        hint={isCabinet ? t('profile.specialtyCabinetHint') : t('profile.specialtiesHint')}
+        label={isCabinet ? t('profile.specialtyCabinet') : isFacilitator ? t('profile.proceduresCovered') : t('profile.specialties')}
+        hint={isCabinet ? t('profile.specialtyCabinetHint') : isFacilitator ? t('profile.proceduresCoveredHint') : t('profile.specialtiesHint')}
       >
         <div className="chips">
           {SPECIALTY_CATALOG.map((s) => (
