@@ -120,6 +120,7 @@ export function buildActivityDetection(vad = {}, log) {
  * @param {string} [p.systemInstruction]
  * @param {Array}  [p.tools]                functionDeclarations (see ./tools.js)
  * @param {number} [p.temperature]
+ * @param {string[]} [p.responseModalities] ['AUDIO'] (default) or ['TEXT'] — see below
  * @param {object} [p.vad]                  endpointing knobs (see buildActivityDetection)
  * @param {Function} [p.wsFactory]          (url) => WebSocket-like; tests inject
  * @param {Function} [p.now]
@@ -132,6 +133,7 @@ export function createLiveClient({
   systemInstruction = '',
   tools = [],
   temperature = 0.6,
+  responseModalities,
   vad,
   wsFactory,
   now,
@@ -238,21 +240,37 @@ export function createLiveClient({
     }
   }
 
+  /**
+   * AUDIO (the native voice, V2) or TEXT (V5-T1: an external TTS provider owns
+   * the mouth, see brain/tts/). This is part of `setup`, which is sent exactly
+   * once — a session CANNOT change modality later, and that immutability is why
+   * a mid-call TTS failure degrades the call instead of falling back to audio.
+   */
+  const modalities =
+    Array.isArray(responseModalities) && responseModalities.length
+      ? responseModalities.map((m) => String(m).toUpperCase())
+      : ['AUDIO'];
+  const textOnly = modalities.includes('TEXT') && !modalities.includes('AUDIO');
+
   function sendSetup() {
     const setup = {
       setup: {
         model: String(model || '').startsWith('models/') ? model : `models/${model}`,
-        generationConfig: { responseModalities: ['AUDIO'], temperature },
+        generationConfig: { responseModalities: modalities, temperature },
         // Server-side VAD. It is what makes barge-in work: the server tells us
         // `interrupted` the moment the caller speaks over the model. The block
         // is empty ⇒ server defaults; tuned ⇒ a caller who pauses is not cut off.
         realtimeInputConfig: { automaticActivityDetection: buildActivityDetection(vad, log) },
-        // BOTH transcriptions are required, not optional: the caller's side is
-        // what our deterministic emergency detector reads (the model is never
-        // allowed to make that call), and the agent's side is the transcript the
-        // clinic reads in the inbox afterwards.
+        // The INPUT transcription is required in BOTH modes and is never
+        // optional: it is what our deterministic emergency detector reads, and
+        // the model is never allowed to make that call.
         inputAudioTranscription: {},
-        outputAudioTranscription: {},
+        // The OUTPUT transcription only exists when there IS output audio. In
+        // TEXT mode the model's words arrive as text parts instead (the 'text'
+        // event below), and asking to transcribe audio that will never be
+        // generated is an unknown-shape setup — which the server answers by
+        // closing the socket, i.e. by degrading the whole call.
+        ...(textOnly ? {} : { outputAudioTranscription: {} }),
       },
     };
     if (systemInstruction) setup.setup.systemInstruction = { parts: [{ text: systemInstruction }] };
@@ -329,6 +347,12 @@ export function createLiveClient({
         if (sc.outputTranscription?.text) emit('outputTranscription', sc.outputTranscription.text);
         const parts = Array.isArray(sc.modelTurn?.parts) ? sc.modelTurn.parts : [];
         for (const part of parts) {
+          // TEXT modality (V5-T1): the model's words arrive as plain text parts
+          // and an external TTS provider says them. Emitted BEFORE the inline
+          // data check so a mixed frame keeps its order, and emitted in every
+          // mode — an AUDIO session simply never produces these parts, so this
+          // costs the native path nothing.
+          if (typeof part?.text === 'string' && part.text) emit('text', part.text);
           const inline = part?.inlineData;
           if (!inline?.data) continue;
           const mime = String(inline.mimeType || '');

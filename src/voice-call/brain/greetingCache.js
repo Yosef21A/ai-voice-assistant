@@ -28,6 +28,12 @@
 //      said `${tenantId}:${lang}`) and it is deliberate: a cache hit across
 //      codecs is a fax-machine call that is nearly impossible to diagnose from
 //      a log.
+//   4. VOICE (V5-T1) — the TTS provider and voice id, when a tenant has swapped
+//      the native Gemini mouth for Azure or ElevenLabs. Switch a clinic from
+//      Reem to Hedi in Settings and, without this, every caller would keep
+//      hearing Reem greet them and then Hedi answer them for the next 24 hours.
+//      It is an EMPTY STRING in native mode, so every pre-V5-T1 key is
+//      byte-identical and no existing tape is orphaned by this change.
 // Plus a `signature` (the exact greeting instruction the tape was recorded
 // from): rename a clinic and the old tape stops being served on the spot,
 // instead of greeting patients with a dead name for up to a day.
@@ -45,9 +51,16 @@ export const MAX_GREETING_FRAMES = 750;
 /** key → { frames, text, signature, sampleCount, cachedAt } */
 const cache = new Map();
 
-/** `tenant:lang:codec` — see the header for why the codec is in here. */
-export function greetingKey(tenantId, lang, codec) {
-  return `${tenantId ?? ''}:${lang ?? ''}:${codec ?? ''}`;
+/**
+ * `tenant:lang:codec`, plus `:voice` when a TTS provider owns the mouth — see
+ * the header for why each part is in here. The voice suffix is omitted entirely
+ * on the native path so the key a pre-V5-T1 deploy wrote is still the key we
+ * read today.
+ */
+export function greetingKey(tenantId, lang, codec, voice) {
+  const base = `${tenantId ?? ''}:${lang ?? ''}:${codec ?? ''}`;
+  const v = voice == null ? '' : String(voice);
+  return v ? `${base}:${v}` : base;
 }
 
 /**
@@ -59,12 +72,13 @@ export function greetingKey(tenantId, lang, codec) {
  * @param {string} p.tenantId
  * @param {string} p.lang
  * @param {string} p.codec        'opus' | 'pcma'
+ * @param {string} [p.voice]      '' on the native voice; 'azure:ar-TN-ReemNeural' etc.
  * @param {string} [p.signature]  the greeting instruction this call would send
  * @param {number} [p.at]         now, in ms (injectable for tests)
  * @returns {{frames:Buffer[], text:string, sampleCount:number, cachedAt:number}|null}
  */
-export function getGreeting({ tenantId, lang, codec, signature, at = Date.now() } = {}) {
-  const key = greetingKey(tenantId, lang, codec);
+export function getGreeting({ tenantId, lang, codec, voice = '', signature, at = Date.now() } = {}) {
+  const key = greetingKey(tenantId, lang, codec, voice);
   const entry = cache.get(key);
   if (!entry) return null;
   if (at - entry.cachedAt > STALE_MS) {
@@ -98,6 +112,7 @@ export function putGreeting({
   tenantId,
   lang,
   codec,
+  voice = '',
   frames,
   text,
   signature = null,
@@ -109,7 +124,7 @@ export function putGreeting({
   const said = String(text || '').trim();
   if (!list.length || list.length > MAX_GREETING_FRAMES || said.length < 5) return false;
 
-  const key = greetingKey(tenantId, lang, codec);
+  const key = greetingKey(tenantId, lang, codec, voice);
   cache.delete(key);
   cache.set(key, {
     frames: list.map((f) => Buffer.from(f)),

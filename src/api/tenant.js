@@ -5,10 +5,23 @@
 import express from 'express';
 import { asyncHandler } from './http.js';
 import { mergeTenantKb } from '../store/kbLive.js';
+// The SAME regexes the TTS providers enforce at call time. Imported rather than
+// re-typed: two copies of a whitelist drift, and the drift shows up as a clinic
+// that saved a voice name the dashboard accepted and the phone line refuses.
+import { AZURE_VOICE_RE } from '../voice-call/brain/tts/azure.js';
+import { ELEVEN_VOICE_ID_RE } from '../voice-call/brain/tts/elevenlabs.js';
 
 const LANGS = new Set(['ar', 'fr', 'en']);
 const TONES = new Set(['professional', 'warm']);
 const TENANT_TYPES = new Set(['clinic', 'cabinet', 'facilitator']);
+// V5-T1 voice tier: which mouth answers this tenant's calls. Kept in sync with
+// TTS_PROVIDERS in src/voice-call/brain/tts/index.js — the chain validates it a
+// second time at call time, because a clinics.json edited by hand never passes
+// through here at all.
+const VOICE_PROVIDERS = new Set(['gemini', 'azure', 'elevenlabs']);
+const VOICE_ID_FIELDS = ['voiceId', 'azureVoice', 'elevenVoiceId'];
+const VOICE_KEYS = new Set(['provider', ...VOICE_ID_FIELDS]);
+const MAX_VOICE_ID_CHARS = 80;
 
 // Redact any per-tenant secrets before returning config to the dashboard.
 function publicTenant(t) {
@@ -83,6 +96,41 @@ function validate(body) {
     // so anything non-string would literally read "Dr [object Object]".
     if (!isLabelString(dn) && !isLabelObject) {
       errs.push('doctorName must be a string or an {ar,fr,en} object of strings');
+    }
+  }
+  if (body.voice != null) {
+    const v = body.voice;
+    if (typeof v !== 'object' || Array.isArray(v)) {
+      errs.push('voice must be an object { provider, voiceId?, azureVoice?, elevenVoiceId? }');
+    } else {
+      // CLOSED set, not open: these values are interpolated into SSML and into
+      // a provider URL by src/voice-call/brain/tts/, so an unrecognized key is
+      // rejected rather than stored and quietly ignored.
+      const unknown = Object.keys(v).filter((k) => !VOICE_KEYS.has(k));
+      if (unknown.length) errs.push(`voice has unknown keys: ${unknown.join(', ')}`);
+      if (v.provider != null && !VOICE_PROVIDERS.has(v.provider)) {
+        errs.push(`voice.provider must be ${[...VOICE_PROVIDERS].join('|')}`);
+      }
+      for (const k of VOICE_ID_FIELDS) {
+        if (v[k] == null) continue;
+        if (typeof v[k] !== 'string' || v[k].length > MAX_VOICE_ID_CHARS) {
+          errs.push(`voice.${k} must be a string of at most ${MAX_VOICE_ID_CHARS} characters`);
+          continue;
+        }
+        // SHAPE, not just length. A name the provider will refuse would
+        // otherwise be accepted here and quietly downgrade a paying clinic to
+        // the language default (azure) or to the native voice (elevenlabs) —
+        // discovered on a live call, by a patient, never by us.
+        const val = v[k].trim();
+        if (!val) continue; // '' clears the field
+        const ok =
+          k === 'azureVoice'
+            ? AZURE_VOICE_RE.test(val)
+            : k === 'elevenVoiceId'
+              ? ELEVEN_VOICE_ID_RE.test(val)
+              : AZURE_VOICE_RE.test(val) || ELEVEN_VOICE_ID_RE.test(val); // generic voiceId: either
+        if (!ok) errs.push(`voice.${k} is not a valid voice identifier`);
+      }
     }
   }
   if (body.crm != null) {
@@ -200,6 +248,18 @@ export function tenantRouter({ store, requireRole }) {
           ...(r.enabled != null ? { enabled: !!r.enabled } : {}),
           ...(r.t48 != null ? { t48: !!r.t48 } : {}),
           ...(r.t3 != null ? { t3: !!r.t3 } : {}),
+        };
+      }
+      // V5-T1 voice tier — field by field, never a spread of the raw body, so a
+      // validated shape is the only thing that can ever reach the TTS chain.
+      if (body.voice && typeof body.voice === 'object' && !Array.isArray(body.voice)) {
+        const v = body.voice;
+        config.voice = {
+          ...(config.voice || {}),
+          ...(v.provider != null ? { provider: String(v.provider) } : {}),
+          ...(v.voiceId != null ? { voiceId: String(v.voiceId).trim() } : {}),
+          ...(v.azureVoice != null ? { azureVoice: String(v.azureVoice).trim() } : {}),
+          ...(v.elevenVoiceId != null ? { elevenVoiceId: String(v.elevenVoiceId).trim() } : {}),
         };
       }
       // V7 CRM sync: outbound webhook URL + signing secret.

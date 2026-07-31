@@ -189,6 +189,33 @@ export function getConfig(overrides = {}) {
     voiceVadSilenceMs: Number(process.env.VOICE_VAD_SILENCE_MS) || 1000,
     voiceVadEndSensitivity: process.env.VOICE_VAD_END_SENSITIVITY || 'END_SENSITIVITY_LOW',
     voiceVadPrefixPaddingMs: Number(process.env.VOICE_VAD_PREFIX_PADDING_MS) || 60,
+    // ── a better mouth (V5-T1) ─────────────────────────────────────────────
+    // WHICH voice speaks on a call. '' (the default) keeps Gemini Live's own
+    // native audio — free, and the only option that cannot be broken by a
+    // vendor outage or an unpaid invoice. 'azure' | 'elevenlabs' switch the
+    // Live session to TEXT and stream the words through a real TTS engine
+    // (src/voice-call/brain/tts/). This is the GLOBAL default; a tenant
+    // overrides it with `voice.provider` in Settings. A provider named without
+    // its credential logs one warning and falls back to the native voice —
+    // selling a voice upgrade must never be able to take a phone line down.
+    voiceTtsProvider: process.env.VOICE_TTS_PROVIDER || '',
+    // Azure Neural TTS: the only vendor with native ar-TN AND ar-LY voices,
+    // which is the whole reason it is the first rung of the ladder.
+    azureSpeechKey: process.env.AZURE_SPEECH_KEY || '',
+    azureSpeechRegion: process.env.AZURE_SPEECH_REGION || 'westeurope',
+    // ElevenLabs: the cloned-dialect voice (V5-T2). There is deliberately no
+    // default voice id — a clone belongs to a person who consented, so it is a
+    // per-tenant setting (`voice.elevenVoiceId`) or the provider is not used.
+    elevenlabsApiKey: process.env.ELEVENLABS_API_KEY || '',
+    // CROSS-CALL BREAKER on the TTS vendor, mirroring the brain breaker above.
+    // A vendor outage with VALID credentials would otherwise cost every single
+    // caller the same doomed sequence — open a TEXT session, greet, fail the
+    // first synthesis, hang up — for as long as it lasted, while the native
+    // Gemini voice sat there working. After two calls lost to the same
+    // provider we compose the native voice instead, and let ONE probe call
+    // through after the cooldown to find out whether the vendor came back.
+    voiceTtsBreakerThreshold: Number(process.env.VOICE_TTS_BREAKER_THRESHOLD) || 2,
+    voiceTtsBreakerCooldownMs: Number(process.env.VOICE_TTS_BREAKER_COOLDOWN_MS) || 300000,
     // ── ops (P2-F) ─────────────────────────────────────────────────────────
     // One JSON line per request (skips /health). On in production; opt-in
     // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.

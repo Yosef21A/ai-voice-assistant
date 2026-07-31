@@ -48,6 +48,15 @@ export function makeTestApp(overrides = {}, appOpts = {}) {
     // Google from a unit test. Brain tests opt in EXPLICITLY, with a fake.
     voiceCallMode: 'echo',
     geminiLiveModel: 'test-live-model',
+    // V5-T1: the SAME law again, for the mouth. A developer with real
+    // AZURE_SPEECH_KEY / ELEVENLABS_API_KEY values in .env (or a machine-global
+    // VOICE_TTS_PROVIDER) would otherwise flip a test app's brain loop onto TEXT
+    // modality and have it POST call audio to a vendor from a unit test. Native
+    // is the only voice a test app is ever allowed to have; the TTS suites build
+    // their chain explicitly, with an injected fetch.
+    voiceTtsProvider: '',
+    azureSpeechKey: '',
+    elevenlabsApiKey: '',
     ...overrides,
   });
   const bus = createBus();

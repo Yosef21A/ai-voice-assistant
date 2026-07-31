@@ -45,6 +45,12 @@
 import { createCallSession } from './session.js';
 import { createMediaSession } from './media.js';
 import { createBrainLoop } from './brain/loop.js';
+import {
+  noteTtsFailure,
+  noteTtsOk,
+  DEFAULT_TTS_BREAKER_THRESHOLD,
+  DEFAULT_TTS_BREAKER_COOLDOWN_MS,
+} from './brain/tts/breaker.js';
 import { isAfterHours, weekdayInTz } from '../stats/index.js';
 import { sendAs } from '../api/outbound.js';
 import { resolveLanguage } from '../engine/language.js';
@@ -226,6 +232,13 @@ export function createVoiceCallService({
     now: () => clock().getTime(),
   });
 
+  // The TTS breaker (V5-T1) is PROCESS-GLOBAL rather than per-service, because
+  // the fact it carries — "this vendor is down" — has to survive into the next
+  // call, and the chain is rebuilt per call inside the loop. This service owns
+  // the two transitions; brain/tts/index.js is the only consumer.
+  const ttsBreakerThreshold = Number(config.voiceTtsBreakerThreshold) || DEFAULT_TTS_BREAKER_THRESHOLD;
+  const ttsBreakerCooldownMs = Number(config.voiceTtsBreakerCooldownMs) || DEFAULT_TTS_BREAKER_COOLDOWN_MS;
+
   /** callId → { session, clinic, tenantId, conversationId, lang, media, timers } */
   const sessions = new Map();
   /** callId → endedAt(ms) — the anti-ghost ring (insertion-ordered). */
@@ -325,6 +338,14 @@ export function createVoiceCallService({
     const summary = session.summary();
     const brain = entry.loop ? entry.loop.outcome() : null;
     const transcript = entry.loop ? entry.loop.transcript() : null;
+    // THE OTHER HALF OF THE TTS BREAKER. A call that actually SPOKE through the
+    // provider is the only proof the vendor is healthy — a call that ended
+    // before the agent said a word proves nothing and must not close a breaker
+    // that a half-open probe just opened. The failure side is noted in
+    // onBrainEnd, on the spot; this is the success side, on the way out.
+    if (brain?.voice?.mode === 'tts' && brain.voice.spoke && brain.reason !== 'tts_lost') {
+      noteTtsOk(brain.voice.provider);
+    }
     // "Did the patient actually hear us?" is the question that decides both the
     // transcript line and the bus event — NOT the outcome string. A call that
     // connected and then failed mid-way is a call that happened; telling the
@@ -758,6 +779,31 @@ export function createVoiceCallService({
     // sent in writing — a "sorry, write to us here" on top of that would be
     // noise at best, and at worst reads as the clinic brushing them off.
     if (outcome?.emergency) return await hangUp(entry, 'emergency');
+    // 'tts_lost' (V5-T1) is a brain_lost with a different cause: the Live
+    // session is alive and thinking, but the TTS provider that was giving it a
+    // voice failed, and the session's modality cannot be changed mid-call (see
+    // brain/tts/index.js). A caller cannot tell the two apart — both are an
+    // agent that stopped talking — so they get the SAME degrade: hang up and
+    // put it in writing, which hands the patient to the chat engine.
+    if (outcome?.reason === 'tts_lost') {
+      // NOTED HERE, not at finish(): the next caller may compose their chain
+      // before this call has finished closing its books, and the entire point
+      // of the breaker is that they do not repeat this call's mistake.
+      const provider = outcome?.voice?.provider || 'unknown';
+      const b = noteTtsFailure(provider, { threshold: ttsBreakerThreshold, at: clock().getTime() });
+      if (b.justOpened) {
+        console.warn(
+          `[voice-call] TTS BREAKER OPEN — ${provider} lost ${b.failures} consecutive calls their voice. ` +
+            `Falling back to the native Gemini voice for ${ttsBreakerCooldownMs}ms.`
+        );
+        alerts?.fire?.(
+          entry.tenantId,
+          'voice_tts_breaker_open',
+          `${provider} TTS failed ${b.failures} calls in a row — voice calls fall back to the native voice`
+        );
+      }
+      return await degradeBrain(entry);
+    }
     if (outcome?.reason === 'brain_lost') return await degradeBrain(entry);
     await hangUp(entry, outcome?.reason || 'brain_ended');
   }

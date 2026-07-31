@@ -66,9 +66,46 @@
 //     latency, barge-in count/flush cost, slow tools. All of it rides out on
 //     outcome().latency so the founder can see the number instead of guessing.
 //
+// ── V5-T1: A BETTER MOUTH (per-tenant TTS) ─────────────────────────────────
+// Gemini keeps the ears and the brain. The VOICE is now swappable per tenant
+// (./tts/), and this loop runs one of exactly two shapes:
+//
+//   mode 'native' — today's stack, byte for byte. The Live session is opened
+//     with responseModalities ['AUDIO'], it emits 'audio', and every line above
+//     applies unchanged. Nothing in this mode may change, ever, because it is
+//     what answers the phone when a vendor is down or unpaid.
+//   mode 'tts'    — the Live session is opened with ['TEXT']. The model's words
+//     arrive as 'text' events; they are buffered into SENTENCES (a phone call
+//     wants speech to start on the first clause, not at the end of a paragraph)
+//     and each sentence is streamed through the provider, chunk by chunk, into
+//     the SAME codec.encodeOut → outQueue → pacer path the native audio uses.
+//     Frames are frames: the tape, the barge-in flush and the latency marks all
+//     work untouched.
+//
+// THREE THINGS IN 'tts' MODE THAT ARE NOT OBVIOUS:
+//  a) BARGE-IN HAS TO REACH THE HTTP REQUEST. Dropping the queued frames is not
+//     enough when a sentence is still being synthesized — the abandoned request
+//     would keep pushing audio in behind the caller's interruption. So every
+//     utterance carries an AbortController AND a generation number: the
+//     controller kills the socket, the generation number makes every in-flight
+//     continuation a no-op even if the abort loses the race.
+//  b) THE END OF A TURN IS NOT THE END OF THE SPEECH. `turnComplete` arrives
+//     when the MODEL finished writing, which is before we finished saying it.
+//     Committing the greeting tape there would cache an empty tape, so the
+//     commit is queued BEHIND the sentences instead of run beside them.
+//  c) THERE IS NO FALLING BACK TO NATIVE MID-CALL. `responseModalities` lives
+//     in the Live `setup` frame, which is sent once and is immutable — a TEXT
+//     session will never produce audio no matter what we ask it. So a provider
+//     that dies mid-call is treated like a brain that died: stop talking, end
+//     the call with reason 'tts_lost', and let src/voice-call/index.js send the
+//     same written follow-up it sends for 'brain_lost' so the chat engine picks
+//     the patient up. Rebuilding the Live session in AUDIO mode mid-conversation
+//     is a real future option and a bigger slice than this one. See ./tts/index.js.
+//
 // Nothing here throws into the RTP path or into a WebSocket handler.
 import { createCodecBridge } from './codec.js';
 import { createLiveClient } from './liveClient.js';
+import { createTtsChain } from './tts/index.js';
 import { buildVoiceSystemPrompt } from './prompts.js';
 import { buildToolDeclarations, createToolExecutor, formatWhenSpoken } from './tools.js';
 import { getGreeting, putGreeting, MAX_GREETING_FRAMES } from './greetingCache.js';
@@ -107,6 +144,38 @@ const ACTIVE_APPT_STATUS = new Set(['pending', 'confirmed']);
 /** A name is caller-supplied data heading into a prompt. Keep it short and inert. */
 const MAX_NAME_CHARS = 60;
 const MAX_NAME_WORDS = 4;
+
+// ── V5-T1 tuning (TTS mode only) ───────────────────────────────────────────
+/**
+ * What ends a spoken sentence. `؟` is the Arabic question mark and `।` the
+ * danda — models reach for both when writing Arabic, and neither is in the
+ * Latin set. A newline counts: models use them as hard breaks.
+ */
+const SENTENCE_END = new Set(['.', '!', '?', '؟', '।', '…', '\n']);
+/**
+ * Below this, a "sentence" is an abbreviation or an initial, not a clause.
+ * Synthesizing "د." on its own would cost a whole HTTP round trip to say
+ * nothing, and would chop the sentence it belongs to in half.
+ */
+const MIN_SENTENCE_CHARS = 12;
+/**
+ * A run-on with no terminator in sight gets spoken anyway at this length. A
+ * model that forgets its punctuation must not translate into dead air.
+ */
+const MAX_SENTENCE_CHARS = 240;
+/**
+ * Something has to be SAID for an utterance to be worth an HTTP request. A
+ * piece of pure punctuation is not: it costs a round trip to say nothing, and —
+ * proven in review — a provider error on that nothing would end the call.
+ */
+const SPEAKABLE_RE = /[\p{L}\p{N}]/u;
+const LETTER_RE = /\p{L}/u;
+/**
+ * Words whose full stop does not end a sentence. Single LETTERS are handled
+ * separately (any initial: "M.", "د.", the two dots of "a.m."), so this list is
+ * only for the multi-letter ones.
+ */
+const ABBREVIATIONS = new Set(['dr', 'mr', 'mrs', 'ms', 'mme', 'mlle', 'prof', 'st', 'ste', 'no', 'vs', 'etc']);
 /**
  * What a NAME is allowed to look like: letters (any script, so Arabic and its
  * combining marks qualify) joined by an apostrophe or a hyphen. Nothing else —
@@ -176,6 +245,8 @@ export function sanitizeSpokenName(value) {
  * @param {string} [p.patientWaId]
  * @param {string} [p.sdpOffer]     Meta's offer (codec fallback)
  * @param {Function} [p.liveFactory] default createLiveClient — tests inject
+ * @param {object} [p.ttsChain]     default createTtsChain(config, clinic) — tests inject
+ * @param {Function} [p.fetchImpl]  handed to the TTS chain; tests inject
  * @param {Function} [p.now]
  * @param {Function} [p.logger]
  * @param {Function} [p.onEnd]      called ONCE with the outcome when the loop stops
@@ -192,6 +263,8 @@ export function createBrainLoop({
   patientWaId: waIdOverride,
   sdpOffer,
   liveFactory,
+  ttsChain: injectedTtsChain,
+  fetchImpl,
   now,
   logger,
   onEnd,
@@ -211,6 +284,25 @@ export function createBrainLoop({
   // VOICE_GREETING_CACHE=off kills the tape instantly (config.js maps the env).
   // An explicit `false` disables it; anything else, including absent, leaves it on.
   const greetingCacheOn = config.voiceGreetingCache !== false;
+
+  /**
+   * THE MOUTH (V5-T1). Built once, up front, and never allowed to throw: a
+   * broken voice setting must degrade to the native voice, not to a call that
+   * never connects. See ./tts/index.js for the selection rule.
+   */
+  function buildTtsChain() {
+    try {
+      return createTtsChain({ config, clinic, logger: log, fetchImpl });
+    } catch (err) {
+      log('[voice-brain] TTS chain construction failed:', err?.message || err);
+      return { mode: 'native', provider: 'gemini', voice: null, synthesize: null };
+    }
+  }
+
+  const ttsChain = injectedTtsChain || buildTtsChain();
+  const ttsMode = ttsChain?.mode === 'tts' && typeof ttsChain.synthesize === 'function';
+  /** The tape key discriminator — '' in native mode (see greetingCache.js). */
+  const voiceKey = ttsMode && typeof ttsChain.cacheKey === 'function' ? ttsChain.cacheKey() : '';
 
   /**
    * Per-call mutable state. `toolBatchId`, `lastCallerSpeechAt` and
@@ -287,6 +379,25 @@ export function createBrainLoop({
   let nudged = false;
   // Tools.
   let slowestToolMs = 0;
+
+  // ── V5-T1 state (TTS mode only; all inert on the native path) ────────────
+  /** Model text not yet long enough to be a sentence worth speaking. */
+  let sentenceBuf = '';
+  /** Utterances are spoken strictly in order — this is the queue. */
+  let speakChain = Promise.resolve();
+  /**
+   * Bumped on every barge-in / emergency override. Every queued and in-flight
+   * utterance carries the generation it was created under and becomes a no-op
+   * the moment it no longer matches. The AbortController kills the HTTP request;
+   * THIS is what guarantees not one stale frame reaches the queue even if the
+   * abort loses the race.
+   */
+  let speakGen = 0;
+  /** The in-flight synthesis, so a barge-in can reach the socket itself. */
+  let synthAbort = null;
+  /** Set once, on the first provider failure. The call ends after it. */
+  let ttsFailed = false;
+  let sentencesSpoken = 0;
 
   function track(p) {
     const q = Promise.resolve(p).catch((err) => log('[voice-brain] background task failed:', err?.message || err));
@@ -416,6 +527,11 @@ export function createBrainLoop({
     codec?.resetOut();
     // A flush cancels the turn we were about to be measured on.
     markTurnFrame = false;
+    // In TTS mode the frames we were about to say may not exist yet — they are
+    // still coming down an HTTP stream. Dropping the queue without killing that
+    // stream would let the interrupted sentence resume playing a second later,
+    // which is worse than not having barge-in at all.
+    cancelSpeech();
     noteBargeIn(reason, dropped, Date.now() - t0);
   }
 
@@ -453,6 +569,282 @@ export function createBrainLoop({
     );
   }
 
+  /**
+   * PCM16 @24 kHz from whichever mouth is fitted → paced 20 ms wire frames.
+   *
+   * The ONE place brain audio becomes RTP, shared by the native 'audio' handler
+   * and the TTS synthesis path so the tape, the latency mark and the pacer
+   * cannot drift apart between the two modes. Never throws.
+   */
+  function emitPcm(pcm24) {
+    try {
+      const queueWasEmpty = outQueue.length === 0;
+      const frames = codec.encodeOut(pcm24);
+      if (!frames.length) return;
+      // The first audio of the turn that ANSWERS the caller. Marked here,
+      // measured in tick() when the frame actually leaves.
+      //
+      // ONLY when the queue was empty. If we were still speaking, the first
+      // frame out is the tail of the PREVIOUS sentence, and timing to it would
+      // report a latency the caller never experienced — a flattering metric is
+      // worse than no metric, because it is the number this tier is judged on.
+      if (awaitingReply && !markTurnFrame && queueWasEmpty) markTurnFrame = true;
+      if (tee.active) tee.samples += pcm24.length || 0;
+      for (const payload of frames) {
+        outQueue.push(payload);
+        teePush(payload);
+      }
+      ensurePacing();
+    } catch (err) {
+      log('[voice-brain] outbound encode failed:', err?.message || err);
+    }
+  }
+
+  // ── the swappable mouth (V5-T1) ────────────────────────────────────────────
+
+  /**
+   * Stop saying whatever we were saying, at every layer: the buffered text, the
+   * queued utterances (via the generation number) and the HTTP request itself.
+   * A no-op in native mode, where the server owns generation and tells us it was
+   * `interrupted`.
+   */
+  function cancelSpeech() {
+    if (!ttsMode) return;
+    speakGen += 1;
+    sentenceBuf = '';
+    const ac = synthAbort;
+    synthAbort = null;
+    try {
+      ac?.abort(new Error('barge-in'));
+    } catch {
+      /* an already-settled controller is fine */
+    }
+  }
+
+  /**
+   * Put one unit of speech work on the ordered queue. Sentences must reach the
+   * wire in the order the model wrote them — one shared promise chain is the
+   * whole mechanism, and it also serializes the deferred end-of-turn commit.
+   */
+  function enqueueSpeak(fn) {
+    const gen = speakGen;
+    speakChain = speakChain
+      .then(async () => {
+        if (stopped || gen !== speakGen) return;
+        await fn(gen);
+      })
+      // The chain must never stay rejected: everything queued behind a failed
+      // utterance would be skipped, including the end-of-turn commit.
+      .catch((err) => log('[voice-brain] speech queue error:', err?.message || err));
+    // Tracked so loop.settled() — which the service awaits before reading the
+    // outcome — waits for the mouth as well as for the tool calls.
+    track(speakChain);
+    return speakChain;
+  }
+
+  /**
+   * Synthesize ONE sentence and stream it onto the wire.
+   * @param {string} text
+   * @param {number} gen  the generation this utterance belongs to
+   * @param {object} [opts] { emergency } — the one utterance nothing may cancel
+   */
+  async function speakSentence(text, gen, { emergency = false } = {}) {
+    const said = ttsChain.normalizeSpoken
+      ? ttsChain.normalizeSpoken(text, L)
+      : String(text || '').trim();
+    // BELT AND BRACES on takeSentences' rule 4. Punctuation-only text is not an
+    // utterance, and turning it into an HTTP request means a provider error on
+    // a piece of nothing could end a call that was going perfectly well.
+    if (!said || !SPEAKABLE_RE.test(said)) return;
+    /** True once this utterance has been overtaken by a barge-in or a hang-up. */
+    const cancelled = () => stopped || (!emergency && gen !== speakGen);
+    if (cancelled()) return;
+
+    const ac = new AbortController();
+    if (!emergency) synthAbort = ac;
+    try {
+      for await (const chunk of ttsChain.synthesize(said, { lang: L, signal: ac.signal })) {
+        if (cancelled()) return;
+        if (chunk && chunk.length) emitPcm(chunk);
+      }
+      sentencesSpoken += 1;
+    } catch (err) {
+      // OUR OWN abort is not a provider failure. Ending the call because the
+      // caller interrupted us would be the most expensive bug in this file.
+      if (cancelled()) return;
+      onTtsFailure(err);
+    } finally {
+      if (synthAbort === ac) synthAbort = null;
+    }
+  }
+
+  /**
+   * The provider failed and there is no audio to be had from this session (see
+   * the file header: modality is fixed at setup). Stop talking and end the call
+   * so the service sends the written follow-up and the chat engine takes over.
+   * Once per call — a second failure has nothing left to report.
+   */
+  function onTtsFailure(err) {
+    if (ttsFailed) return;
+    ttsFailed = true;
+    ttsChain.markDegraded?.();
+    sentenceBuf = '';
+    speakGen += 1;
+    log(
+      `[voice-brain] TTS provider ${ttsChain.provider} failed mid-call (${err?.message || err}) — ` +
+        `this session cannot produce audio, degrading to the WhatsApp follow-up`
+    );
+    if (!stopped) stop('tts_lost');
+  }
+
+  /**
+   * A '.' between two digits is a DECIMAL, not a full stop. Proven in review:
+   * "الفحص يبدا من 1.500 دينار للكشف." was split into "…من 1." and "500 دينار
+   * للكشف." — the caller heard a WRONG PRICE, in two pieces, from a medical
+   * clinic. Same shape for "14.30" and "9.30".
+   */
+  function isDecimalDot(buf, i) {
+    if (buf[i] !== '.') return false;
+    return /\d/.test(buf[i - 1] || '') && /\d/.test(buf[i + 1] || '');
+  }
+
+  /**
+   * "Dr. Amine" and "a.m." are one utterance, not two. Walk back over the
+   * letters immediately before the dot: a SINGLE letter is an initial (M., د.,
+   * and both dots of a.m.), and a known abbreviation is not a sentence end.
+   */
+  function isAbbreviationDot(buf, i) {
+    if (buf[i] !== '.') return false;
+    let k = i - 1;
+    let word = '';
+    while (k >= 0 && LETTER_RE.test(buf[k])) {
+      word = buf[k] + word;
+      k -= 1;
+    }
+    if (!word) return false;
+    if (word.length === 1) return true;
+    return ABBREVIATIONS.has(word.toLowerCase());
+  }
+
+  /** Runs of terminators ("...", "?!") are ONE terminator; returns its last index. */
+  function terminatorRunEnd(buf, i) {
+    let j = i;
+    while (j + 1 < buf.length && SENTENCE_END.has(buf[j + 1])) j += 1;
+    return j;
+  }
+
+  /**
+   * Cut the model's text stream into things worth saying.
+   *
+   * Speech has to start on the first CLAUSE, not at the end of the reply: a
+   * provider round trip is ~200-400 ms and waiting for the whole paragraph
+   * stacks that on top of the model's own generation time.
+   *
+   * FOUR RULES, every one of them paid for by a real broken utterance:
+   *   1. A terminator only counts when WHITESPACE follows it (or the terminator
+   *      itself is a newline). "1.500" and "www.x" are not two sentences.
+   *   2. A terminator at the very END of the buffer WAITS. Mid-stream we cannot
+   *      yet tell "1." from "1.500", or "Dr." from "Dr. Amine" — the next
+   *      fragment decides, and the end-of-turn flush is the backstop. The cost
+   *      is one text fragment of latency; the alternative is a wrong price.
+   *   3. Decimals and abbreviations are never terminators (above).
+   *   4. A piece with no letter or digit in it is never an utterance: it is
+   *      glued onto whatever follows instead of becoming an HTTP request.
+   * Plus the originals: shorter than MIN_SENTENCE_CHARS glues forward, and a
+   * run-on past MAX_SENTENCE_CHARS is spoken anyway rather than held.
+   *
+   * @returns {string[]} complete utterances, in order
+   */
+  function takeSentences() {
+    const out = [];
+    for (;;) {
+      let cut = -1;
+      for (let i = 0; i < sentenceBuf.length; i += 1) {
+        if (!SENTENCE_END.has(sentenceBuf[i])) continue;
+        if (isDecimalDot(sentenceBuf, i)) continue;
+        if (isAbbreviationDot(sentenceBuf, i)) continue;
+        const end = terminatorRunEnd(sentenceBuf, i);
+        const after = sentenceBuf[end + 1];
+        // Rule 2: nothing after it yet ⇒ we cannot know. Wait.
+        if (after === undefined) break;
+        // Rule 1: a newline IS the break; anything else needs whitespace after.
+        const hardBreak = /\s/.test(sentenceBuf.slice(i, end + 1));
+        if (!hardBreak && !/\s/.test(after)) {
+          i = end; // skip the whole run, not just its first char
+          continue;
+        }
+        const piece = sentenceBuf.slice(0, end + 1);
+        if (piece.trim().length < MIN_SENTENCE_CHARS) {
+          i = end;
+          continue;
+        }
+        // Rule 4: nothing to say ⇒ glue it forward.
+        if (!SPEAKABLE_RE.test(piece)) {
+          i = end;
+          continue;
+        }
+        cut = end + 1;
+        break;
+      }
+      if (cut < 0) {
+        if (sentenceBuf.length < MAX_SENTENCE_CHARS) break;
+        // No terminator and too long to keep waiting: break at the last space
+        // so we do not cut a word in half, and take the lot if there is none.
+        const space = sentenceBuf.lastIndexOf(' ', MAX_SENTENCE_CHARS);
+        cut = space > MIN_SENTENCE_CHARS ? space + 1 : MAX_SENTENCE_CHARS;
+      }
+      const piece = sentenceBuf.slice(0, cut);
+      sentenceBuf = sentenceBuf.slice(cut);
+      // The scan above already guarantees a speakable piece. The forced
+      // MAX_SENTENCE_CHARS cut does not, and re-buffering it there would spin
+      // forever — 240 characters of pure punctuation is a broken model, not an
+      // utterance, so it is dropped.
+      if (SPEAKABLE_RE.test(piece)) out.push(piece);
+    }
+    return out;
+  }
+
+  /** A fragment of model text arrived (TEXT modality). */
+  function feedSpokenText(text) {
+    if (!ttsMode || ttsFailed) return;
+    // Once the emergency script owns the mouth, the model's own words are dead
+    // weight at best: our detector already decided what the caller must hear.
+    if (callState.emergency) return;
+    sentenceBuf += String(text || '');
+    for (const sentence of takeSentences()) {
+      enqueueSpeak((gen) => speakSentence(sentence, gen));
+    }
+  }
+
+  /** End of a model turn: say the tail, THEN close the books on the turn. */
+  function flushSpokenTail() {
+    if (!ttsMode || ttsFailed || callState.emergency) return;
+    const rest = sentenceBuf;
+    sentenceBuf = '';
+    // At the end of a turn there is no neighbour left to glue a letterless
+    // remainder onto, so it is simply not said.
+    if (SPEAKABLE_RE.test(rest)) enqueueSpeak((gen) => speakSentence(rest, gen));
+  }
+
+  /**
+   * `turnComplete`/`generationComplete` mean the MODEL stopped writing, which in
+   * TTS mode is well before we stopped talking. Commit the greeting tape and
+   * reset the turn monitor only once the queued speech has actually gone out,
+   * or the tape gets cached empty and every later caller hears nothing.
+   */
+  function endOfModelTurn() {
+    if (!ttsMode) {
+      commitTee();
+      endAgentTurn();
+      return;
+    }
+    flushSpokenTail();
+    enqueueSpeak(() => {
+      commitTee();
+      endAgentTurn();
+    });
+  }
+
   // ── the greeting on tape (V5-T0.1) ─────────────────────────────────────────
   function teePush(payload) {
     if (!tee.active) return;
@@ -482,6 +874,7 @@ export function createBrainLoop({
       tenantId,
       lang: L,
       codec: codec?.codec,
+      voice: voiceKey,
       frames,
       text: greetingText,
       signature: greetingInstruction(null),
@@ -490,7 +883,7 @@ export function createBrainLoop({
     });
     if (stored) {
       log(
-        `[voice-brain] greeting cached for ${tenantId}:${L}:${codec?.codec} — ` +
+        `[voice-brain] greeting cached for ${tenantId}:${L}:${codec?.codec}${voiceKey ? `:${voiceKey}` : ''} — ` +
           `${frames.length} frames (${frames.length * FRAME_MS}ms)`
       );
     }
@@ -584,11 +977,30 @@ export function createBrainLoop({
     //    flush of the call: from here `interrupted` is ignored and the uplink is
     //    muted, so nothing can cut the script short.
     abortTee(); // an emergency turn is never anybody's cached greeting
-    flushOutbound('emergency');
+    flushOutbound('emergency'); // also bumps the speech generation (cancelSpeech)
     try {
-      live?.sendText(
-        `[SYSTEM] EMERGENCY OVERRIDE — this is not from the caller. Say the following out loud now, in full, exactly as written, then STOP TALKING and add nothing at all: ${spoken}`
-      );
+      if (ttsMode) {
+        // WE say it, not the model. In TTS mode we already own the mouth, so
+        // the script goes straight down the provider — it is speakable text by
+        // construction (speakableNumber, notifications/pipeline.js) and this
+        // removes the last place where a model could paraphrase an ambulance
+        // number. Flagged `emergency` so no later barge-in can cancel it.
+        enqueueSpeak((gen) => speakSentence(spoken, gen, { emergency: true }));
+        // In native mode the server's outputTranscription puts the script on the
+        // record. Here there is no such stream, and the ONE thing the clinic
+        // must be able to prove it said is exactly this.
+        appendTranscript('agent', spoken);
+        // The model still needs to know, or it answers on top of us. CONTEXT
+        // only (turnComplete false) so it does not take a turn to acknowledge.
+        live?.sendText(
+          `[SYSTEM] EMERGENCY OVERRIDE — this is not from the caller. The following has ALREADY been spoken out loud to the caller in your voice: ${spoken} Do not repeat it, do not add anything, and stay silent.`,
+          { turnComplete: false }
+        );
+      } else {
+        live?.sendText(
+          `[SYSTEM] EMERGENCY OVERRIDE — this is not from the caller. Say the following out loud now, in full, exactly as written, then STOP TALKING and add nothing at all: ${spoken}`
+        );
+      }
     } catch (err) {
       log('[voice-brain] emergency script dispatch failed:', err?.message || err);
     }
@@ -713,28 +1125,29 @@ export function createBrainLoop({
     live.on('audio', (pcm24) => {
       if (stopped) return;
       onAgentTurn();
-      try {
-        const queueWasEmpty = outQueue.length === 0;
-        const frames = codec.encodeOut(pcm24);
-        if (!frames.length) return;
-        // The first audio of the turn that ANSWERS the caller. Marked here,
-        // measured in tick() when the frame actually leaves.
-        //
-        // ONLY when the queue was empty. If we were still speaking, the first
-        // frame out is the tail of the PREVIOUS sentence, and timing to it would
-        // report a latency the caller never experienced — a flattering metric is
-        // worse than no metric, because it is the number this tier is judged on.
-        if (awaitingReply && !markTurnFrame && queueWasEmpty) markTurnFrame = true;
-        if (tee.active) tee.samples += pcm24.length || 0;
-        for (const payload of frames) {
-          outQueue.push(payload);
-          teePush(payload);
-        }
-        ensurePacing();
-      } catch (err) {
-        log('[voice-brain] outbound encode failed:', err?.message || err);
-      }
+      emitPcm(pcm24);
     });
+    // TEXT modality (V5-T1). Registered ONLY when a TTS provider is fitted: in
+    // native mode the model never emits text parts, and a handler that appended
+    // them to the transcript beside outputTranscription would double every line
+    // if it ever did.
+    if (ttsMode) {
+      live.on('text', (text) => {
+        if (stopped) return;
+        onAgentTurn();
+        // ONCE THE EMERGENCY SCRIPT OWNS THE MOUTH, the model's words are not
+        // spoken — so they must not land in the transcript as if they were. The
+        // clinic reads that transcript to find out what the caller was told;
+        // a line nobody ever heard is worse than no line. Same gate as
+        // feedSpokenText, one step earlier.
+        if (callState.emergency) return;
+        // In TEXT mode this IS the agent transcript — there is no output audio
+        // for the server to transcribe (see liveClient.js setup).
+        appendTranscript('agent', text);
+        noteAgentSpeech(text);
+        feedSpokenText(text);
+      });
+    }
     live.on('interrupted', () => {
       if (stopped) return;
       // THE ONE EXCEPTION. After the emergency script is dictated we keep
@@ -759,13 +1172,11 @@ export function createBrainLoop({
     live.on('turnComplete', () => {
       onAgentTurn();
       if (stopped) return;
-      commitTee();
-      endAgentTurn();
+      endOfModelTurn();
     });
     live.on('generationComplete', () => {
       if (stopped) return;
-      commitTee();
-      endAgentTurn();
+      endOfModelTurn();
     });
     live.on('toolCall', (calls) => {
       if (stopped) return;
@@ -902,6 +1313,7 @@ export function createBrainLoop({
       tenantId,
       lang: L,
       codec: codec.codec,
+      voice: voiceKey,
       signature: greetingInstruction(null),
       at: Date.now(),
     });
@@ -964,6 +1376,11 @@ export function createBrainLoop({
           nowStr: nowString(toDate(clock())),
         }),
         tools: buildToolDeclarations({ clinic }),
+        // THE MOUTH (V5-T1). AUDIO ⇒ the Live session speaks for itself, exactly
+        // as it has since V2. TEXT ⇒ it writes and ./tts/ speaks. This is part
+        // of `setup`, so it is decided HERE, once, for the whole call — there is
+        // no changing it later (see the file header on 'tts_lost').
+        ...(ttsMode ? { responseModalities: ['TEXT'] } : {}),
         // ENDPOINTING (V5-T0.4). Callers pause mid-sentence — especially older
         // ones, and especially in Derja. The server's default end-of-speech
         // sensitivity clips them; these push it out. Shape and field names must
@@ -1115,6 +1532,10 @@ export function createBrainLoop({
         nudged,
         slowestToolMs,
         latency: latencySummary(),
+        // ── V5-T1 ──
+        voice: voiceSummary(),
+        sentenceBuf: sentenceBuf.length,
+        sentencesSpoken,
       };
     },
   };
@@ -1132,6 +1553,26 @@ export function createBrainLoop({
     };
   }
 
+  /**
+   * Which mouth answered this call. Rides on `call.ended` → `body.call.brain`
+   * automatically, which is what turns "the voice tier costs money" into a
+   * per-call number the founder can actually see.
+   */
+  function voiceSummary() {
+    const d = typeof ttsChain?.describe === 'function' ? ttsChain.describe() : null;
+    return {
+      mode: d?.mode ?? (ttsMode ? 'tts' : 'native'),
+      provider: d?.provider ?? ttsChain?.provider ?? 'gemini',
+      voice: d?.voice ?? ttsChain?.voice ?? null,
+      degradedMidCall: !!(ttsFailed || d?.degraded),
+      // Did this provider actually put a sentence on the wire? That is the
+      // evidence the cross-call breaker closes on (src/voice-call/index.js):
+      // a call that ended before the agent said anything proves nothing about
+      // whether the vendor is back.
+      spoke: sentencesSpoken > 0,
+    };
+  }
+
   /** The single record every consumer reads: transcript row, bus, ops. */
   function buildOutcome() {
     return {
@@ -1145,6 +1586,7 @@ export function createBrainLoop({
       codec: codec ? codec.codec : null,
       bargeIns,
       latency: latencySummary(),
+      voice: voiceSummary(),
     };
   }
 
@@ -1164,6 +1606,10 @@ export function createBrainLoop({
     }
     outQueue = [];
     abortTee(); // a call that ended mid-greeting has nothing worth taping
+    // A synthesis request outliving the call is a socket nobody will ever read
+    // and audio nobody will ever hear. `stopped` already makes every queued
+    // utterance a no-op; this closes the one that is already in flight.
+    cancelSpeech();
     try {
       live?.close();
     } catch {
@@ -1178,9 +1624,11 @@ export function createBrainLoop({
     // ONE line per call, and it is the line the founder reads after a live test.
     if (started) {
       const l = oc.latency;
+      const v = oc.voice;
       log(
         `[voice-brain] turn latency median=${l.medianMs ?? 'n/a'}ms p95=${l.p95Ms ?? 'n/a'}ms ` +
-          `turns=${l.turns} barge-ins=${bargeIns} greeting=${greetingMs ?? 'n/a'}ms (${greetingSource || 'none'})`
+          `turns=${l.turns} barge-ins=${bargeIns} greeting=${greetingMs ?? 'n/a'}ms (${greetingSource || 'none'}) ` +
+          `voice=${v.provider}${v.voice ? `/${v.voice}` : ''}${v.degradedMidCall ? ' DEGRADED' : ''}`
       );
     }
     if (typeof onEnd === 'function') {
