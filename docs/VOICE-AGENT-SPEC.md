@@ -128,3 +128,25 @@ Keep Gemini ears+brain; stream sentence-level TTS via Azure `ar-TN`/`ar-LY` neur
 
 ### Acceptance for "human" (test with real Tunisian/Libyan listeners)
 Blind test: 5 native listeners hear a 60s booking call; ≥3/5 unsure or wrong about "human or AI" = pass at T2. Also: zero dead-air >1.2s uncovered by filler; zero mid-word caller clips in a 10-call sample; booking correctness unchanged (executor law).
+
+## V6 — LIVE-CALL FIELD FIXES (founder test verdict 2026-08-01: "slow, unnatural, fails in noise" — this is the active work order, before/alongside V5 tiers)
+Founder called the live agent. Verdict: (a) response latency "takes years", (b) doesn't feel natural, (c) breaks with room noise / multiple speakers. Requirements: sub-1.2s felt latency, graceful noise behavior, single-caller focus like a human receptionist.
+
+### V6.1 — LATENCY FORENSICS FIRST (measure before touching anything)
+Instrument every hop with timestamps logged per turn: caller-speech-end (VAD) → endpoint decision → Live API audio-in flush → first model token/audio-out → TTS/RTP first packet → caller hears. Produce a waterfall for 10 real turns. THEN fix the biggest bars, expected culprits in order:
+1. **Endpointing too patient/too chunky** — if we wait for long silence before flushing, we add 800ms+ before the brain even starts. Stream audio continuously to Gemini Live (it does its own VAD) instead of buffering utterances, if not already; tune end-of-speech to ~600–800ms with barge-in as the safety valve.
+2. **No streamed playback** — ensure model audio streams to RTP as it generates (chunked), never waiting for full response.
+3. **Greeting + fillers** (V5-T0): cached instant greeting; spoken micro-filler when a tool/executor call will exceed ~700ms ("ثانية برك…"). Perceived latency is the metric — a filled 1.5s feels instant, a silent 900ms feels broken.
+4. **Prompt weight** — trim the system prompt/KB context for voice (top-k only); long contexts add first-token latency on free-tier Live.
+5. **Free-tier reality check:** log Gemini Live's own turn latency in isolation. If the model floor itself is >1.5s on free tier, escalate recommendation to founder: paid Live tier or T1/T2 pipeline (Azure/ElevenLabs streaming TTS keeps mouth fast even when brain is slow, because fillers + first-sentence streaming mask it).
+
+### V6.2 — NOISE & MULTI-SPEAKER BEHAVIOR (act human, not perfect)
+A human receptionist doesn't transcribe a crowd — she focuses the caller and asks again when unsure. Encode exactly that:
+1. **Noise suppression pre-brain:** RNNoise (WASM build, zero native deps) on inbound PCM before the Live API; measure CPU cost; feature-flag it.
+2. **Prompt-level focus policy:** "Multiple voices/background speech: address ONLY the primary caller (loudest/most consistent voice, the one conversing with you). NEVER answer background conversations. If overlap makes the request unclear, say so warmly and ask the caller to repeat — in their dialect ('سامحني، فما حس برشة — تنجم تعاود آخر حاجة؟')."
+3. **Confidence gates on slots:** in noisy turns, the existing confirm-before-lock gate becomes MANDATORY for every slot (name/date/phone spelled back digit-by-digit).
+4. **Two-strike noise rule:** twice unclear in a row → offer choices: continue on chat ("نبعثلك رسالة هنا ونكملو كتابة؟" — the killer degrade path already built), DTMF menu, or human callback + owner alert.
+5. **Golden noise tests:** feed pre-mixed noisy fixtures (voice+café noise, two speakers) through the fake-provider harness asserting: no slot locked without confirmation, two-strike triggers, no background-speech answers.
+
+### Acceptance (founder re-test)
+Median felt latency <1.2s across 10 turns (waterfall attached to spec); a call from a noisy room completes a booking with correct spelled-back details OR gracefully lands on chat; founder says "it feels like a person answered."
