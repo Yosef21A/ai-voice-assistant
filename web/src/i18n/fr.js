@@ -11,7 +11,7 @@ export default {
     apply: 'Appliquer', addAnother: 'Ajouter un autre', comingSoon: 'Bientôt disponible',
   },
   nav: {
-    inbox: 'Messagerie', leads: 'Prospects', appointments: 'Rendez-vous', stats: 'Statistiques',
+    inbox: 'Messagerie', leads: 'Prospects', appointments: 'Rendez-vous', calls: 'Appels', stats: 'Statistiques',
     knowledge: 'Base de connaissances',
     settings: 'Réglages', wizard: 'Assistant', logout: 'Se déconnecter',
   },
@@ -252,6 +252,17 @@ export default {
       human_handoff: 'Vers un humain', unknown: 'Non compris',
     },
     langNames: { ar: 'Arabe', fr: 'Français', en: 'Anglais', other: 'Autre' },
+  },
+  calls: {
+    title: 'Appels', total: 'Appels totaux', answered: 'Répondus', missed: 'Manqués',
+    avgDuration: 'Durée moyenne', recent: 'Appels récents',
+    empty: 'Aucun appel pour l’instant. Les appels vers votre numéro WhatsApp apparaissent ici.',
+    unknownCaller: 'Numéro inconnu',
+    outcome: { answered: 'Répondu', missed: 'Manqué', closed: 'Fermé' },
+    booked: 'Réservation {ref} par téléphone', emergencyFlag: 'Urgence détectée pendant cet appel',
+    handoffFlag: 'L’appelant a demandé un humain',
+    window30: 'Statistiques sur les 30 derniers jours — la liste montre les appels les plus récents.',
+    loadError: 'Impossible de charger la liste des appels.', retry: 'Réessayer',
   },
   toast: {
     saved: 'Modifications enregistrées.', error: 'Échec de l’enregistrement.',

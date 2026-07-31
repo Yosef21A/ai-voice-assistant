@@ -78,6 +78,19 @@ const EVENT_META = {
     emergency: false,
     subject: (e) => e.conversationId || e.patientWaId || 'admin',
   },
+  // V3: the call never carried audio (closed / no answer / failed to connect).
+  // NOT emergency — a mid-call emergency already alerts via emergency.detected
+  // (that call is HELD, so it publishes call.ended, never call.missed), and
+  // call.started/call.ended stay silent by design (noise; digests cover totals).
+  'call.missed': {
+    key: 'call',
+    aliases: ['call', 'calls', 'missed_call'],
+    emergency: false,
+    // Dedupe by CONVERSATION, not callId: a patient who redials four times
+    // during the lunch closure must page the owner once per window, not four
+    // times (callId is unique per attempt and would disable the dedupe).
+    subject: (e) => e.conversationId || e.call?.callId || 'call',
+  },
 };
 
 function refOf(appt) {
@@ -169,6 +182,7 @@ export function createNotificationService({
           handoff: envelope.handoff,
           keyword: envelope.keyword,
           media: envelope.media,
+          call: envelope.call,
           reason: envelope.reason,
           patientWaId: patientOf(type, envelope),
           lastMessage: lastMessageOf(envelope),
@@ -377,6 +391,7 @@ function patientOf(type, e) {
   if (type === 'handoff.requested') return e.handoff?.patientWaId || e.patientWaId || subjectWaId(e.conversationId);
   if (type === 'media.received') return e.patientWaId || subjectWaId(e.conversationId);
   if (type === 'admin.notify') return e.patientWaId || subjectWaId(e.conversationId);
+  if (type === 'call.missed') return e.call?.from || subjectWaId(e.conversationId);
   return e.patientWaId || null;
 }
 

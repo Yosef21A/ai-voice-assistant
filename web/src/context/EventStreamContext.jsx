@@ -16,6 +16,9 @@ const TYPES = [
   'emergency.detected',
   'media.received',
   'kb.unanswered',
+  'call.started',
+  'call.missed',
+  'call.ended',
 ];
 
 const EventStreamContext = createContext(null);

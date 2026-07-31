@@ -120,11 +120,20 @@ test('an already-prefixed model id is not double-prefixed', async (t) => {
   assert.equal(ws.frames('setup')[0].setup.model, 'models/already');
 });
 
+// Wait for the client's async open to have fired (it sends `setup` there).
+// A fixed 5 ms nap flaked under full-suite load — poll with a hard deadline.
+async function awaitOpen(ws) {
+  const deadline = Date.now() + 5000;
+  while (ws.state.sent.length < 1 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 test('ready resolves only on setupComplete, and isReady follows it', async (t) => {
   const ws = fakeWs({ autoSetup: false });
   const live = client(ws);
   t.after(() => live.close());
-  await new Promise((r) => setTimeout(r, 5));
+  await awaitOpen(ws);
   assert.equal(live.isReady, false, 'an open socket is not a ready session');
   ws.deliver({ setupComplete: {} });
   await live.ready;
@@ -145,13 +154,13 @@ test('ready rejects on a setup timeout rather than hanging the call', async () =
 test('ready rejects when the socket closes or errors before setup', async () => {
   const a = fakeWs({ autoSetup: false });
   const liveA = client(a);
-  await new Promise((r) => setTimeout(r, 5));
+  await awaitOpen(a);
   a.serverClose(1006);
   await assert.rejects(liveA.ready, /closed/);
 
   const b = fakeWs({ autoSetup: false });
   const liveB = client(b);
-  await new Promise((r) => setTimeout(r, 5));
+  await awaitOpen(b);
   b.serverError('boom');
   await assert.rejects(liveB.ready, /boom/);
   liveB.close();
@@ -189,7 +198,7 @@ test('REGRESSION: nothing but `setup` is sent before setupComplete', async (t) =
   const ws = fakeWs({ autoSetup: false });
   const live = client(ws);
   t.after(() => live.close());
-  await new Promise((r) => setTimeout(r, 5));
+  await awaitOpen(ws);
 
   live.sendAudioChunk(new Int16Array(8000)); // half a second of "allo?"
   live.sendText('too early');
@@ -215,7 +224,7 @@ test('the pre-ready buffer is bounded — a slow brain cannot grow it forever', 
   const ws = fakeWs({ autoSetup: false });
   const live = client(ws);
   t.after(() => live.close());
-  await new Promise((r) => setTimeout(r, 5));
+  await awaitOpen(ws);
 
   for (let i = 0; i < 40; i += 1) live.sendAudioChunk(new Int16Array(1600)); // 4 s
   assert.ok(

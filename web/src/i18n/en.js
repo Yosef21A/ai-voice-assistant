@@ -11,7 +11,7 @@ export default {
     apply: 'Apply', addAnother: 'Add another', comingSoon: 'Coming soon',
   },
   nav: {
-    inbox: 'Inbox', leads: 'Leads', appointments: 'Appointments', stats: 'Statistics',
+    inbox: 'Inbox', leads: 'Leads', appointments: 'Appointments', calls: 'Calls', stats: 'Statistics',
     knowledge: 'Knowledge base',
     settings: 'Settings', wizard: 'Setup', logout: 'Log out',
   },
@@ -252,6 +252,17 @@ export default {
       human_handoff: 'To a human', unknown: 'Not understood',
     },
     langNames: { ar: 'Arabic', fr: 'French', en: 'English', other: 'Other' },
+  },
+  calls: {
+    title: 'Calls', total: 'Total calls', answered: 'Answered', missed: 'Missed',
+    avgDuration: 'Avg. duration', recent: 'Recent calls',
+    empty: 'No calls yet. Voice calls to your WhatsApp number show up here.',
+    unknownCaller: 'Unknown number',
+    outcome: { answered: 'Answered', missed: 'Missed', closed: 'Closed' },
+    booked: 'Booked {ref} by phone', emergencyFlag: 'Emergency detected during this call',
+    handoffFlag: 'Caller asked for a human',
+    window30: 'Stats over the last 30 days — the list shows the most recent calls.',
+    loadError: 'Could not load the calls list.', retry: 'Retry',
   },
   toast: {
     saved: 'Changes saved.', error: 'Could not save.',

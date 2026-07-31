@@ -11,7 +11,7 @@ export default {
     apply: 'تطبيق', addAnother: 'إضافة عنصر آخر', comingSoon: 'قريباً',
   },
   nav: {
-    inbox: 'الرسائل', leads: 'العملاء المحتملون', appointments: 'المواعيد', stats: 'الإحصائيات',
+    inbox: 'الرسائل', leads: 'العملاء المحتملون', appointments: 'المواعيد', calls: 'المكالمات', stats: 'الإحصائيات',
     knowledge: 'قاعدة المعرفة',
     settings: 'الإعدادات', wizard: 'الإعداد', logout: 'تسجيل الخروج',
   },
@@ -252,6 +252,17 @@ export default {
       human_handoff: 'تحويل لإنسان', unknown: 'غير مفهوم',
     },
     langNames: { ar: 'العربية', fr: 'الفرنسية', en: 'الإنجليزية', other: 'أخرى' },
+  },
+  calls: {
+    title: 'المكالمات', total: 'إجمالي المكالمات', answered: 'تم الرد', missed: 'فائتة',
+    avgDuration: 'متوسط المدة', recent: 'المكالمات الأخيرة',
+    empty: 'لا مكالمات بعد. المكالمات على رقم واتساب تظهر هنا.',
+    unknownCaller: 'رقم غير معروف',
+    outcome: { answered: 'تم الرد', missed: 'فائتة', closed: 'مغلقة' },
+    booked: 'حجز {ref} عبر الهاتف', emergencyFlag: 'تم رصد حالة طوارئ خلال هذه المكالمة',
+    handoffFlag: 'المتصل طلب موظفاً بشرياً',
+    window30: 'الإحصائيات على آخر 30 يوماً — القائمة تعرض أحدث المكالمات.',
+    loadError: 'تعذّر تحميل قائمة المكالمات.', retry: 'أعد المحاولة',
   },
   toast: {
     saved: 'تم حفظ التعديلات.', error: 'تعذّر الحفظ.',

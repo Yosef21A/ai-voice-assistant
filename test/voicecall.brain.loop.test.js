@@ -493,7 +493,11 @@ test('outbound RTP is a well-formed, monotonic 20 ms stream', async (t) => {
   await s.loop.start();
 
   s.live.emit('audio', tone24k(120));
-  await sleep(200); // let the pacer drain
+  // Poll instead of a fixed sleep: the pacer is a real 20 ms setInterval, and
+  // a fixed 200 ms window flakes when the full parallel suite starves the
+  // event loop (confirmed under load: "only 3 packets were paced out").
+  const deadline = Date.now() + 5000;
+  while (s.media.sent.length < 4 && Date.now() < deadline) await sleep(25);
 
   assert.ok(s.media.sent.length >= 4, `only ${s.media.sent.length} packets were paced out`);
   let prevSeq = null;

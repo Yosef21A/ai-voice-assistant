@@ -8,6 +8,9 @@
 //   • computeDigestStats math + the money line
 //   • pipeline: emergency returns an overrideReply and emits emergency.detected;
 //     a hot lead emits lead.hot
+//   • V3: call.missed → 📵 alert (quiet hours + per-recipient toggle honored,
+//     never doubles up with an emergency); formatBooking's 📞 call marker;
+//     the digest's calls line (only when calls.total > 0)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -18,7 +21,7 @@ import {
   inQuietHours,
   isAfterHours,
 } from '../src/notifications/service.js';
-import { formatDailyDigest } from '../src/notifications/formatter.js';
+import { formatDailyDigest, formatBooking, formatMissedCall } from '../src/notifications/formatter.js';
 import { analyzeInbound } from '../src/notifications/pipeline.js';
 
 const CLINICS = JSON.parse(readFileSync(new URL('../data/clinics.json', import.meta.url), 'utf8')).clinics;
@@ -269,7 +272,125 @@ test('handoff alert includes the patient and their last message', async () => {
   svc.stop();
 });
 
+// ── V3: missed-call alert ───────────────────────────────────────────────────
+test('call.missed → default recipient gets a localized 📵 alert (reason-aware)', async () => {
+  const ref = { now: new Date('2026-07-19T12:00:00Z') };
+  const bus = makeBus();
+  const sender = makeSender();
+  const store = storeWithEvents();
+  const svc = createNotificationService({ bus, sender, store, now: clockOf(ref) });
+
+  bus.publish('call.missed', {
+    tenantId: TENANT_ID,
+    conversationId: `${TENANT_ID}:218910000009`,
+    call: { callId: 'wacid.M1', from: '218910000009', reason: 'no_answer', outcome: 'missed', durationSec: 0 },
+  });
+  await svc.settled();
+
+  assert.equal(sender.sent.length, 1);
+  assert.equal(sender.sent[0].to, OWNER);
+  assert.match(sender.sent[0].text, /📵/);
+  assert.match(sender.sent[0].text, /218910000009/);
+  svc.stop();
+});
+
+test('call.started / call.ended never alert (noise; digests cover totals)', async () => {
+  const ref = { now: new Date('2026-07-19T12:00:00Z') };
+  const bus = makeBus();
+  const sender = makeSender();
+  const store = storeWithEvents();
+  const svc = createNotificationService({ bus, sender, store, now: clockOf(ref) });
+
+  bus.publish('call.started', { tenantId: TENANT_ID, conversationId: 'c1', call: { callId: 'wacid.S1', from: '218910000001' } });
+  bus.publish('call.ended', { tenantId: TENANT_ID, conversationId: 'c1', call: { callId: 'wacid.S1', outcome: 'completed', durationSec: 40 } });
+  await svc.settled();
+  assert.equal(sender.sent.length, 0, 'neither call.started nor call.ended is a registered alert event');
+  svc.stop();
+});
+
+test('quiet hours suppress a missed-call alert (it is not an emergency)', async () => {
+  const ref = { now: new Date('2026-07-19T23:30:00Z') }; // 00:30 Africa/Tunis → inside 22:00–07:00
+  const bus = makeBus();
+  const sender = makeSender();
+  const prefs = [{ recipient: '21620111222', active: true, quietHours: { start: '22:00', end: '07:00' }, events: {} }];
+  const store = storeWithEvents({ prefs });
+  const svc = createNotificationService({ bus, sender, store, now: clockOf(ref) });
+
+  bus.publish('call.missed', {
+    tenantId: TENANT_ID,
+    conversationId: 'c-quiet',
+    call: { callId: 'wacid.Q1', from: '218910000008', reason: 'closed' },
+  });
+  await svc.settled();
+  assert.equal(sender.sent.length, 0, 'a missed call must be suppressed during quiet hours, like any non-emergency');
+  svc.stop();
+});
+
+test("per-recipient toggle: 'calls' off suppresses the missed-call alert, booking still fires", async () => {
+  const ref = { now: new Date('2026-07-19T12:00:00Z') };
+  const bus = makeBus();
+  const sender = makeSender();
+  const prefs = [{ recipient: '21620111222', active: true, events: { calls: false } }];
+  const store = storeWithEvents({ prefs });
+  const svc = createNotificationService({ bus, sender, store, now: clockOf(ref) });
+
+  bus.publish('call.missed', {
+    tenantId: TENANT_ID,
+    conversationId: 't-call',
+    call: { callId: 'wacid.T1', from: '218910000007', reason: 'no_answer' },
+  });
+  await svc.settled();
+  assert.equal(sender.sent.length, 0, 'the calls toggle off suppresses the missed-call alert');
+
+  bus.publish('appointment.created', { tenantId: TENANT_ID, conversationId: 't-call', appointment: { ref: 'B-AFTER-CALL' } });
+  await svc.settled();
+  assert.equal(sender.sent.length, 1, 'the calls toggle must not affect the unrelated booking alert');
+  svc.stop();
+});
+
+test('formatMissedCall — reason variants (closed / no_answer / failed) + a call-back nudge', () => {
+  const tenant = makeTenantRecord();
+  const closed = formatMissedCall({ tenant, call: { from: '218900001111', reason: 'closed' }, lang: 'fr' });
+  assert.match(closed, /📵/);
+  assert.match(closed, /hors horaires/);
+  assert.match(closed, /Rappelez-le/);
+
+  const noAnswer = formatMissedCall({ tenant, call: { from: '218900001111', reason: 'no_answer' }, lang: 'en' });
+  assert.match(noAnswer, /no one answered/);
+
+  const failed = formatMissedCall({ tenant, call: { from: '218900001111', reason: 'failed' }, lang: 'ar' });
+  assert.match(failed, /تعطلت المكالمة/);
+});
+
+test('formatBooking — a voice booking gets a 📞 marker; the non-call path is byte-for-byte unchanged', () => {
+  const tenant = makeTenantRecord();
+  const base = { patientName: 'Ali', specialtyLabel: 'Cardiologie', datetimeISO: '2026-08-03T09:00:00Z', ref: 'EAS-CALL-1' };
+
+  const waText = formatBooking({ tenant, appointment: base, lang: 'fr' });
+  assert.match(waText, /^✅ Nouvelle réservation/);
+  assert.doesNotMatch(waText, /📞/);
+
+  const callText = formatBooking({ tenant, appointment: { ...base, channel: 'call' }, lang: 'fr' });
+  assert.match(callText, /^📞 Réservation par appel téléphonique\n✅ Nouvelle réservation/);
+  // Everything AFTER the prefix line is identical to the non-call alert.
+  assert.equal(callText.slice(callText.indexOf('\n') + 1), waText);
+});
+
 // ── digests ────────────────────────────────────────────────────────────────────
+test('formatDailyDigest — the calls line appears only when calls.total > 0', () => {
+  const tenant = { name: EL.name, currency: 'EUR', config: {} };
+  const base = { conversations: 2, bookings: 1, leads: 0, afterHoursPct: 10 };
+
+  const zero = formatDailyDigest({ ...base, calls: { total: 0, answered: 0, missed: 0, avgDurationSec: 0, voiceBookings: 0 } }, { tenant, lang: 'fr' });
+  assert.doesNotMatch(zero, /📞/);
+
+  const withCalls = formatDailyDigest(
+    { ...base, calls: { total: 3, answered: 2, missed: 1, avgDurationSec: 42, voiceBookings: 1 } },
+    { tenant, lang: 'fr' }
+  );
+  assert.match(withCalls, /📞 3 appels — 2 répondu\(s\), 1 manqué\(s\), 1 réservation\(s\) par téléphone/);
+});
+
 test('computeDigestStats — counts, after-hours share, and the money line', () => {
   const day = '2026-07-15';
   const stats = computeDigestStats(

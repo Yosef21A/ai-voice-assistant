@@ -123,6 +123,91 @@ test('stats — money line config chain: avgBookingValue fallback, null hides', 
   assert.equal(none.avgValue, null);
 });
 
+// ── V3: calls block ────────────────────────────────────────────────────────
+// Sourced from 'call.ended'/'call.missed' audit events (src/voice-call/index.js
+// appends exactly one terminal event per call) + appointments with channel:'call'.
+test('stats — calls block: window bounds, sandbox exclusion, avgDurationSec over answered calls only', () => {
+  const data = {
+    tenant: fixtureTenant(),
+    conversations: [],
+    appointments: [
+      appt({ channel: 'call' }), // in-window voice booking
+      appt({ channel: 'call', status: 'cancelled' }), // cancelled ⇒ not a booking
+      appt({ channel: 'call', patientWaId: 'sandbox:u1' }), // sandbox ⇒ excluded
+      appt({ channel: 'call', createdAt: '2026-07-01T00:00:00.000Z' }), // out of window
+      appt({ channel: 'whatsapp' }), // not a voice booking
+    ],
+    leads: [],
+    events: [
+      { type: 'call.ended', createdAt: MON_MORNING, payload: { durationSec: 40 } },
+      { type: 'call.ended', createdAt: MON_NIGHT, payload: { durationSec: 20 } },
+      { type: 'call.missed', createdAt: MON_MORNING, payload: { durationSec: 0 } },
+      { type: 'call.ended', createdAt: '2026-07-01T00:00:00.000Z', payload: { durationSec: 999 } }, // out of window
+      { type: 'call.missed', createdAt: TO, payload: {} }, // ts === to ⇒ EXCLUDED (exclusive bound)
+      { type: 'message.analyzed', createdAt: MON_MORNING, payload: {} }, // unrelated type ⇒ ignored
+    ],
+  };
+
+  const s = computeDigestStats(data, RANGE);
+  assert.deepEqual(s.calls, { total: 3, answered: 2, missed: 1, avgDurationSec: 30, voiceBookings: 1 });
+});
+
+test('stats — calls block is all zeros (never NaN) when the events ring holds no call rows', () => {
+  const s = computeDigestStats({ tenant: fixtureTenant(), conversations: [], appointments: [], leads: [] }, RANGE);
+  assert.deepEqual(s.calls, { total: 0, answered: 0, missed: 0, avgDurationSec: 0, voiceBookings: 0 });
+});
+
+test('stats — computeAnalytics carries the calls block through from computeDigestStats', () => {
+  const s = computeAnalytics(
+    {
+      tenant: fixtureTenant(),
+      conversations: [],
+      appointments: [appt({ channel: 'call' })],
+      leads: [],
+      events: [{ type: 'call.ended', createdAt: MON_MORNING, payload: { durationSec: 10 } }],
+      messagesByConvo: new Map(),
+    },
+    RANGE
+  );
+  assert.deepEqual(s.calls, { total: 1, answered: 1, missed: 0, avgDurationSec: 10, voiceBookings: 1 });
+});
+
+test('stats — GET /api/stats includes the calls block computed from real call events', async (t) => {
+  const app = makeTestApp();
+  const server = await listen(app.app);
+  t.after(() => {
+    app.notifier.stop();
+    server.closeAllConnections?.();
+    return new Promise((r) => server.close(r));
+  });
+
+  const convo = await app.store.conversations.create(A, { patientWaId: '218913334455', lang: 'ar', status: 'open' });
+  await app.store.events.append(A, {
+    type: 'call.ended',
+    actor: 'system',
+    conversationId: convo.id,
+    payload: { callId: 'wacid.STAT1', outcome: 'completed', durationSec: 30, connectMs: 500, from: '218913334455' },
+  });
+  await app.store.events.append(A, {
+    type: 'call.missed',
+    actor: 'system',
+    conversationId: convo.id,
+    payload: { callId: 'wacid.STAT2', outcome: 'missed', reason: 'no_answer', durationSec: 0, from: '218913334455' },
+  });
+  await app.store.appointments.create(A, {
+    patientWaId: '218913334455',
+    patientName: 'Voice Patient',
+    status: 'confirmed',
+    datetimeIso: '2026-08-03T09:00:00.000Z',
+    channel: 'call',
+  });
+
+  const { cookie } = await setupOwner(server, { tenantId: A, email: `o-${randomUUID()}@x.tn` });
+  const res = await request(server, 'GET', '/api/stats?days=365', { cookie });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.stats.calls, { total: 2, answered: 1, missed: 1, avgDurationSec: 30, voiceBookings: 1 });
+});
+
 // ── after-hours math, incl. a window across midnight ─────────────────────────
 test('stats — isAfterHours: normal day, closed day, and overnight window', () => {
   // Normal window.

@@ -129,6 +129,15 @@ export function formatCancellation({ tenant, appointment = {}, lang } = {}) {
   return withClinicTag(body, tenant);
 }
 
+// V3: a voice booking gets a one-line marker ahead of the normal booking body —
+// same copy either way, so the owner instantly knows this ref was spoken, not
+// typed. Kept as a plain-string table (not a template fn) like MEDIA_KIND_LABEL.
+const CALL_BOOKING_PREFIX = {
+  ar: '📞 حجز عبر مكالمة هاتفية',
+  fr: '📞 Réservation par appel téléphonique',
+  en: '📞 Booked by phone call',
+};
+
 /** New-booking alert (patient, specialty, datetime, ref). */
 export function formatBooking({ tenant, appointment = {}, lang } = {}) {
   const L = lang || resolveOwnerLang(tenant);
@@ -145,7 +154,9 @@ export function formatBooking({ tenant, appointment = {}, lang } = {}) {
       : formatDateTime(iso, { tz: tenantTimezone(tenant), lang: L }),
     ref: val(appointment.ref || appointment.id),
   });
-  return withClinicTag(body, tenant);
+  const withCallMarker =
+    appointment.channel === 'call' ? `${CALL_BOOKING_PREFIX[L] || CALL_BOOKING_PREFIX.fr}\n${body}` : body;
+  return withClinicTag(withCallMarker, tenant);
 }
 
 const LEAD_WHY = {
@@ -269,6 +280,34 @@ export function formatMedia({ tenant, media = {}, patientWaId, lang } = {}) {
   return withClinicTag(body, tenant);
 }
 
+// V3: a missed WhatsApp call. Reason variants mirror the three ways a call
+// never carries audio (see src/voice-call/index.js's finish()): the clinic was
+// closed, nobody picked up in the answer window, or the call/media failed
+// before connecting. Always non-emergency (a mid-call emergency already alerts
+// via emergency.detected — this event never fires for a HELD call).
+const MISSED_CALL_REASON = {
+  closed: { ar: 'العيادة كانت مغلقة', fr: "l'appel est arrivé hors horaires", en: 'the clinic was closed' },
+  no_answer: { ar: 'حتى حد ما رد في الوقت', fr: "personne n'a répondu à temps", en: 'no one answered in time' },
+  failed: { ar: 'تعطلت المكالمة قبل ما تتصل', fr: "l'appel a échoué avant de se connecter", en: 'the call failed to connect' },
+};
+
+const MISSED_CALL = {
+  ar: (v) => `📵 مكالمة فائتة\n👤 ${v.who}\nℹ️ ${v.reason}\n💡 عاود اتصل بيه.`,
+  fr: (v) => `📵 Appel manqué\n👤 ${v.who}\nℹ️ ${v.reason}\n💡 Rappelez-le.`,
+  en: (v) => `📵 Missed call\n👤 ${v.who}\nℹ️ ${v.reason}\n💡 Call them back.`,
+};
+
+/** Missed-call alert (who + why + a call-them-back nudge). */
+export function formatMissedCall({ tenant, call = {}, lang } = {}) {
+  const L = lang || resolveOwnerLang(tenant);
+  const reasonTable = MISSED_CALL_REASON[call.reason] || MISSED_CALL_REASON.no_answer;
+  const body = pick(L, MISSED_CALL)({
+    who: val(call.from),
+    reason: reasonTable[L] || reasonTable.fr,
+  });
+  return withClinicTag(body, tenant);
+}
+
 const ADMIN_NOTIFY = {
   ar: (v) => `👀 البوت يطلب انتباهك\n👤 ${v.who}\nℹ️ ${v.reason}${v.msg ? `\n💬 "${v.msg}"` : ''}\nالبوت مازال يخدم — شوف المحادثة في لوحة التحكم.`,
   fr: (v) => `👀 Le bot demande votre attention\n👤 ${v.who}\nℹ️ ${v.reason}${v.msg ? `\n💬 "${v.msg}"` : ''}\nLe bot continue de répondre — voyez la conversation dans le tableau de bord.`,
@@ -312,6 +351,8 @@ export function formatAlert(type, data = {}) {
       return formatEmergency(data);
     case 'media.received':
       return formatMedia(data);
+    case 'call.missed':
+      return formatMissedCall(data);
     case 'admin.notify':
       return formatAdminNotify(data);
     default:
@@ -329,6 +370,13 @@ const DIGEST_LABELS = {
   ar: { convos: '💬 محادثات', bookings: '📅 حجوزات', leads: '🔥 عملاء محتملون', after: '🌙 خارج الدوام', money: '💶 القيمة المقدّرة المحصّلة', learned: '🧠 أجوبة تعلّمها البوت' },
   fr: { convos: '💬 Conversations', bookings: '📅 Réservations', leads: '🔥 Leads', after: '🌙 Hors horaires', money: '💶 Valeur estimée captée', learned: '🧠 Réponses apprises' },
   en: { convos: '💬 Conversations', bookings: '📅 Bookings', leads: '🔥 Leads', after: '🌙 After-hours', money: '💶 Estimated captured value', learned: '🧠 Answers learned' },
+};
+
+// V3: one calls line — total / answered / missed / bookings-by-phone.
+const DIGEST_CALLS_LINE = {
+  ar: (v) => `📞 ${v.total} مكالمة — ${v.answered} تم الرد، ${v.missed} فائتة، ${v.voiceBookings} حجز بالهاتف`,
+  fr: (v) => `📞 ${v.total} appels — ${v.answered} répondu(s), ${v.missed} manqué(s), ${v.voiceBookings} réservation(s) par téléphone`,
+  en: (v) => `📞 ${v.total} calls — ${v.answered} answered, ${v.missed} missed, ${v.voiceBookings} booked by phone`,
 };
 
 function formatDigest(kind, stats = {}, { tenant, lang } = {}) {
@@ -349,6 +397,21 @@ function formatDigest(kind, stats = {}, { tenant, lang } = {}) {
     `${lbl.leads} : ${Number(stats.leads) || 0}`,
     `${lbl.after} : ${pct}%`,
   ];
+
+  // V3: one calls line, ONLY when there is something to report — a tenant with
+  // voice calls off (or simply none this period) must not see a "0 calls" line
+  // clutter every digest forever.
+  const calls = stats.calls;
+  if (calls && Number(calls.total) > 0) {
+    lines.push(
+      pick(L, DIGEST_CALLS_LINE)({
+        total: calls.total,
+        answered: calls.answered,
+        missed: calls.missed,
+        voiceBookings: calls.voiceBookings,
+      })
+    );
+  }
 
   // Training-loop line (P2-B) only when the owner actually taught something.
   const learned = Number(stats.learned);
@@ -384,6 +447,7 @@ export default {
   formatHotLead,
   formatHandoff,
   formatEmergency,
+  formatMissedCall,
   formatAlert,
   formatDailyDigest,
   formatWeeklyDigest,

@@ -133,10 +133,39 @@ function resolveAvgValue(cfg, range) {
   return null;
 }
 
+// ── calls block (V3) ──────────────────────────────────────────────────────────
+// Sourced from the audit events the voice-call service appends (src/voice-call/
+// index.js): EXACTLY one terminal event per call — 'call.ended' (patient held
+// it, outcome 'completed'|'failed') or 'call.missed' (never carried audio:
+// closed/no_answer/failed-to-connect). total = ended + missed by construction,
+// so it can never double-count or drift from the two halves. avgDurationSec is
+// averaged over ANSWERED calls only — a missed call's durationSec is always 0,
+// and folding it in would understate real talk time. voiceBookings mirrors the
+// digest's own "bookings" convention (sandbox + cancelled excluded) restricted
+// to channel:'call'. Every count defaults to 0 — never NaN — when the events
+// ring holds no call rows yet (older data, or calls disabled for the tenant).
+function computeCallStats(events, appointments, inRange) {
+  const ended = (events || []).filter((e) => e.type === 'call.ended' && inRange(e.createdAt));
+  const missed = (events || []).filter((e) => e.type === 'call.missed' && inRange(e.createdAt));
+  const totalDurationSec = ended.reduce((sum, e) => sum + (Number(e.payload?.durationSec) || 0), 0);
+  const voiceBookings = (appointments || []).filter(
+    (a) => realAppt(a) && a.channel === 'call' && a.status !== 'cancelled' && inRange(a.createdAt)
+  ).length;
+  return {
+    total: ended.length + missed.length,
+    answered: ended.length,
+    missed: missed.length,
+    avgDurationSec: ended.length > 0 ? Math.round(totalDurationSec / ended.length) : 0,
+    voiceBookings,
+  };
+}
+
 // ── digest aggregate (PURE — the reference numbers) ───────────────────────────
 /**
  * Aggregate a tenant's raw collections into digest numbers. No I/O, no clock.
- * @param {object} storeData { tenant, conversations[], appointments[], leads[] }
+ * @param {object} storeData { tenant, conversations[], appointments[], leads[], events[]? }
+ *   events[] (V3, optional) — 'call.ended'/'call.missed' audit rows feed the
+ *   calls block; omitted or empty ⇒ calls is all zeros, never NaN.
  * @param {object} range     { from, to, tz?, avgValue? }
  */
 export function computeDigestStats(storeData = {}, range = {}) {
@@ -174,6 +203,12 @@ export function computeDigestStats(storeData = {}, range = {}) {
   const money = avgValue != null && Number.isFinite(avgValue) ? bookings * avgValue : null;
   const afterHoursShare = convoCount > 0 ? afterHours / convoCount : 0;
 
+  // V3: voice-call totals. storeData.events carries whatever call.* rows the
+  // collector fetched (collectDigestStats/collectAnalytics both merge them in
+  // alongside message.analyzed) — computed HERE so /api/stats and the digests
+  // read the exact same numbers, per the P2-A "one source" law.
+  const calls = computeCallStats(storeData.events, storeData.appointments, inRange);
+
   return {
     conversations: convoCount,
     bookings,
@@ -184,6 +219,7 @@ export function computeDigestStats(storeData = {}, range = {}) {
     afterHoursPct: Math.round(afterHoursShare * 100),
     money,
     avgValue,
+    calls,
     currency: tenant.currency || cfg.currency || null,
     clinicName: tenant.name || cfg.name || null,
     from: new Date(range.from).toISOString(),
@@ -427,36 +463,55 @@ async function safeList(fn) {
   }
 }
 
+// Fetch bounds: analytics is a dashboard read that must stay cheap no matter
+// how big a tenant's history grows (any authenticated user can hit it).
+const EVENTS_FETCH_LIMIT = 20000; // last N analyzed events (JSON store also ring-caps)
+// V3: the store's events.list() filters by a SINGLE `type` (both adapters —
+// no OR support), so the two terminal call types are fetched as separate
+// calls and merged, same as message.analyzed. A lower cap than
+// EVENTS_FETCH_LIMIT is plenty — a tenant doing 20k calls has bigger problems.
+const CALL_EVENTS_FETCH_LIMIT = 5000;
+const TRANSCRIPT_CONVOS_MAX = 1000; // messageCount/responseTime sample over the most recent N
+const TRANSCRIPT_CHUNK = 20; // listMessages concurrency bound (no unbounded fan-out)
+
+async function fetchCallEvents(store, tenantId) {
+  const [ended, missed] = await Promise.all([
+    safeList(() => store.events.list(tenantId, { type: 'call.ended', limit: CALL_EVENTS_FETCH_LIMIT })),
+    safeList(() => store.events.list(tenantId, { type: 'call.missed', limit: CALL_EVENTS_FETCH_LIMIT })),
+  ]);
+  return [...ended, ...missed];
+}
+
 /** Fetch + aggregate the digest numbers. `tenant` is the already-loaded record. */
 export async function collectDigestStats(store, tenant, range = {}) {
   const tenantId = tenant.id;
-  const [conversations, appointments, leads, kbEntries] = await Promise.all([
+  const [conversations, appointments, leads, kbEntries, callEvents] = await Promise.all([
     safeList(() => store.conversations.list(tenantId)),
     safeList(() => store.appointments.list(tenantId)),
     safeList(() => store.leads.list(tenantId)),
     safeList(() => store.kbEntries.list(tenantId, { status: 'active' })),
+    fetchCallEvents(store, tenantId),
   ]);
-  return computeDigestStats({ tenant, conversations, appointments, leads, kbEntries }, range);
+  return computeDigestStats({ tenant, conversations, appointments, leads, kbEntries, events: callEvents }, range);
 }
-
-// Fetch bounds: analytics is a dashboard read that must stay cheap no matter
-// how big a tenant's history grows (any authenticated user can hit it).
-const EVENTS_FETCH_LIMIT = 20000; // last N analyzed events (JSON store also ring-caps)
-const TRANSCRIPT_CONVOS_MAX = 1000; // messageCount/responseTime sample over the most recent N
-const TRANSCRIPT_CHUNK = 20; // listMessages concurrency bound (no unbounded fan-out)
 
 /** Fetch + aggregate the full dashboard analytics. */
 export async function collectAnalytics(store, tenant, range = {}) {
   const tenantId = tenant.id;
-  const [conversations, appointments, leads, events, kbEntries, unanswered, reminders] = await Promise.all([
-    safeList(() => store.conversations.list(tenantId)),
-    safeList(() => store.appointments.list(tenantId)),
-    safeList(() => store.leads.list(tenantId)),
-    safeList(() => store.events.list(tenantId, { type: 'message.analyzed', limit: EVENTS_FETCH_LIMIT })),
-    safeList(() => store.kbEntries.list(tenantId, { status: 'active' })),
-    safeList(() => store.unanswered.list(tenantId, {})),
-    safeList(() => store.reminders.list(tenantId, {})), // absent on PG until P1-G → []
-  ]);
+  const [conversations, appointments, leads, analyzedEvents, kbEntries, unanswered, reminders, callEvents] =
+    await Promise.all([
+      safeList(() => store.conversations.list(tenantId)),
+      safeList(() => store.appointments.list(tenantId)),
+      safeList(() => store.leads.list(tenantId)),
+      safeList(() => store.events.list(tenantId, { type: 'message.analyzed', limit: EVENTS_FETCH_LIMIT })),
+      safeList(() => store.kbEntries.list(tenantId, { status: 'active' })),
+      safeList(() => store.unanswered.list(tenantId, {})),
+      safeList(() => store.reminders.list(tenantId, {})), // absent on PG until P1-G → []
+      fetchCallEvents(store, tenantId),
+    ]);
+  // One merged events[] — computeAnalytics/computeDigestStats each filter it
+  // by the type they care about (message.analyzed vs call.ended/call.missed).
+  const events = [...analyzedEvents, ...callEvents];
 
   // Transcripts only for conversations active in the window; most recent first,
   // capped and fetched in bounded chunks. Beyond the cap, messageCount and

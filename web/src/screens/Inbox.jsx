@@ -12,8 +12,18 @@ import { Badge, EmptyState, Spinner, CONV_STATUS_KIND } from '../components/ui.j
 import { Inbox as InboxIcon, Bot, User, Send, ChevronLeft, Calendar, Info } from '../components/icons.jsx';
 import { fmtAgo, fmtTime, fmtDay, dayKey, dirOf, specialtyLabel, transcriptView } from '../lib.js';
 
+// A voice-call summary row (V3, src/voice-call/index.js) is a SYSTEM event:
+// it carries direction:'inbound' (it's the patient's call) but is neither a
+// patient nor a bot message, so it must be classified BEFORE the direction
+// check below, not folded into either bucket.
 const authorOf = (m) =>
-  m.direction === 'inbound' ? 'patient' : String(m.by || '').startsWith('staff') ? 'staff' : 'bot';
+  m.by === 'system'
+    ? 'system'
+    : m.direction === 'inbound'
+      ? 'patient'
+      : String(m.by || '').startsWith('staff')
+        ? 'staff'
+        : 'bot';
 
 /** Voice transcript block (V1) — always labelled "(auto)": staff must never
  *  mistake a machine transcription for something the patient wrote. */
@@ -109,9 +119,9 @@ function ThreadBody({ messages, lang, t }) {
         return (
           <React.Fragment key={m.id}>
             {sep ? <div className="day-sep"><span>{sep}</span></div> : null}
-            <div className={`bubble-row ${out ? 'out' : 'in'}${who === 'staff' ? ' staff' : ''}`}>
+            <div className={`bubble-row ${out ? 'out' : 'in'}${who === 'staff' ? ' staff' : ''}${who === 'system' ? ' system' : ''}`}>
               <div className={`bubble author-${who}`} dir={dirOf(m.text)}>
-                {who !== 'patient' ? <span className={`by ${who}`}>{who === 'bot' ? '🤖' : '👤'} </span> : null}
+                {who !== 'patient' && who !== 'system' ? <span className={`by ${who}`}>{who === 'bot' ? '🤖' : '👤'} </span> : null}
                 {m.media ? <MediaBlock media={m.media} t={t} /> : null}
                 {m.text}
                 <span className="meta"><span>{fmtTime(m.ts, lang)}</span></span>

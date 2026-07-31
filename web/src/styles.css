@@ -368,6 +368,16 @@ select.control { appearance: none; cursor: pointer;
 .bubble .by { font-weight: 700; letter-spacing: 0.02em; }
 .bubble.author-bot .by { color: var(--brass); }
 .bubble.author-staff .by { color: var(--info); }
+/* Voice-call summary rows (V3): a system event, not a patient/staff message —
+   centered and dimmed regardless of the underlying message `direction`. Beats
+   the [dir="rtl"] corner-radius overrides above (higher selector specificity)
+   with an explicit RTL rule so the pill stays symmetric either way. */
+.bubble-row.system { justify-content: center; }
+.bubble-row.system .bubble {
+  max-width: 90%; text-align: center; background: var(--surface-2); color: var(--text-mute);
+  border-radius: 999px; font-size: 0.8rem; padding: 6px 16px;
+}
+[dir="rtl"] .bubble-row.system .bubble { border-radius: 999px; }
 
 /* whatsapp-style sandbox frame */
 .wa { background: #0b141a; border-radius: var(--r-lg); border: 1px solid var(--border); overflow: hidden; display: flex; flex-direction: column; height: 460px; max-height: 62vh; }
@@ -496,6 +506,17 @@ select.control { appearance: none; cursor: pointer;
 .qlist { list-style: none; margin: var(--sp-3) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .qlist li { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
   background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: var(--r-md); padding: var(--sp-2) var(--sp-3); }
+
+/* ── calls (V3) ─────────────────────────────────────────────────────────────── */
+.call-list { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-3); }
+.call-row {
+  display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-2); border: 1px solid var(--border-soft); border-radius: var(--r-md);
+  width: 100%; text-align: start; cursor: pointer; transition: background 0.12s;
+}
+.call-row:hover:not(:disabled) { background: var(--surface); }
+.call-row:disabled { cursor: default; }
+.call-row .flags { display: flex; align-items: center; gap: 6px; flex: none; }
 
 /* ── inbox media attachments (P2-D) ────────────────────────────────────────── */
 .msg-media { display: block; max-width: 260px; max-height: 260px; border-radius: var(--r-md);

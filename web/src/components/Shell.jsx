@@ -10,13 +10,14 @@ import { useTenant } from '../context/TenantContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 import { useEventStream, useStreamEvent } from '../context/EventStreamContext.jsx';
 import { useRoute } from '../router.js';
-import { Inbox as InboxIcon, Calendar, Book, Chart, Plane, Settings as SettingsIcon, Logout, Wand, glyph } from './icons.jsx';
+import { Inbox as InboxIcon, Calendar, Book, Chart, Plane, Phone, Settings as SettingsIcon, Logout, Wand, glyph } from './icons.jsx';
 import { initials } from '../lib.js';
 import { Inbox } from '../screens/Inbox.jsx';
 import { Appointments } from '../screens/Appointments.jsx';
 import { Leads } from '../screens/Leads.jsx';
 import { Knowledge } from '../screens/Knowledge.jsx';
 import { Stats } from '../screens/Stats.jsx';
+import { Calls } from '../screens/Calls.jsx';
 import { Settings } from '../screens/Settings.jsx';
 import { Wizard } from '../screens/Wizard.jsx';
 
@@ -24,6 +25,7 @@ const NAV = [
   { key: 'inbox', icon: InboxIcon },
   { key: 'leads', icon: Plane },
   { key: 'appointments', icon: Calendar },
+  { key: 'calls', icon: Phone },
   { key: 'stats', icon: Chart },
   { key: 'knowledge', icon: Book },
   { key: 'settings', icon: SettingsIcon },
@@ -31,9 +33,11 @@ const NAV = [
 
 // D2: an agency's dashboard is LEADS-FIRST — Leads is home, Appointments is
 // hidden (the tenant has no local calendar; the API 404s the surface too).
+// The calls tab stays visible: a facilitator's WhatsApp number still rings.
 const NAV_FACILITATOR = [
   { key: 'leads', icon: Plane },
   { key: 'inbox', icon: InboxIcon },
+  { key: 'calls', icon: Phone },
   { key: 'stats', icon: Chart },
   { key: 'knowledge', icon: Book },
   { key: 'settings', icon: SettingsIcon },
@@ -43,6 +47,7 @@ function screenFor(top, facilitator) {
   switch (top) {
     case 'leads': return <Leads />;
     case 'appointments': return facilitator ? <Leads /> : <Appointments />;
+    case 'calls': return <Calls />;
     case 'stats': return <Stats />;
     case 'knowledge': return <Knowledge />;
     case 'settings': return <Settings />;

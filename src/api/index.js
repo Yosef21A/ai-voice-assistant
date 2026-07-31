@@ -12,6 +12,7 @@ import { statsRouter } from './stats.js';
 import { copilotRouter } from './copilot.js';
 import { exportRouter } from './export.js';
 import { mediaRouter } from './media.js';
+import { callsRouter } from './calls.js';
 import { streamHandler } from './stream.js';
 
 export function createApiRouter({ store, engine, sender, bus, config, auth, provider }) {
@@ -32,6 +33,7 @@ export function createApiRouter({ store, engine, sender, bus, config, auth, prov
   router.use('/copilot', copilotRouter({ store, provider, requireRole }));
   router.use('/export', exportRouter({ store, requireRole }));
   router.use('/media', mediaRouter({ store, config }));
+  router.use('/calls', callsRouter({ store }));
 
   return router;
 }
