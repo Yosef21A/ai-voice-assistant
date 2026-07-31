@@ -150,3 +150,33 @@ A human receptionist doesn't transcribe a crowd — she focuses the caller and a
 
 ### Acceptance (founder re-test)
 Median felt latency <1.2s across 10 turns (waterfall attached to spec); a call from a noisy room completes a booking with correct spelled-back details OR gracefully lands on chat; founder says "it feels like a person answered."
+
+## V7 — PIPELINE REBUILD: the fast cascade (supersedes incremental V6 tuning as the primary path; V6.2 noise rules still apply)
+**Verdict (war-room research, sourced, 2026-08-01):** Gemini Live measured 2.98s TTFT by Coval — slowest of its class; no tuning beats a slow brain. Pro agents (Vapi p50 <500ms, Retell ~600ms) run an overlapped cascade. Verified numbers support **0.8–1.3s voice-to-voice for Arabic (tuned floor ~700ms)**. Cost ~$0.03–0.06/min (TTS-dominated; Azure fallback cuts to ~$0.015). Gemini Live stays as `VOICE_BRAIN=live` legacy mode + final fallback.
+
+### Verified provider picks (research report 2026-07-31; re-verify pricing at build)
+| Layer | PRIMARY | Why | FALLBACK |
+|---|---|---|---|
+| STT | **Deepgram Nova-3 `ar-TN`** WSS streaming | Only explicit Tunisian code; sub-300ms; $200 credit (~690h); $0.0048/min | **Speechmatics** (Maghrebi named incl. Tunisian, AR↔EN code-switch, 50h/mo free); no ar-LY exists anywhere → generic `ar` for Libyan callers |
+| EOT/VAD | External VAD tuned 250–400ms (biggest latency line item per Vapi/Pipecat data) | Deepgram Flux has no Arabic | — |
+| LLM | **Gemini Flash-Lite TEXT, thinking DISABLED**, streaming | Only family with published Tunisian-derja competence (TounsiBench); thinking-on = ~6s TTFT trap | Cerebras (1M tok/day free) / Groq free — test but unbenchmarked on derja |
+| TTS | **ElevenLabs Flash v2.5 WS stream-input** (~75ms TTFB; key owned) | Fastest; incremental text input; clone Tunisian voice for dialect (no Maghrebi stock voice) | **Azure Neural `ar-TN` Hedi/Reem + `ar-LY` Omar** — only real Tunisian/Libyan voices, 500k chars/mo FREE, 3× cheaper |
+
+### Architecture (src/voice-call/brain-cascade/ — new module beside brain/, flag VOICE_BRAIN=cascade|live)
+```
+RTP in → VAD/EOT (250–400ms, barge-in aware)
+      → Deepgram WSS (interim + final transcripts)
+      → SPECULATIVE START: LLM begins on stable interims; discard+restart if final differs materially
+      → Gemini Flash-Lite text stream (voice-turn prompt: 1–2 short sentences, dialect, persona, KB top-k;
+        SAME tools/executor/guardrails as brain/ — emergency detector still runs BEFORE, deterministic law unchanged)
+      → sentence/clause chunker → ElevenLabs Flash WS (incremental) → PCM→G.711/Opus → RTP out
+      → BARGE-IN: caller speech during playback → kill TTS stream + flush RTP buffer <150ms, keep LLM context
+      → filler audio if LLM TTFT >700ms (cached per-tenant clips)
+```
+Per-turn waterfall logged (vad_ms, stt_final_ms, llm_ttft_ms, tts_ttfb_ms, first_audio_ms) → stats + spec.
+
+### Phases
+- **P0 — Spikes + bake-off (no integration):** tiny probes per provider through the existing harness with REAL mic audio (Tunisian phrases): measure each layer 10×, write the table INTO this spec. Needs founder keys: Deepgram signup ($200 credit), optional Cerebras/Groq, optional Azure. ElevenLabs exists.
+- **P1 — Orchestrator core:** brain-cascade module per architecture; unit tests with fake providers (speculative restart, chunker, barge-in kill-chain, filler trigger); guardrail regressions.
+- **P2 — Integration + A/B:** wire behind VOICE_BRAIN flag; fallback chains (STT: deepgram→speechmatics→degrade-to-chat · LLM: flashlite→cerebras→live · TTS: elevenlabs→azure→live); 10-call A/B cascade vs live with waterfalls; suite green; commit per phase.
+- **P3 — Founder re-test:** acceptance = median felt ≤1.2s, p95 ≤2.0s, correct booking with spell-back, V6.2 noise behavior intact, "feels like a person answered."
