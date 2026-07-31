@@ -35,6 +35,14 @@ export function makeTestApp(overrides = {}, appOpts = {}) {
     // No self-ticking timers under test: reminder/followup tests call tick(now).
     remindersIntervalMs: 0,
     followupsIntervalMs: 0,
+    // Voice calls (V1) are pinned the same way the sender is. Without this, a
+    // machine-global VOICE_CALL_TRANSPORT=real (the exact combo the call-harness
+    // recipe documents) would point a test app's call actions at
+    // graph.facebook.com with the developer's live token, and VOICE_CALLS=off
+    // would silently un-compose the service the suites assert on.
+    voiceCalls: true,
+    voiceCallTransport: 'mock',
+    voiceCallGraphBase: '',
     ...overrides,
   });
   const bus = createBus();

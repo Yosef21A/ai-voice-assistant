@@ -34,6 +34,10 @@ import { analyzeInbound, createNotificationService } from './notifications/index
 import { createReminderService } from './reminders/index.js';
 import { createFollowupService } from './followups/index.js';
 import { createCrmSync } from './crm/index.js';
+import { normalizeCallEvents } from './voice-call/normalize.js';
+import { createVoiceCallService } from './voice-call/index.js';
+import { createGraphCalls } from './voice-call/graphCalls.js';
+import { warmMediaStack } from './voice-call/media.js';
 import { normalizeDigits } from './engine/text.js';
 
 /**
@@ -200,6 +204,42 @@ export function createApp(opts = {}) {
   // Inbound guard (P2-F): dedupe + rate limiting shared by every webhook turn.
   const guard = opts.guard || createInboundGuard();
 
+  // WhatsApp calls (V1 voice tier): the SAME webhook carries `calls` changes.
+  // Composed here — after sender + alerts — but it opens NOTHING at boot: the
+  // first UDP socket appears only when a real call connects, so `npm run
+  // simulate` and every offline test stay socket-free. VOICE_CALLS=off skips
+  // construction entirely. The transport falls back to the WhatsApp one so a
+  // test app pinned to 'mock' can never place a real Graph call.
+  const voiceCalls =
+    opts.voiceCalls ||
+    (config.voiceCalls
+      ? createVoiceCallService({
+          store,
+          bus,
+          sender,
+          config,
+          alerts,
+          graphCalls:
+            opts.graphCalls ||
+            createGraphCalls({
+              // CONFIG is the single source of truth for transport + credentials
+              // here: createGraphCalls would otherwise fall back to process.env,
+              // and a developer's .env WHATSAPP_TOKEN would silently put a test
+              // app on the real Graph transport (test-helpers pin all three).
+              transport: config.voiceCallTransport || config.whatsappTransport || undefined,
+              token: config.whatsappToken,
+              // Passed even when empty: '' means "the Graph default", and
+              // supplying it stops createGraphCalls from reading the env.
+              apiBase: config.voiceCallGraphBase,
+              onResult: (rec) => {
+                if (rec && rec.ok === false && rec.error?.code === 'auth') {
+                  alerts.fire(rec.tenantId ?? null, 'wa_token_expired', rec.error.message);
+                }
+              },
+            }),
+        })
+      : null);
+
   const app = express();
   // Minimal security headers at the app layer (nginx adds HSTS/CSP in prod,
   // but dev/tunnel deployments must not go naked). CSP is left to nginx — a
@@ -250,6 +290,11 @@ export function createApp(opts = {}) {
         if (!inbound.text && !inbound.media) continue; // statuses / unsupported types
         // Persist + reply via the ONE sender + emit bus events; respects ai_paused.
         await ingestInbound({ store, engine, sender, bus, mediaClient, transcriber, config, guard, alerts }, inbound);
+      }
+      // Calling API (V1): `change.field === 'calls'` on the same payload. A body
+      // can legitimately mix messages and calls, so both normalizers run.
+      if (voiceCalls) {
+        await voiceCalls.handleEvents(normalizeCallEvents(req.body));
       }
     } catch (err) {
       console.error('[webhook] processing error:', err);
@@ -398,7 +443,7 @@ export function createApp(opts = {}) {
     res.status(500).json({ error: 'internal error' });
   });
 
-  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, followups, crm, kbReady };
+  return { app, config, store, provider, engine, bus, sender, mediaClient, transcriber, auth, notifier, reminders, followups, crm, voiceCalls, kbReady };
 }
 
 // Default composition (production / `npm start`): ONE store+bus+sender per process.
@@ -436,6 +481,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await composed.kbReady;
   composed.reminders.start(); // schedulers run ONLY in the real server process
   composed.followups.start();
+  // Pre-load the WebRTC stack (~1s) off the critical path: a ringing patient
+  // must never wait for a module to evaluate. Fire-and-forget, never fatal.
+  if (composed.voiceCalls) warmMediaStack();
   const server = app.listen(config.port, () => {
     console.log(`omen-clinic-agent listening on http://localhost:${config.port}`);
     console.log(`  provider: ${provider.name}   store: ${store.name}   tenants: ${
@@ -459,6 +507,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     try {
       composed.reminders.stop();
       composed.followups.stop();
+      // Hang up every live call and drop its UDP socket before the process goes.
+      composed.voiceCalls?.stop()?.catch?.(() => {});
     } catch {
       /* best-effort */
     }

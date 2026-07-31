@@ -127,6 +127,22 @@ export function getConfig(overrides = {}) {
       process.env.FOLLOWUPS_INTERVAL_MS != null
         ? Number(process.env.FOLLOWUPS_INTERVAL_MS) || 0
         : 5 * 60 * 1000,
+    // ── WhatsApp calls (V1 voice tier) ─────────────────────────────────────
+    // Inbound calls ride the SAME webhook as messages (change.field === 'calls').
+    // VOICE_CALLS=off unwires the whole thing at composition time — nothing is
+    // constructed, no UDP socket can ever be opened. Sockets are only opened on
+    // an actual connect event, never at boot, so the offline demo is unaffected.
+    voiceCalls: process.env.VOICE_CALLS !== 'off',
+    // 'real' | 'mock' | '' (auto: WHATSAPP_TOKEN ⇒ real). Point the graph base at
+    // the local harness (scripts/call-harness.js) to exercise real WebRTC media
+    // without Meta: VOICE_CALL_GRAPH_BASE=http://localhost:3901.
+    voiceCallTransport: process.env.VOICE_CALL_TRANSPORT || '',
+    voiceCallGraphBase: process.env.VOICE_CALL_GRAPH_BASE || '',
+    // Meta drops an unanswered call at ~30-60s; we give media 20s to connect,
+    // then hang up ourselves rather than hold a UDP socket on a dead call.
+    voiceCallConnectTimeoutMs: Number(process.env.VOICE_CALL_CONNECT_TIMEOUT_MS) || 20000,
+    // Hard cap on a single call (cost + stuck-session insurance).
+    voiceCallMaxSec: Number(process.env.VOICE_CALL_MAX_SEC) || 600,
     // ── ops (P2-F) ─────────────────────────────────────────────────────────
     // One JSON line per request (skips /health). On in production; opt-in
     // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.

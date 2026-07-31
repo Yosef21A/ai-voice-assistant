@@ -29,6 +29,20 @@
 //                         { conversationId, lead }
 //   emergency.detected    an emergency keyword tripped; bot steps back, staff alerted
 //                         { conversationId, keyword }
+// WhatsApp calls (V1 voice tier, src/voice-call). EXACTLY ONE terminal event
+// fires per call, chosen by whether audio ever flowed — never by the outcome
+// string — so a consumer can count calls without deduping:
+//   call.started          media connected — the patient is actually hearing us
+//                         { conversationId, call: { callId, from } }
+//   call.missed           the call never carried audio: clinic closed, ring
+//                         timeout, caller hung up while ringing, media failure.
+//                         NEVER preceded by call.started.
+//                         { conversationId, call: { callId, outcome, reason, from, … } }
+//   call.ended            a call the patient actually HELD has finished; always
+//                         preceded by call.started. `outcome` is 'completed' or
+//                         'failed' (a mid-call failure is still a call that
+//                         happened) — branch on outcome, not on the event.
+//                         { conversationId, call: { callId, outcome, durationSec, connectMs, from } }
 import { EventEmitter } from 'node:events';
 
 export const EVENT_TYPES = Object.freeze([
@@ -48,6 +62,10 @@ export const EVENT_TYPES = Object.freeze([
   'admin.notify',
   // P2-HUMANIZE: audit-only — an LLM turn failed and classic answered instead.
   'llm.fallback',
+  // V1 voice tier — inbound WhatsApp calls (see the catalog note above).
+  'call.started',
+  'call.missed',
+  'call.ended',
 ]);
 
 const FIREHOSE = 'event'; // single channel the SSE layer listens on

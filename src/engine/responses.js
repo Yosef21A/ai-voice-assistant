@@ -314,6 +314,61 @@ const DICT = {
     en: () => `Sure, let's reschedule 🔄 What day and time suit you?`,
   },
 
+  // ── WhatsApp calls (V1 voice tier) ────────────────────────────────────────
+  // A patient CALLED the clinic's WhatsApp number. Three strings only, and none
+  // of them says anything medical — V1 answers the phone, it does not consult.
+  //
+  // callClosed is the voicemail replacement: we reject a closed-hours call fast
+  // (better than 45s of ringing), then say so IN WRITING on the same thread the
+  // patient already has open, with the hours and an invitation to type instead.
+  callClosed: {
+    ar: (v) =>
+      `📞 سامحنا، ${v.clinic} توّا مسكّرة وما نجّمناش نردّو على مكالمتك.${
+        v.hours ? ` أوقات العمل: ${v.hours}.` : ''
+      }\nاكتبلنا هنا شنوّة تحتاج ونجاوبوك أول ما نفتحو 🙏`,
+    fr: (v) =>
+      `📞 Désolé, ${v.clinic} est fermée et nous n'avons pas pu prendre votre appel.${
+        v.hours ? ` Horaires : ${v.hours}.` : ''
+      }\nÉcrivez-nous ici et nous vous répondons dès l'ouverture 🙏`,
+    en: (v) =>
+      `📞 Sorry, ${v.clinic} is closed and we couldn't take your call.${
+        v.hours ? ` Opening hours: ${v.hours}.` : ''
+      }\nWrite to us here and we'll reply as soon as we open 🙏`,
+  },
+  // Transcript lines (inbox + audit), never sent to the patient. v.duration is
+  // pre-formatted "m:ss" so the templates stay pure string interpolation.
+  callSummary: {
+    ar: (v) => `📞 مكالمة واتساب — ${v.duration}`,
+    fr: (v) => `📞 Appel WhatsApp — ${v.duration}`,
+    en: (v) => `📞 WhatsApp call — ${v.duration}`,
+  },
+  callMissed: {
+    ar: (v) =>
+      `📞 مكالمة واتساب فايتة${
+        v.reason === 'closed'
+          ? ' — العيادة كانت مسكّرة'
+          : v.reason === 'failed'
+            ? ' — المكالمة ما كملتش'
+            : ' — ما جاوبناش'
+      }`,
+    fr: (v) =>
+      `📞 Appel WhatsApp manqué${
+        v.reason === 'closed'
+          ? ' — clinique fermée'
+          : v.reason === 'failed'
+            ? ' — échec de la connexion'
+            : ' — sans réponse'
+      }`,
+    en: (v) =>
+      `📞 Missed WhatsApp call${
+        v.reason === 'closed'
+          ? ' — clinic closed'
+          : v.reason === 'failed'
+            ? ' — connection failed'
+            : ' — no answer'
+      }`,
+  },
+
   // Cabinet handoff (D1): the human behind a cabinet is the doctor's
   // secretariat, and the line names the doctor.
   handoffCabinet: {
