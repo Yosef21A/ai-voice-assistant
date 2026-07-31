@@ -10,14 +10,18 @@ import { hasDoctorPersona, doctorName, defaultSpecialtyId, isFacilitator } from 
 
 const DAY_LABELS = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' };
 
-function hoursBlock(clinic) {
+// Exported since V2 (voice tier): src/voice-call/brain/prompts.js grounds the
+// spoken agent on the SAME three blocks. One source of truth matters most for
+// pricingBlock — the "from … final amount ONLY after medical assessment"
+// phrasing IS the pricing guardrail, and a voice copy of it would drift.
+export function hoursBlock(clinic) {
   const wh = clinic.workingHours || {};
   return Object.entries(DAY_LABELS)
     .map(([k, label]) => `${label}: ${wh[k] ? `${wh[k][0]}–${wh[k][1]}` : 'closed'}`)
     .join(' · ');
 }
 
-function specialtiesBlock(clinic) {
+export function specialtiesBlock(clinic) {
   return (clinic.specialties || [])
     .map((s) => {
       const syn = (s.synonyms || []).slice(0, 8).join(', ');
@@ -26,7 +30,7 @@ function specialtiesBlock(clinic) {
     .join('\n');
 }
 
-function pricingBlock(clinic) {
+export function pricingBlock(clinic) {
   const rows = Object.entries(clinic.pricing || {})
     .map(([id, p]) => `- ${id}: consultation ~${p.consultation_eur}€, estimates from ${p.estimate_eur?.[0]}€ to ${p.estimate_eur?.[1]}€ (final amount ONLY after medical assessment)`)
     .join('\n');

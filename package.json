@@ -33,6 +33,7 @@
   "license": "UNLICENSED",
   "dependencies": {
     "express": "^4.19.2",
+    "opusscript": "^0.1.1",
     "pg": "8.22.0",
     "werift": "^0.24.2"
   },

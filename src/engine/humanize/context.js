@@ -40,7 +40,14 @@ function historyMessages(convo) {
   }));
 }
 
-function nowString(now) {
+/**
+ * "Thursday 2026-08-06 15:30 (clinic local time)" — the ONE way this product
+ * tells a model what time it is. Exported since V2: the voice agent
+ * (src/voice-call/brain/loop.js) grounds on the same string, because two
+ * channels disagreeing about today's date is a bug nobody would think to look
+ * for until a patient is booked on the wrong day.
+ */
+export function nowString(now) {
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const pad = (n) => String(n).padStart(2, '0');
   return `${days[now.getDay()]} ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())} (clinic local time)`;

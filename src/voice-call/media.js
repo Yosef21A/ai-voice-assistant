@@ -45,9 +45,21 @@ export async function warmMediaStack() {
 
 // WhatsApp calls are Opus 48kHz stereo. Pinning the codec list keeps the answer
 // SDP small and predictable instead of negotiating whatever werift defaults to.
+//
+// telephone-event (RFC 4733 DTMF) is in the list since V2, and it is NOT
+// cosmetic. An SDP answer may only contain codecs the OFFER carried, and werift
+// additionally drops anything not in OUR list — so with opus alone the answer
+// stripped telephone-event even when the caller offered it, the negotiated DTMF
+// payload type came back null, and the whole keypad fallback was dead code that
+// looked alive. Verified against werift 0.24.2: with this entry an offer
+// carrying telephone-event answers with it, and an offer WITHOUT it still
+// answers opus-only (so the V1 echo path is untouched).
 function audioCodecs(RTCRtpCodecParameters) {
   return {
-    audio: [new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2 })],
+    audio: [
+      new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2 }),
+      new RTCRtpCodecParameters({ mimeType: 'audio/telephone-event', clockRate: 8000 }),
+    ],
   };
 }
 

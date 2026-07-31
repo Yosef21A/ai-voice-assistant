@@ -1,11 +1,23 @@
-// Voice-call service (V1) — the transport-agnostic brain-less call handler.
+// Voice-call service — the transport-agnostic call handler.
 //
-// WHAT THIS SLICE DOES: a patient calls the clinic's WhatsApp number; we decide
-// open/closed, answer or decline, hold a real WebRTC audio path (echo only),
-// and leave a durable trace on the SAME conversation thread the patient already
-// chats on. WHAT IT DELIBERATELY DOES NOT DO: transcribe, think, or speak.
-// There is no STT/LLM/TTS here, so no medical guardrail can be violated by a
-// V1 call — the bot literally cannot say anything.
+// WHAT THIS MODULE DOES: a patient calls the clinic's WhatsApp number; we decide
+// open/closed, answer or decline, hold a real WebRTC audio path, and leave a
+// durable trace on the SAME conversation thread the patient already chats on.
+//
+// TWO MODES, chosen by `config.voiceCallMode`:
+//   'echo'  (V1) — the audio path is held open and echoed back. There is no
+//                  STT/LLM/TTS, so no medical guardrail can be violated: the bot
+//                  literally cannot say anything. This is still the default
+//                  without a Gemini key, and every V1 test asserts it.
+//   'brain' (V2) — src/voice-call/brain/ runs a Gemini Live loop on the same
+//                  audio path: per-tenant persona, KB grounding, a two-phase
+//                  deterministic booking gate, and OUR emergency detector on the
+//                  caller's transcript. If the brain cannot start (or dies
+//                  mid-call), we do NOT leave dead air: the call is terminated
+//                  and a WhatsApp follow-up goes out, so the existing chat
+//                  engine picks the patient up from their next message.
+// This module owns mode selection, the loop's lifecycle and the degrade path;
+// everything the agent actually says lives under ./brain/.
 //
 // Design notes worth keeping:
 //   • The call state machine (./session.js) is pure and returns action
@@ -32,6 +44,7 @@
 //     console.error, move on — the same contract POST /webhook already has.
 import { createCallSession } from './session.js';
 import { createMediaSession } from './media.js';
+import { createBrainLoop } from './brain/loop.js';
 import { isAfterHours, weekdayInTz } from '../stats/index.js';
 import { sendAs } from '../api/outbound.js';
 import { resolveLanguage } from '../engine/language.js';
@@ -41,10 +54,76 @@ const LANGS = ['ar', 'fr', 'en'];
 const DAY_KEYS = Object.freeze(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
 const DEFAULT_CONNECT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_SEC = 600;
+const DEFAULT_BRAIN_CONNECT_MS = 6000;
+const DEFAULT_BREAKER_THRESHOLD = 3;
+const DEFAULT_BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
+// How long finish() will wait for a tool call that was still running when the
+// caller hung up. A `confirm_booking` in flight across the terminate webhook
+// wrote appointment EAS-260805-001 AFTER the transcript row had already
+// recorded booked:null — the clinic saw a call with no booking and a booking
+// with no call. Bounded, because a wedged tool must not hold a call open.
+const OUTCOME_DRAIN_MS = 2000;
+
+/**
+ * Consecutive-failure breaker for the voice brain. Deliberately the same shape
+ * as createQuota() in src/voice/transcriber.js — one mental model for "the
+ * paid dependency is down, stop paying the latency for it".
+ */
+export function createBrainBreaker({ threshold = 3, cooldownMs = 300000, now = () => Date.now() } = {}) {
+  let failures = 0;
+  let openedAt = 0;
+  return {
+    note() {
+      failures += 1;
+      if (failures >= threshold) openedAt = now();
+    },
+    noteOk() {
+      failures = 0;
+      openedAt = 0;
+    },
+    /** True ⇒ skip the brain entirely and degrade immediately. */
+    isOpen() {
+      if (!openedAt) return false;
+      if (now() - openedAt >= cooldownMs) {
+        // Half-open: let ONE probe through. If it fails, `note()` re-opens on
+        // the spot because failures is left one short of the threshold.
+        openedAt = 0;
+        failures = Math.max(0, threshold - 1);
+        return false;
+      }
+      return true;
+    },
+    state() {
+      return { failures, open: !!openedAt };
+    },
+  };
+}
 // Recently-ended callIds are remembered just long enough to swallow a late
 // redelivery. Meta retries a webhook for minutes, not hours.
 const RECENT_TTL_MS = 10 * 60 * 1000;
 const RECENT_CAP = 200;
+
+/**
+ * Race a promise against a deadline. The timer is unref'd so a slow brain can
+ * never hold the process open, and the loser is swallowed — whoever called us
+ * has already moved on to the degrade path.
+ */
+export function withTimeout(promise, ms, message = 'timeout') {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+    Promise.resolve(promise).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
 
 /** "0:47" / "12:05" — the duration format used in the transcript line. */
 export function formatDuration(sec) {
@@ -108,6 +187,7 @@ export function pickLang(convo, clinic) {
  * @param {object} [deps.alerts]      system alerts (owner-visible failures)
  * @param {object} deps.graphCalls    ./graphCalls.js client
  * @param {Function} [deps.mediaFactory] default createMediaSession (inject fakes)
+ * @param {Function} [deps.brainFactory] default createBrainLoop (inject fakes)
  * @param {Function} [deps.now]       inject the clock (tests drive closed hours)
  * @returns {{handleEvents:Function, active:Function, settled:Function, stop:Function}}
  */
@@ -119,12 +199,32 @@ export function createVoiceCallService({
   alerts,
   graphCalls,
   mediaFactory,
+  brainFactory,
   now,
 } = {}) {
   const clock = typeof now === 'function' ? now : () => new Date();
   const makeMedia = typeof mediaFactory === 'function' ? mediaFactory : createMediaSession;
+  const makeBrain = typeof brainFactory === 'function' ? brainFactory : createBrainLoop;
   const connectTimeoutMs = Number(config.voiceCallConnectTimeoutMs) || DEFAULT_CONNECT_TIMEOUT_MS;
   const maxSec = Number(config.voiceCallMaxSec) || DEFAULT_MAX_SEC;
+  const brainConnectMs = Number(config.voiceBrainConnectMs) || DEFAULT_BRAIN_CONNECT_MS;
+  // Only the literal 'brain' opts in. Anything else — a typo, 'BRAIN', '' —
+  // stays on the mute echo path, the same rule graphCalls uses for transports:
+  // an unrecognized value must never silently enable the expensive/risky mode.
+  const brainMode = config.voiceCallMode === 'brain';
+
+  // Circuit breaker on the BRAIN, mirroring the STT quota breaker
+  // (src/voice/transcriber.js). When Gemini Live is down, every caller would
+  // otherwise pay `voiceBrainConnectMs` of dead silence before the degrade —
+  // during exactly the incident when the clinic can least afford it. After
+  // `threshold` consecutive start failures we skip the wait entirely and go
+  // straight to "we'll message you on WhatsApp"; after the cooldown, ONE probe
+  // call is let through to find out whether the endpoint came back.
+  const brainBreaker = createBrainBreaker({
+    threshold: Number(config.voiceBrainBreakerThreshold) || DEFAULT_BREAKER_THRESHOLD,
+    cooldownMs: Number(config.voiceBrainBreakerCooldownMs) || DEFAULT_BREAKER_COOLDOWN_MS,
+    now: () => clock().getTime(),
+  });
 
   /** callId → { session, clinic, tenantId, conversationId, lang, media, timers } */
   const sessions = new Map();
@@ -211,12 +311,20 @@ export function createVoiceCallService({
     if (entry.finished) return;
     entry.finished = true;
     clearTimers(entry);
+    // Order matters, and it is not just "stop before reading". A tool call can
+    // still be RUNNING when the caller hangs up: stopping the loop does not
+    // await it, so reading outcome() straight away recorded booked:null for a
+    // booking that landed in the database a moment later. Stop, DRAIN, then read.
+    stopLoop(entry, 'call_ended');
+    await drainLoop(entry);
     closeMedia(entry.media);
     sessions.delete(entry.callId);
     rememberEnded(entry.callId, clock().getTime());
 
     const { session, tenantId, conversationId, lang } = entry;
     const summary = session.summary();
+    const brain = entry.loop ? entry.loop.outcome() : null;
+    const transcript = entry.loop ? entry.loop.transcript() : null;
     // "Did the patient actually hear us?" is the question that decides both the
     // transcript line and the bus event — NOT the outcome string. A call that
     // connected and then failed mid-way is a call that happened; telling the
@@ -225,8 +333,19 @@ export function createVoiceCallService({
     const held = session.wasActive;
     const missReason =
       reason || (summary.reason === 'closed' ? 'closed' : summary.outcome === 'failed' ? 'failed' : 'no_answer');
+    const duration = formatDuration(summary.durationSec);
+    // The inbox row is the only thing most staff will ever read about a call,
+    // so the line has to lead with what actually happened. Priority is by
+    // urgency, not by chronology: an emergency outranks a booking outranks a
+    // handoff request.
     const text = held
-      ? t(lang, 'callSummary', { duration: formatDuration(summary.durationSec) })
+      ? brain?.emergency
+        ? t(lang, 'callEmergencySummary', { duration })
+        : brain?.booked
+          ? t(lang, 'callBookedSummary', { duration, ref: brain.booked })
+          : brain?.handoff
+            ? t(lang, 'callHandoffSummary', { duration })
+            : t(lang, 'callSummary', { duration })
       : t(lang, 'callMissed', { reason: missReason });
 
     if (conversationId) {
@@ -242,10 +361,15 @@ export function createVoiceCallService({
             by: 'system',
             call: {
               callId: summary.callId,
+              // `outcome` stays the SESSION outcome ('completed'|'failed'|…) —
+              // the inbox and the analytics slice already branch on it. What the
+              // brain did rides alongside as `brain`, never on top of it.
               outcome: summary.outcome,
               durationSec: summary.durationSec,
               connectMs: summary.connectMs,
               from: entry.from,
+              ...(transcript && transcript.length ? { transcript } : {}),
+              ...(brain ? { brain } : {}),
             },
           },
           ts: new Date(session.endedAt || clock().getTime()).toISOString(),
@@ -262,7 +386,17 @@ export function createVoiceCallService({
       }
     }
 
-    const call = { ...summary, from: entry.from, reason: held ? summary.reason : missReason };
+    // The brain outcome rides the terminal event too — the notification, CRM and
+    // analytics consumers subscribe HERE, and "this call booked EAS-260805-001"
+    // is exactly what an owner alert needs to say. The transcript deliberately
+    // does NOT: it can be kilobytes and this payload fans out to every open SSE
+    // stream; the conversation row is where the words belong.
+    const call = {
+      ...summary,
+      from: entry.from,
+      reason: held ? summary.reason : missReason,
+      ...(brain ? { brain } : {}),
+    };
     bus?.publish?.(held ? 'call.ended' : 'call.missed', { tenantId, conversationId, call });
     await audit(tenantId, held ? 'call.ended' : 'call.missed', conversationId, call);
   }
@@ -321,6 +455,7 @@ export function createVoiceCallService({
       }
       if (entry.finished) return; // hung up while we were resolving the thread
       entry.conversationId = convo.id;
+      entry.convo = convo; // the brain books against this exact thread
       entry.lang = pickLang(convo, clinic);
 
       // Timezone-aware, overnight-window-aware (src/stats). A tenant with NO
@@ -370,13 +505,21 @@ export function createVoiceCallService({
       return await failCall(entry, 'failed');
     }
 
+    entry.sdpOffer = ev.sdpOffer;
     let media;
     try {
       media = await makeMedia({
         sdpOffer: ev.sdpOffer,
-        // V1 = ECHO. Verbatim: werift's sender rewrites ssrc / payloadType /
-        // sequence / timestamp on write, so relaying the packet is correct.
-        onRtp: (packet) => entry.media?.sendRtp(packet),
+        // ONE inbound seam, two consumers. Echo (V1) relays the packet verbatim
+        // — werift's sender rewrites ssrc / payloadType / sequence / timestamp
+        // on write, so that is correct. Brain (V2) hands it to the loop, which
+        // may not exist yet: the loop is only built once media CONNECTS, and
+        // audio can arrive in that window. Reading `entry.loop` late (rather
+        // than capturing it now) is what makes the seam work for both.
+        onRtp: (packet) => {
+          if (brainMode) entry.loop?.onRtp(packet);
+          else entry.media?.sendRtp(packet);
+        },
         clockNow: () => clock().getTime(),
       });
     } catch (err) {
@@ -452,6 +595,150 @@ export function createVoiceCallService({
       from: entry.from,
       connectMs: entry.session.summary().connectMs,
     });
+
+    // The agent starts talking only once the caller can actually hear it.
+    if (brainMode) await startBrain(entry);
+  }
+
+  // ── the brain (V2) ─────────────────────────────────────────────────────────
+
+  /** Close a brain loop without ever throwing. Idempotent by contract. */
+  function stopLoop(entry, reason) {
+    if (!entry.loop) return null;
+    try {
+      return entry.loop.stop(reason);
+    } catch (err) {
+      console.error('[voice-call] brain stop failed:', err?.message || err);
+      return null;
+    }
+  }
+
+  /**
+   * Wait (briefly) for the loop's in-flight work — a tool call that was running
+   * when the caller hung up. Bounded and non-throwing: a wedged tool costs us
+   * OUTCOME_DRAIN_MS and nothing else.
+   */
+  async function drainLoopSafe(loop) {
+    if (typeof loop?.settled !== 'function') return;
+    try {
+      await withTimeout(loop.settled(), OUTCOME_DRAIN_MS, 'brain drain timeout');
+    } catch (err) {
+      console.error('[voice-call] brain drain incomplete:', err?.message || err);
+    }
+  }
+
+  async function drainLoop(entry) {
+    await drainLoopSafe(entry.loop);
+  }
+
+  /**
+   * Build and start the Gemini Live loop for a connected call. A brain that
+   * cannot come up inside `voiceBrainConnectMs` is not something we wait out —
+   * the caller is listening to silence, which is worse than a polite goodbye.
+   */
+  async function startBrain(entry) {
+    if (entry.finished || entry.loop) return;
+    // Breaker open ⇒ the endpoint is known-down. Do not spend six seconds of
+    // this caller's life proving it again; go straight to the WhatsApp handover.
+    if (brainBreaker.isOpen()) {
+      console.warn(`[voice-call] brain breaker OPEN — degrading call ${entry.callId} immediately`);
+      return await degradeBrain(entry, { skipAlert: true });
+    }
+    let loop;
+    try {
+      loop = makeBrain({
+        clinic: entry.clinic,
+        convo: entry.convo || { id: entry.conversationId, patientWaId: entry.from },
+        // The webhook's `from` is the authoritative caller id — never a field
+        // read off a conversation record whose name differs per store adapter.
+        patientWaId: entry.from,
+        media: entry.media,
+        store,
+        bus,
+        sender,
+        config,
+        lang: entry.lang,
+        sdpOffer: entry.sdpOffer,
+        now: clock,
+        // The loop never hangs up by itself: it reports, and THIS module owns
+        // the Graph terminate + the transcript + the degrade text.
+        onEnd: (outcome) => track(onBrainEnd(entry, outcome)),
+      });
+    } catch (err) {
+      console.error('[voice-call] brain construction failed:', err?.message || err);
+      brainBreaker.note();
+      return await degradeBrain(entry);
+    }
+    entry.loop = loop;
+    if (entry.finished) {
+      stopLoop(entry, 'call_ended'); // terminated while we were constructing
+      return;
+    }
+
+    try {
+      await withTimeout(loop.start(), brainConnectMs, 'brain connect timeout');
+    } catch (err) {
+      console.error('[voice-call] brain failed to start:', err?.message || err);
+      brainBreaker.note();
+      return await degradeBrain(entry);
+    }
+    brainBreaker.noteOk(); // the endpoint answered — close a half-open breaker
+    if (entry.finished) stopLoop(entry, 'call_ended');
+  }
+
+  /** The loop reported it is over. Decide how the CALL ends. */
+  async function onBrainEnd(entry, outcome) {
+    if (entry.finished || entry.brainClosing) return;
+    if (outcome?.reason === 'call_ended') return; // WE stopped it from finish()
+    entry.brainClosing = true;
+    // An EMERGENCY outranks everything, including a socket that died right
+    // after it. The script was spoken, the owner paged and the number already
+    // sent in writing — a "sorry, write to us here" on top of that would be
+    // noise at best, and at worst reads as the clinic brushing them off.
+    if (outcome?.emergency) return await hangUp(entry, 'emergency');
+    if (outcome?.reason === 'brain_lost') return await degradeBrain(entry);
+    await hangUp(entry, outcome?.reason || 'brain_ended');
+  }
+
+  /**
+   * THE DEGRADE PATH — the difference between an outage and a lost patient.
+   * We hang up rather than hold a mute line, and we say so IN WRITING on the
+   * same thread, which hands the patient straight back to the chat engine.
+   */
+  async function degradeBrain(entry, { skipAlert = false } = {}) {
+    if (entry.finished || entry.degraded) return;
+    entry.degraded = true;
+    stopLoop(entry, 'brain_lost');
+    // An emergency already put the ambulance number in this thread in writing.
+    // Following it with "sorry, write to us here" is noise at best.
+    const hadEmergency = !!entry.loop?.outcome?.()?.emergency;
+    if (hadEmergency) return await hangUp(entry, 'emergency');
+
+    if (entry.conversationId) {
+      try {
+        await sendAs('bot', entry.conversationId, () =>
+          sender.sendText(entry.clinic, entry.from, t(entry.lang, 'callBrainLost'))
+        );
+      } catch (err) {
+        console.error('[voice-call] brain-lost follow-up failed:', err?.message || err);
+      }
+    }
+    // While the breaker is open the outage is already known — one alert per
+    // incident, not one per caller.
+    if (!skipAlert) {
+      alerts?.fire?.(entry.tenantId, 'voice_brain_lost', `call ${entry.callId} lost its voice agent`);
+    }
+    await hangUp(entry, 'brain_lost');
+  }
+
+  /** We end the call ourselves: Graph terminate, then close the books once. */
+  async function hangUp(entry, reason) {
+    if (entry.finished) return;
+    entry.session.localHangup(clock().getTime());
+    await graphCalls
+      .callAction({ tenant: entry.clinic, callId: entry.callId, action: 'terminate' })
+      .catch(() => {});
+    await finish(entry, { reason });
   }
 
   async function onConnectTimeout(entry) {
@@ -475,6 +762,7 @@ export function createVoiceCallService({
     if (entry.finished) {
       // finish() may have run BEFORE the media session existed (terminate during
       // makeMedia). Whatever landed on the entry since then still needs closing.
+      stopLoop(entry, 'call_ended');
       closeMedia(entry.media);
       return;
     }
@@ -550,8 +838,17 @@ export function createVoiceCallService({
       }));
     },
 
-    /** Resolve once every out-of-band task (accept, watchdogs) has drained. */
-    settled,
+    /**
+     * Resolve once every out-of-band task has drained — the service's own
+     * (accept, watchdogs) AND every live brain's in-flight tool calls. Ops and
+     * tests both need "is anything still writing?" to be one question.
+     */
+    async settled() {
+      await settled();
+      const loops = [...sessions.values()].map((e) => e.loop).filter(Boolean);
+      await Promise.all(loops.map((l) => drainLoopSafe(l)));
+      await settled();
+    },
 
     /**
      * Graceful shutdown / test teardown: hang up everything, drop every socket
@@ -565,9 +862,13 @@ export function createVoiceCallService({
       const entries = [...sessions.values()];
       sessions.clear();
       const at = clock().getTime();
+      // Drain BEFORE tearing anything down: a tool call still writing an
+      // appointment during a deploy must finish, not be abandoned half-written.
+      await Promise.all(entries.map((e) => drainLoopSafe(e.loop)));
       for (const entry of entries) {
         entry.finished = true;
         clearTimers(entry);
+        stopLoop(entry, 'call_ended');
         closeMedia(entry.media);
         rememberEnded(entry.callId, at);
         const r = entry.session.localHangup(at);

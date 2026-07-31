@@ -32,6 +32,29 @@ const EMERGENCY_REPLY = {
     `🚨 This may be a medical emergency. Please call emergency services now at ${v.emergency}${v.clinic ? ` or the clinic at ${v.clinic}` : ''}.\nOur team has been alerted and will contact you. I'm an automated assistant and can't handle emergencies — your safety comes first. 🌿`,
 };
 
+// SPOKEN twin of the reply above (V2 voice tier). Same content, same refusal to
+// diagnose, same disclosure — but written for an ear, not an eye: no emoji, no
+// line break, and the number read digit by digit because "one nine zero" is what
+// a person in distress can actually act on. The WRITTEN version above still goes
+// to WhatsApp; this one is what the agent says out loud.
+const EMERGENCY_SPOKEN = {
+  ar: (v) =>
+    `هذي ممكن تكون حالة طوارئ طبية. من فضلك اتصل بالإسعاف توّا على الرقم ${v.emergency}${v.clinic ? `، ولا بالعيادة على ${v.clinic}` : ''}. فريقنا تنبّه وباش يتواصل معاك. أنا مساعد آلي وما نجّمش نتعامل مع الحالات الطارئة. السلامة قبل كل شيء.`,
+  fr: (v) =>
+    `Cela peut être une urgence médicale. Appelez immédiatement les secours au ${v.emergency}${v.clinic ? `, ou la clinique au ${v.clinic}` : ''}. Notre équipe est alertée et va vous contacter. Je suis un assistant automatique et je ne peux pas gérer les urgences. Votre sécurité d'abord.`,
+  en: (v) =>
+    `This may be a medical emergency. Please call emergency services now on ${v.emergency}${v.clinic ? `, or the clinic on ${v.clinic}` : ''}. Our team has been alerted and will contact you. I am an automated assistant and I cannot handle emergencies. Your safety comes first.`,
+};
+
+/** Read a phone number as separate digits so it survives being spoken once. */
+export function speakableNumber(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return s;
+  // Only digit-runs are spaced out; a '+' or a formatted clinic line keeps its
+  // shape. "190" → "1 9 0"; "+216 29 496 305" → "+2 1 6 2 9 …".
+  return s.replace(/\d+/g, (run) => run.split('').join(' '));
+}
+
 function tenantConfig(tenant) {
   if (!tenant || typeof tenant !== 'object') return {};
   if (tenant.config && typeof tenant.config === 'object') return tenant.config;
@@ -69,6 +92,23 @@ export function buildEmergencyReply(tenant, lang = 'fr') {
   const clinic = escalationNumber(tenant);
   // Don't print the clinic line if it's identical to the emergency number.
   return fn({ emergency, clinic: clinic && clinic !== emergency ? clinic : '' });
+}
+
+/**
+ * The SPOKEN emergency script (V2 voice tier). Identical guardrail content to
+ * buildEmergencyReply, rendered for speech — see EMERGENCY_SPOKEN above.
+ * @param {object} tenant
+ * @param {'ar'|'fr'|'en'} [lang]
+ */
+export function buildSpokenEmergencyReply(tenant, lang = 'fr') {
+  const L = ['ar', 'fr', 'en'].includes(lang) ? lang : 'fr';
+  const fn = EMERGENCY_SPOKEN[L] || EMERGENCY_SPOKEN.fr;
+  const emergency = resolveEmergencyNumber(tenant);
+  const clinic = escalationNumber(tenant);
+  return fn({
+    emergency: speakableNumber(emergency),
+    clinic: clinic && clinic !== emergency ? speakableNumber(clinic) : '',
+  });
 }
 
 function deriveConversationId({ conversationId, tenant, waId }) {

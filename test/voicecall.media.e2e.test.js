@@ -196,3 +196,59 @@ test('createMediaSession rejects a missing/empty offer without opening anything'
   await assert.rejects(() => createMediaSession({}), /requires an SDP offer/);
   await assert.rejects(() => createMediaSession({ sdpOffer: '' }), /requires an SDP offer/);
 });
+
+// ── REGRESSION (V2): DTMF must actually survive negotiation ─────────────────
+// The keypad fallback (brain/loop.js handleDtmf) reads the NEGOTIATED
+// telephone-event payload type. With opus alone pinned in media.js, werift
+// stripped telephone-event out of the answer even when the caller offered it —
+// so codec.dtmfPayloadType came back null and the whole feature was dead code
+// that looked alive. Proven with a real werift peer, because this is exactly
+// the class of bug a hand-written SDP fixture cannot catch.
+test('the SDP answer keeps telephone-event when the caller offers it', { timeout: 30000 }, async (t) => {
+  if (!(await canBindUdp())) {
+    t.skip('environment cannot bind UDP sockets');
+    return;
+  }
+  const rtpmaps = (sdp) => sdp.split(/\r?\n/).filter((l) => l.startsWith('a=rtpmap'));
+
+  // 1) A caller that offers DTMF (what a real phone on a noisy line sends).
+  const withDtmf = new RTCPeerConnection({
+    codecs: {
+      audio: [
+        new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2 }),
+        new RTCRtpCodecParameters({ mimeType: 'audio/telephone-event', clockRate: 8000 }),
+      ],
+    },
+    iceServers: [],
+  });
+  withDtmf.addTrack(new MediaStreamTrack({ kind: 'audio' }));
+  await withDtmf.setLocalDescription(await withDtmf.createOffer());
+  const dtmfOffer = withDtmf.localDescription.sdp;
+  await withDtmf.close();
+
+  let media = await createMediaSession({ sdpOffer: dtmfOffer, peerConfig: { iceServers: [] } });
+  t.after(() => media?.close());
+  assert.ok(
+    rtpmaps(media.sdpAnswer).some((l) => /telephone-event\/8000/.test(l)),
+    `the answer dropped DTMF: ${rtpmaps(media.sdpAnswer).join(' | ')}`
+  );
+  assert.ok(rtpmaps(media.sdpAnswer).some((l) => /opus\/48000/.test(l)), 'and audio still negotiates');
+  media.close();
+
+  // 2) A caller that offers ONLY opus (V1's world) still answers opus-only —
+  //    adding the codec to our list must not put anything into an answer the
+  //    offer never asked for.
+  const opusOnly = new RTCPeerConnection({
+    codecs: { audio: [new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2 })] },
+    iceServers: [],
+  });
+  opusOnly.addTrack(new MediaStreamTrack({ kind: 'audio' }));
+  await opusOnly.setLocalDescription(await opusOnly.createOffer());
+  const plainOffer = opusOnly.localDescription.sdp;
+  await opusOnly.close();
+
+  media = await createMediaSession({ sdpOffer: plainOffer, peerConfig: { iceServers: [] } });
+  assert.ok(!/telephone-event/.test(media.sdpAnswer), 'no DTMF was offered, so none is answered');
+  assert.ok(rtpmaps(media.sdpAnswer).some((l) => /opus\/48000/.test(l)));
+  media.close();
+});

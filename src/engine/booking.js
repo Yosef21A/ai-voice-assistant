@@ -273,4 +273,7 @@ export function cancelBooking(ctx) {
   return { intent: 'cancel', replies: [t(ctx.lang, 'cancelled')] };
 }
 
-export { STEPS, specialtyLabel, specialtyList, buildSummary, nextStep };
+// genRef is exported since V2: the voice tier books through its own two-phase
+// tool gate (src/voice-call/brain/tools.js) but MUST mint the same human
+// reference the chat flow does — the clinic reads one appointments list, not two.
+export { STEPS, specialtyLabel, specialtyList, buildSummary, nextStep, genRef };

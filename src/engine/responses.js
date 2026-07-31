@@ -369,6 +369,58 @@ const DICT = {
       }`,
   },
 
+  // ── WhatsApp calls (V2 — the talking brain) ───────────────────────────────
+  // The agent now speaks, so three more strings exist. None of them is written
+  // by the model: callRecap is rendered from DETERMINISTICALLY validated slots
+  // and read aloud verbatim before anything is written to the database, which
+  // is the whole point of the two-phase booking gate (src/voice-call/brain/
+  // tools.js). If a value never reached the recap, it can never reach the
+  // appointments table.
+  callRecap: {
+    ar: (v) =>
+      `${v.doctor ? `موعد مع الدكتور ${v.doctor}` : `موعد ${v.specialty}`} نهار ${v.when}، باسم ${v.name}، ورقم التلفون ${v.contact}. صحيح؟`,
+    fr: (v) =>
+      `${v.doctor ? `Rendez-vous avec le Dr ${v.doctor}` : `Rendez-vous en ${v.specialty}`} le ${v.when}, au nom de ${v.name}, numéro ${v.contact}. C'est correct ?`,
+    en: (v) =>
+      `${v.doctor ? `Appointment with Dr ${v.doctor}` : `${v.specialty} appointment`} on ${v.when}, for ${v.name}, phone ${v.contact}. Is that correct?`,
+  },
+  // Spoken twin of adjustedInRecap: same transparency rule (a silently shifted
+  // time is a lie), but no emoji and no "reply «no»" — this is read out loud.
+  callAdjusted: {
+    ar: (v) => `الوقت اللي طلبتو ما كانش فاضي، أقرب موعد متاح هو ${v.when}.`,
+    fr: (v) => `L'horaire demandé n'était pas libre ; le créneau le plus proche est ${v.when}.`,
+    en: (v) => `The time you asked for wasn't free; the nearest slot is ${v.when}.`,
+  },
+  // Transcript lines for what a call ACTUALLY produced. The inbox row is the
+  // only thing most staff will ever read about a call, so the outcome that
+  // matters belongs in the first line, not buried in the payload.
+  callBookedSummary: {
+    ar: (v) => `📞 مكالمة واتساب — ${v.duration} · حجز ${v.ref} ✅`,
+    fr: (v) => `📞 Appel WhatsApp — ${v.duration} · RDV ${v.ref} ✅`,
+    en: (v) => `📞 WhatsApp call — ${v.duration} · booking ${v.ref} ✅`,
+  },
+  callEmergencySummary: {
+    ar: (v) => `📞🚨 مكالمة واتساب — ${v.duration} · حالة طوارئ — تواصل مع المريض حالاً`,
+    fr: (v) => `📞🚨 Appel WhatsApp — ${v.duration} · URGENCE — contactez le patient immédiatement`,
+    en: (v) => `📞🚨 WhatsApp call — ${v.duration} · EMERGENCY — contact the patient now`,
+  },
+  callHandoffSummary: {
+    ar: (v) => `📞👩‍⚕️ مكالمة واتساب — ${v.duration} · المريض طلب موظف`,
+    fr: (v) => `📞👩‍⚕️ Appel WhatsApp — ${v.duration} · le patient demande un conseiller`,
+    en: (v) => `📞👩‍⚕️ WhatsApp call — ${v.duration} · the patient asked for a human`,
+  },
+  // THE DEGRADE PATH, and the reason a brain outage is not a lost patient: the
+  // call could not continue, so we say so in writing on the same thread and the
+  // existing chat engine picks the conversation up from their next message.
+  callBrainLost: {
+    ar: () =>
+      `📞 سامحنا، ما نجّمناش نكمّلو المكالمة. اكتبلنا هنا شنوّة تحتاج (موعد، أسعار، أي سؤال) ونكمّلو معاك من غادي طول 🙏`,
+    fr: () =>
+      `📞 Désolé, nous n'avons pas pu poursuivre l'appel. Écrivez-nous ici ce dont vous avez besoin (rendez-vous, tarifs, question) et on continue tout de suite 🙏`,
+    en: () =>
+      `📞 Sorry, we couldn't continue the call. Write here what you need (appointment, pricing, a question) and we'll pick it up right away 🙏`,
+  },
+
   // Cabinet handoff (D1): the human behind a cabinet is the doctor's
   // secretariat, and the line names the doctor.
   handoffCabinet: {

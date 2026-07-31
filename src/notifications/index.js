@@ -20,7 +20,12 @@ export {
   weekdayInTz,
   normalizeMsisdn,
 } from './service.js';
-export { analyzeInbound, buildEmergencyReply, resolveEmergencyNumber } from './pipeline.js';
+export {
+  analyzeInbound,
+  buildEmergencyReply,
+  buildSpokenEmergencyReply,
+  resolveEmergencyNumber,
+} from './pipeline.js';
 export {
   formatBooking,
   formatHotLead,

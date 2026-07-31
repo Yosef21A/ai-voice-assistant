@@ -143,6 +143,30 @@ export function getConfig(overrides = {}) {
     voiceCallConnectTimeoutMs: Number(process.env.VOICE_CALL_CONNECT_TIMEOUT_MS) || 20000,
     // Hard cap on a single call (cost + stuck-session insurance).
     voiceCallMaxSec: Number(process.env.VOICE_CALL_MAX_SEC) || 600,
+    // ── the talking brain (V2 voice tier) ──────────────────────────────────
+    // 'brain' = Gemini Live realtime loop (per-tenant persona, KB grounding,
+    //           deterministic booking gate, our own emergency detector).
+    // 'echo'  = V1 behaviour: the audio path is held open and echoed, the bot
+    //           says nothing. Automatic without a Gemini key — a clinic must
+    //           never get a mute call because someone forgot to set a flag.
+    voiceCallMode: process.env.VOICE_CALL_MODE || (process.env.GEMINI_API_KEY ? 'brain' : 'echo'),
+    // Native-audio Live model. Rolling alias on purpose: a pinned model that
+    // gets retired silently muted the chat engine once already (see geminiModel).
+    geminiLiveModel: process.env.GEMINI_LIVE_MODEL || 'gemini-live-2.5-flash-native-audio',
+    // The brain has this long to answer the phone before we give up and degrade
+    // to the WhatsApp follow-up. Dead air is the one outcome we refuse.
+    voiceBrainConnectMs: Number(process.env.VOICE_BRAIN_CONNECT_MS) || 6000,
+    // After the emergency script is dictated, how long before we hang up. The
+    // Arabic script is the longest of the three and is read slowly on purpose;
+    // 9s truncated it mid-number in review, so the floor is 12s.
+    voiceBrainEmergencyGraceMs: Number(process.env.VOICE_BRAIN_EMERGENCY_GRACE_MS) || 12000,
+    // Circuit breaker on the brain, mirroring the STT quota breaker
+    // (src/voice/transcriber.js). A dead Gemini Live endpoint would otherwise
+    // cost EVERY caller 6 seconds of silence before the degrade; after three
+    // consecutive failures we skip straight to "we'll message you on WhatsApp"
+    // and let one probe call through after the cooldown.
+    voiceBrainBreakerThreshold: Number(process.env.VOICE_BRAIN_BREAKER_THRESHOLD) || 3,
+    voiceBrainBreakerCooldownMs: Number(process.env.VOICE_BRAIN_BREAKER_COOLDOWN_MS) || 300000,
     // ── ops (P2-F) ─────────────────────────────────────────────────────────
     // One JSON line per request (skips /health). On in production; opt-in
     // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.

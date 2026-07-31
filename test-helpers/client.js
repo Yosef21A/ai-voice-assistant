@@ -43,6 +43,11 @@ export function makeTestApp(overrides = {}, appOpts = {}) {
     voiceCalls: true,
     voiceCallTransport: 'mock',
     voiceCallGraphBase: '',
+    // V2: every EXISTING suite asserts V1 echo behaviour, and a machine-global
+    // GEMINI_API_KEY would auto-select 'brain' and try to open a WebSocket to
+    // Google from a unit test. Brain tests opt in EXPLICITLY, with a fake.
+    voiceCallMode: 'echo',
+    geminiLiveModel: 'test-live-model',
     ...overrides,
   });
   const bus = createBus();

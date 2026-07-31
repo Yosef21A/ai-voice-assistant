@@ -468,6 +468,15 @@ function warnBootConfig(cfg) {
   if (!cfg.geminiApiKey && !cfg.anthropicApiKey && cfg.conversationMode === 'llm') {
     warn('CONVERSATION_MODE=llm but no LLM API key is set → every turn will run the classic flow.');
   }
+  // Brain mode follows the key by default (same precedent as conversationMode).
+  // That is convenient and it is also a bill: say so out loud when nobody asked
+  // for it explicitly, because a voice minute costs far more than a chat turn.
+  if (cfg.voiceCalls && cfg.voiceCallMode === 'brain' && !process.env.VOICE_CALL_MODE) {
+    warn(
+      'GEMINI_API_KEY is set → inbound voice calls will use the PAID Gemini Live tier ' +
+        '(VOICE_CALL_MODE was not set). Set VOICE_CALL_MODE=echo to opt out.'
+    );
+  }
   if (process.env.NODE_ENV === 'production' && !process.env.APP_SECRET) {
     warn('APP_SECRET is unset in production → session cookies use the insecure dev default.');
   }
