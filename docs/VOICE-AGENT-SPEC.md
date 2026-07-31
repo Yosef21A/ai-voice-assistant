@@ -71,3 +71,28 @@ implement complete files with tests, suite green, commit per slice. The
 existing engine/executor/guardrails are law — voice is a transport. I'll do
 live call tests when you say ready. Update the spec at session end.
 ```
+
+## V5 — HUMAN-VOICE QUALITY LADDER (founder priority 2026-07-31: "must not feel AI")
+Ordered execution; T0 is free and ships first; T2 is the demo/pilot voice. TTS is ~70% of the human illusion, turn-taking ~20%, conversation design ~10%.
+
+### T0 — Human-feel engineering on the CURRENT stack (free — do immediately)
+1. **Zero-dead-air pickup:** pre-render/cache the per-tenant greeting audio; play it the instant the call connects (<300ms) while Gemini Live warms. Dead air at pickup is the #1 AI tell.
+2. **Turn discipline:** hard cap 1–2 short sentences per turn in the prompt + post-filter; one question max per turn (mirrors chat humanize law).
+3. **Dialect micro-behaviors in prompt:** backchannels ("أيوا", "تمام", "باهي"), thinking fillers spoken while tools run ("ثانية برك نشوفلك الموعد…") — never silence during executor work; natural sign-offs.
+4. **Endpointing/VAD tuning:** callers pause mid-sentence — raise end-of-speech patience (~800–1200ms), never clip; measure and log false-cut rate.
+5. **Barge-in polish:** on caller interrupt, stop TTS within ~150ms, drop the rest of the sentence, respond to the interruption (werift RTP: flush playout buffer).
+6. **Personalization:** returning patient → greet by name once; reference prior booking when relevant (store lookup already exists).
+7. **Latency budget instrumentation:** log per-turn ms (caller-stop → agent-first-audio); target median <1.2s with filler coverage beyond 800ms.
+
+### T1 — Cheap human mouth (~$0.01–0.02/min): Azure Neural TTS
+Keep Gemini ears+brain; stream sentence-level TTS via Azure `ar-TN`/`ar-LY` neural voices (verify current voice list + pricing at build). Provider interface: `src/voice-call/brain/tts/` with `geminiNative` (default, free) + `azure` + `elevenlabs` implementations, per-tenant `voice` config. Fallback chain: chosen provider error → geminiNative → degrade path.
+
+### T2 — The illusion (~$0.05–0.15/min): ElevenLabs cloned dialect voice
+- Instant-clone a CONSENTED native Tunisian speaker (founder or friend; 2-min clean sample; written consent stored). One male + one female voice per dialect eventually; per-tenant selection in wizard/settings.
+- ElevenLabs Flash/Turbo multilingual, streamed; keep sentences short (clones amplify long-sentence drift).
+- COGS note: meter minutes per tenant (stats already track call duration) — voice minutes are a real cost; Concierge tier absorbs them, pass-through clause pattern already exists in contracts.
+- Env: ELEVENLABS_API_KEY (never commit); quota/429 → fallback chain.
+### T3 — S2S premium (OpenAI Realtime-class): PARKED — best turn-taking, weakest guardrail control, weak dialect AR, highest cost. Revisit only if a client demands English/French-first voice.
+
+### Acceptance for "human" (test with real Tunisian/Libyan listeners)
+Blind test: 5 native listeners hear a 60s booking call; ≥3/5 unsure or wrong about "human or AI" = pass at T2. Also: zero dead-air >1.2s uncovered by filler; zero mid-word caller clips in a 10-call sample; booking correctness unchanged (executor law).
