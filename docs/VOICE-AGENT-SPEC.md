@@ -195,3 +195,96 @@ Per-turn waterfall logged (vad_ms, stt_final_ms, llm_ttft_ms, tts_ttfb_ms, first
 - **STT unchanged:** Deepgram $200 signup credit (≈690h, effectively free, card-free) primary → Speechmatics 50h/mo free fallback. Founder signs up when P0 asks.
 - **LLM — NO paid key. Free failover chain replaces it:** `gemini flash-lite (free, thinking OFF)` → `Cerebras (1M tok/day free)` → `Groq (free)` → classic. Rotation on 429/quota — quota exhaustion must trigger the NEXT provider, never silent classic degradation (kills the "bad replies" root cause without spending). Waterfall log names the answering provider every turn. Derja few-shot pack applies to ALL providers; founder ear-grades the A/B sheet.
 - **Cost surfacing for the future:** per-tenant usage metering (STT min / LLM tokens / TTS chars) logged from day one so pass-through billing is one config away.
+
+### P0 MEASURED RESULTS (2026-08-01, this machine, Tunisia→providers)
+Real API calls, throwaway probes (deleted), no money spent. Method for every row: **1 warm-up run excluded**,
+then **8 measured runs** (**4** for Gemini Live, quota-sensitive), median + p95 reported. All measured runs
+reuse a warm keep-alive connection; the cold-connection cost is called out separately. Free-tier keys only.
+
+#### Layer: TTS
+TTFB = request start → **first byte of response body** (i.e. first playable audio), not header time.
+
+| Provider / mode | Model + headers that actually worked | median TTFB | p95 TTFB | Cold (1st) | Notes |
+|---|---|---:|---:|---:|---|
+| **Fish Audio — stock voice, mp3** | header `model: s2.1-pro-free`, JSON body `{text, format:'mp3', latency:'balanced'}` | **598 ms** | 978 ms | 633 ms | ~4.4 s of audio per 50-char sentence; full generation 2.6 s median (RTF ≈ 1.7×) |
+| **Fish Audio — stock voice, pcm** | same, `format:'pcm'` | **597 ms** | 1068 ms | 759 ms | `sample_rate` **is honoured** — `8000` returns G.711-ready PCM, so **no resampling in the RTP path** |
+| **Fish Audio — clone, reference uploaded per request** | `Content-Type: application/msgpack`, `references:[{audio:<raw bytes>, text}]`, 15 s ref | 1430 ms | 1746 ms | 1784 ms | **+858 ms** vs stock — the 240 KB reference is re-uploaded every turn. Do NOT ship this shape. |
+| **Fish Audio — clone, pre-created voice model** | `POST /model` (multipart, `train_mode:fast`) → `reference_id` in a plain JSON TTS body | **572 ms** | 929 ms | 1622 ms | **Same TTFB as stock.** Model trained in 4.2 s, returned `state:"trained"`, `languages:["ar"]`. This is the shippable clone path. |
+| **ElevenLabs Flash v2.5** | `xi-api-key`, `/stream?output_format=pcm_24000&optimize_streaming_latency=3`, `model_id: eleven_flash_v2_5` | **174 ms** | 180 ms | 184 ms | Fastest by 3.4×, and the tightest spread on the board (146–180 ms). Full generation 426 ms for 2.55 s of audio (RTF ≈ 6×). |
+| **Gemini native audio (incumbent)** | `wss://…BidiGenerateContent?key=`, `gemini-2.5-flash-native-audio-latest`, `responseModalities:['AUDIO']` | **1969 ms** | 2042 ms | 1922 ms | setupComplete → first `inlineData` chunk. Brain **and** mouth in one number. Connect+setup costs a further 442 ms median (paid once per call). |
+| Azure `ar-TN`/`ar-LY` | — | — | — | — | **Not measured** — parked per doctrine (needs Azure signup). |
+
+**Free-tier walls hit (TTS):**
+- **Fish paid models are hard-gated:** `s2.1-pro`, `s2-pro`, `s1`, `speech-1.6` all return **402 `Insufficient API credit`** (wallet credit `0`). **Only `s2.1-pro-free` works.** The `model:` request header is required and is the *only* selector.
+- **Fish cloning is NOT gated on the free key — but JSON is.** `references:[{audio:<base64>}]` over `application/json` → **400 `Reference Audio is not valid`**. The identical payload as **msgpack with raw bytes** → **200 + audio**. **Verdict: on-the-fly 15 s cloning WORKS on the free key; msgpack is mandatory.** (A ~35-line inline encoder covers the whole body — no dependency needed.) Creating a persistent voice model from the same 15 s clip also works on the free key.
+- **ElevenLabs free tier is 10 000 chars/month, not 20 000** — measured live from `/v1/user/subscription` (`tier:"free"`, `character_limit:10000`). At ~150 chars per spoken reply that is **≈65 replies for the entire month**, i.e. under 10 real calls. Free tier is also non-commercial and has no instant voice cloning. `pcm_24000` is **not** gated (it streams fine on free).
+
+**Recommendation — TTS: Fish Audio `s2.1-pro-free` is PRIMARY, via a pre-created `reference_id`.**
+It misses the doctrine's ~400 ms bar (572 ms median, 929 ms p95), and ElevenLabs is genuinely 3.4× faster
+with a far tighter tail — but ElevenLabs' free tier cannot carry a pilot at all: 10 k chars/month is a demo,
+not a receptionist, and it forbids both commercial use and cloning. Fish is fair-use free, its Arabic clone
+path is **verified working on this key**, and `sample_rate: 8000` deletes the resample stage from the RTP
+path outright. The ~400 ms we concede is bought back in the orchestrator, not the vendor: chunk at the first
+clause so only the *opening* fragment pays TTFB, and keep the cached filler clip armed at 700 ms (already in
+the V7 architecture). Even at Fish's number the cascade lands at **≈1.2 s brain-to-first-audio vs Gemini
+Live's 1.97 s — a 775 ms win before STT is even counted.** ElevenLabs stays wired as the #2 provider for
+founder demos and as the latency ceiling we measure ourselves against; Gemini native audio drops to last-resort.
+**Ship rule:** never upload the reference per request (+858 ms) — clone once at onboarding, store `reference_id` per tenant.
+
+#### Layer: LLM (voice turn, streaming, thinking off)
+Realistic turn: 2-line receptionist persona system prompt + «نحب نحجز موعد قلب الجمعة الصباح», `maxOutputTokens: 80`.
+TTFT = request start → first non-thought text token.
+
+| Model (alias → what it actually resolves to) | median TTFT | p95 TTFT | median tok/s | Free-tier quota (measured) | Notes |
+|---|---:|---:|---:|---|---|
+| **`gemini-flash-lite-latest`** → `gemini-3.5-flash-lite` | **623 ms** | **698 ms** | 471 | **no wall hit** in ~50 calls | Tight spread (568–698 ms). The only candidate that never rate-limited under sustained load. |
+| `gemini-3-flash-preview` → `gemini-3-flash` | 906 ms | 1075 ms | 323 | **5 requests/min** (recovers in ~20 s) | Added mid-P0 as the *free-tier-viable* Flash-class contender. +283 ms vs Flash-Lite. 5 RPM is ~5 turns/min across ALL tenants — a hard concurrency ceiling. |
+| `gemini-flash-latest` → `gemini-3.6-flash` | 1103 ms | 1763 ms | 236 | **20 requests/DAY** | **p95 is 2.5× worse** — and p95 is what ends calls. Quota did not recover across 14 min of retries at 90 s intervals ⇒ daily, not a rolling window. |
+| Cerebras | — | — | — | — | **SKIP — awaiting founder signup** (no key present). 1M tok/day free. |
+| Groq | — | — | — | — | **SKIP — awaiting founder signup** (no key present). |
+
+**Free-tier walls hit (LLM):**
+- **`thinkingConfig.thinkingBudget: 0` is REJECTED — HTTP 400 `INVALID_ARGUMENT` — on both `-latest` aliases.** They now resolve to Gemini 3.x, which takes **`thinkingConfig.thinkingLevel`** instead. `'minimal'` and `'low'` are both accepted; `'minimal'` was used for every measurement and `usageMetadata.thoughtsTokenCount` came back **0**, confirming thinking really is off. **The V7 architecture line saying "thinkingBudget: 0" is stale — P1 must use `thinkingLevel`.**
+- **`gemini-flash-latest` free quota is 20 requests per DAY** (`generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash`). It 429'd partway through the 10-question grading sheet and **never recovered** across 14 minutes of retries at 90 s intervals, which is how we know it is a daily cap and not a rolling window. Twenty requests a day is roughly **four phone calls** — this alone disqualifies it as a zero-budget primary, independent of quality.
+- **`gemini-3-flash-preview` is 5 requests/minute** — recovers in ~20 s, so it is workable, but 5 RPM is a global ceiling across every tenant. Any cascade using it needs the rotation chain armed from turn one.
+- **`gemini-2.5-flash` returns 404** ("no longer available to new users") and **`gemini-2.0-flash` free quota is literally 0**. Do not hardcode 2.x anywhere; pin a 3.x id or the `-latest` aliases.
+- `gemini-3.5-flash` intermittently returns **503 "high demand"** on free tier — never a primary.
+- Gemini Live native audio ran 5 clean sessions on the free tier with no quota complaint.
+
+**Recommendation — LLM: `gemini-flash-lite-latest` is PRIMARY, with `thinkingLevel:'minimal'`.**
+It wins every latency axis that matters (283 ms faster than the next viable model at the median, 480 ms faster
+than Flash, **1065 ms faster than Flash at p95**, 2× throughput) *and* it is the only candidate that never hit a
+free-tier wall under sustained load — which under this doctrine is not a tiebreaker but a gate. Flash's p95 of
+1763 ms would blow the ≤1.2 s felt-latency acceptance on the LLM leg alone, before STT, TTS or network, and its
+20-requests-per-day cap means it could not serve a single clinic-day even if it graded perfectly. The one open
+question is naturalness — Flash's sample reply («يعيشك سيدي، مرحبة بيك…») is noticeably more Tunisian than
+Flash-Lite's more MSA-flavoured («مرحباً بك…») — which is what `docs/P0-DERJA-SHEET.md` exists to settle.
+Because Flash could not be graded on more than 3 of 10 questions, **`gemini-3-flash-preview` was added to that
+sheet as row B** so the founder still gets a complete head-to-head against a model we could actually ship.
+**If the founder scores B materially higher on the Derja axis, the fix is to ship the V7 few-shot pack on
+Flash-Lite, not to promote B** — B costs +283 ms every turn and caps the whole product at 5 turns/minute.
+Rotation chain for P1: `flash-lite → 3-flash-preview → Cerebras → Groq → classic`, with the answering provider
+named in the waterfall log every turn. Cerebras and Groq remain unbenchmarked and therefore cannot be primary
+under the doctrine; wire them as rotation targets once the founder signs up, and re-run this table.
+
+#### Layer: STT
+**Not measured — no key.** Deepgram Nova-3 `ar-TN` and Speechmatics both require a founder signup that has
+not happened yet. This is the **single blocking dependency for P1**: the cascade cannot be assembled, let
+alone A/B'd against `VOICE_BRAIN=live`, without a streaming STT leg. Everything downstream of it is now measured.
+
+**Recommendation — STT: founder signs up for Deepgram (card-free, $200 credit ≈ 690 h) before P1 starts**, and
+this subsection gets a row on the same 8-run method. Until then the measured brain-to-first-audio budget is
+**LLM 623 ms + TTS 572 ms ≈ 1.2 s** (Fish) or **≈0.8 s** (ElevenLabs), against Gemini Live's **1.97 s** — so the
+V7 cascade thesis holds on measured numbers, and STT + VAD is the only unknown left in the waterfall.
+
+#### Artifacts + side effects
+- `data/runtime/p0-fish-stock-ar.mp3` — Fish stock Arabic voice, derja sentence (founder ear test)
+- `data/runtime/p0-fish-ref-15s.mp3` — the 15 s reference clip used for the clone test
+- `data/runtime/p0-fish-clone-test.mp3` — cloned output, reference uploaded per request (msgpack)
+- `data/runtime/p0-fish-clone-model.mp3` — cloned output via pre-created `reference_id` (the shippable path)
+- `data/runtime/p0-eleven-ar.mp3` — ElevenLabs Flash v2.5 stock voice, same sentence
+- `docs/P0-DERJA-SHEET.md` — 10-question derja grading sheet, Flash-Lite vs Flash, awaiting the founder's grade
+- **Side effect on the founder's Fish account:** one private voice model `OMEN-P0-TEST-derja`, id
+  `b5390e1a1ca542dfa80d9fed13a76581`, trained from the placeholder 15 s clip. Free, harmless — delete it or
+  overwrite it when the real consented Tunisian sample is recorded.
+- ElevenLabs free-tier consumption for this entire bake-off: **198 / 10 000 chars**.
