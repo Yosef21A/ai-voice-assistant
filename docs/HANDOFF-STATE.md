@@ -61,7 +61,34 @@ cloudflared tunnel --url http://localhost:3000   # public tunnel
 ```
 - If the tunnel restarts, the URL CHANGES → the Meta console webhook must be updated to the new `https://…/webhook` (verify token above) — Youssef does this in the console UI (or automate later with an app-access-token subscriptions call).
 - `npm start` must be restarted whenever `.env` changes.
-- Keep `npm test` green (272 pass / 1 skip baseline) before/after every change.
+- Keep `npm test` green (530 pass / 2 skip baseline as of 2026-07-31) before/after every change.
+
+## Session 2026-07-31 outcome — VOICE TIER SHIPPED (G0→V1→V2→V3), CALLING ENABLED
+The agent now ANSWERS CALLS. Four commits, each adversarially reviewed pre-commit
+(5-lens workflows, refute-verify; 16 confirmed findings fixed across rounds):
+`ed6fe9c` G0 gate · `60eecbc` V1 signaling+media (werift echo, e2e latency 2ms)
+· `b854dac` V2 Gemini Live brain (two-phase spoken booking gate, deterministic
+emergency preflight, degrade-to-chat, breaker) · `022fa4e` V3 ops (missed-call
+owner alerts, calls analytics, dashboard Calls tab, /api/calls).
+Suite: **532 tests / 530 pass / 0 fail / 2 skipped** (PG suites without
+DATABASE_URL). simulate + web:build green.
+**PATH A CONFIRMED:** `node scripts/probe-calling.js --enable` flipped the test
+number to `calling.status: ENABLED` (2026-07-31 ~03:00; the 2k-recipient tier
+gate did not apply). Token regenerated the same night (expires ~24h — ritual
+unchanged); `subscribed_apps` re-POSTed `{"success":true}`; webhook re-pointed
+by Youssef to `https://remove-identifying-declined-tub.trycloudflare.com/webhook`
+and console-verified; server restarted on `022fa4e` — /health green, waToken
+NOT degraded, live /simulate answered in derja via Gemini.
+**PENDING (Youssef):** (1) live TEXT sanity: send a WhatsApp message to
++1 (555) 177-7574 → reply lands; (2) **the first LIVE CALL** to the same number
+→ brain mode answers (GEMINI_API_KEY set ⇒ voiceCallMode 'brain'), greets in
+derja, books via the spoken two-phase gate, transcript lands on the
+conversation + Calls tab. First real call is also the first live exercise of
+the Gemini Live WebSocket (never tested against the real endpoint — if it
+misbehaves, the degrade path texts the caller and the chat engine takes over;
+check server logs + `voice_brain_lost` alerts). Local echo fallback:
+`VOICE_CALL_MODE=echo npm start`. Harness demo without Meta:
+`scripts/call-harness.js` header has the two-terminal recipe.
 
 ## Session 2026-07-29/30 outcome (SESSION-ORDERS executed end to end)
 All eight ordered slices shipped, each adversarially reviewed pre-commit:
