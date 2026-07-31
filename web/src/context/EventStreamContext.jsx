@@ -19,6 +19,9 @@ const TYPES = [
   'call.started',
   'call.missed',
   'call.ended',
+  'system.alert',
+  'appointment.cancelled',
+  'reminder.replied',
 ];
 
 const EventStreamContext = createContext(null);

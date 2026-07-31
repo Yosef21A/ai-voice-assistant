@@ -152,7 +152,11 @@ export function getConfig(overrides = {}) {
     voiceCallMode: process.env.VOICE_CALL_MODE || (process.env.GEMINI_API_KEY ? 'brain' : 'echo'),
     // Native-audio Live model. Rolling alias on purpose: a pinned model that
     // gets retired silently muted the chat engine once already (see geminiModel).
-    geminiLiveModel: process.env.GEMINI_LIVE_MODEL || 'gemini-live-2.5-flash-native-audio',
+    // Rolling alias, SAME hard lesson as geminiModel above: a pinned preview id
+    // dies out from under the product (the pinned default here 1008-closed the
+    // very first live call, 2026-07-31 — verify candidates with
+    // GET /v1beta/models and look for bidiGenerateContent).
+    geminiLiveModel: process.env.GEMINI_LIVE_MODEL || 'gemini-2.5-flash-native-audio-latest',
     // The brain has this long to answer the phone before we give up and degrade
     // to the WhatsApp follow-up. Dead air is the one outcome we refuse.
     voiceBrainConnectMs: Number(process.env.VOICE_BRAIN_CONNECT_MS) || 6000,
@@ -167,6 +171,24 @@ export function getConfig(overrides = {}) {
     // and let one probe call through after the cooldown.
     voiceBrainBreakerThreshold: Number(process.env.VOICE_BRAIN_BREAKER_THRESHOLD) || 3,
     voiceBrainBreakerCooldownMs: Number(process.env.VOICE_BRAIN_BREAKER_COOLDOWN_MS) || 300000,
+    // ── human-feel engineering (V5-T0) ─────────────────────────────────────
+    // The greeting on tape: the first call of a tenant/language/codec records
+    // its own greeting frames in memory, and every later call replays them the
+    // instant media connects — dead air at pickup is the #1 "this is a robot"
+    // tell. Personalized greetings are never cached and never served from the
+    // cache. VOICE_GREETING_CACHE=off falls back to generating every greeting.
+    voiceGreetingCache: process.env.VOICE_GREETING_CACHE !== 'off',
+    // Endpointing patience. Callers pause mid-sentence — a date read off a
+    // paper, an older caller in Derja — and the Live API's default end-of-speech
+    // detection cuts them off, which reads as rude and produces half-heard
+    // bookings. ~1s of silence before we consider a turn finished, with LOW
+    // end-sensitivity (= wait longer). VOICE_VAD_END_SENSITIVITY=off sends the
+    // server's defaults instead, which is the escape hatch if the API's setup
+    // shape ever changes under us (a rejected setup closes the socket and
+    // degrades the whole call).
+    voiceVadSilenceMs: Number(process.env.VOICE_VAD_SILENCE_MS) || 1000,
+    voiceVadEndSensitivity: process.env.VOICE_VAD_END_SENSITIVITY || 'END_SENSITIVITY_LOW',
+    voiceVadPrefixPaddingMs: Number(process.env.VOICE_VAD_PREFIX_PADDING_MS) || 60,
     // ── ops (P2-F) ─────────────────────────────────────────────────────────
     // One JSON line per request (skips /health). On in production; opt-in
     // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.

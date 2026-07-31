@@ -68,16 +68,60 @@ function safetyBlock(clinic) {
 7. If you do not know something, say you do not know and offer to have a human call back. Never invent a fact, a price, a doctor's name or an availability.`;
 }
 
+/**
+ * The dialect micro-behaviours that separate "a person answered" from "a
+ * machine answered" (V5-T0.3). Three of them, per language:
+ *
+ *   • BACKCHANNELS — the little acknowledgements a receptionist makes while
+ *     listening. Their absence is uncanny long before anyone can say why.
+ *   • THINKING FILLERS — spoken BEFORE every tool call, because a tool call is
+ *     a database round-trip and the caller hears it as the line going dead.
+ *     The code measures that gap (see loop.js SLOW_TOOL_MS); this is its cover.
+ *   • SIGN-OFFS — real people end calls with a phrase, not with a summary.
+ */
+const HUMAN_TOUCHES = {
+  ar: {
+    // «آش من خدمة» is a QUESTION ("what can I do for you"), not an
+    // acknowledgement — using it as a backchannel makes the agent sound like it
+    // restarted the call. Removed after review.
+    backchannels: '«أيوا»، «تمام»، «باهي»، «مالا»، «فهمتك»، «مليح»',
+    fillers: '«ثانية برك نشوفلك…» / «خليني نشوف…» / «لحظة وحدة نتثبت…»',
+    // Deliberately time-neutral: «تصبح على خير» is a NIGHT farewell and reads
+    // as absurd at 10am, which is exactly the kind of tell this tier exists to
+    // remove. Only use a time-of-day farewell if the clock above says so.
+    signoffs: '«بالسلامة» / «شكرا و بالسلامة» / «يعطيك الصحة، بالسلامة»',
+  },
+  fr: {
+    backchannels: '«d\'accord», «très bien», «je vous écoute», «entendu»',
+    fillers: '«Un instant, je regarde…» / «Laissez-moi vérifier…»',
+    signoffs: '«Bonne journée» / «À bientôt, bonne journée»',
+  },
+  en: {
+    backchannels: '"sure", "of course", "got it", "I see"',
+    fillers: '"One moment, let me check…" / "Give me a second, I\'ll look that up…"',
+    signoffs: '"Have a good day" / "Take care, goodbye"',
+  },
+};
+
 /** How to actually sound like a person on a phone rather than a chat window. */
-function voiceStyleBlock(langName, dialect) {
+function voiceStyleBlock(lang, dialect) {
+  const langName = LANG_NAME[lang] || LANG_NAME.ar;
+  const touch = HUMAN_TOUCHES[lang] || HUMAN_TOUCHES.ar;
   return `YOU ARE ON A LIVE PHONE CALL. You are speaking, not writing:
-- ONE to TWO short sentences per turn. Ask ONE question at a time and then stop talking.
+- MAXIMUM two SHORT sentences per turn. Not three. If you need more, you are explaining too much.
+- EXACTLY ONE question per turn. Ask it, then stop talking and wait for the answer.
+- NEVER a list. Never enumerate, never say "first… second…", never read out more than three options and never more than one option per sentence.
+- NEVER re-explain something you have already said unless the caller asks you to repeat it. Do not summarize the conversation back to them.
 - No emojis, no markdown, no bullet points, no links, no spelling out punctuation, no reading out symbols.
 - Say numbers, dates and times the way a person says them out loud.
 - If the caller interrupts you, stop immediately and listen. Never talk over them.
 - If you did not understand, say so warmly and ask them to repeat once. Never guess a name, a phone number or a date — read anything important back to them before you use it.
-- Never read out a list of more than three things.
 - If you fail to understand them TWICE, offer the keypad — lines from Libya are often too noisy for speech: «اضغط 1 للحجز و 2 باش نوصلك بالفريق» / «tapez 1 pour un rendez-vous, 2 pour l'équipe» / "press 1 to book, 2 to reach the team".
+
+SOUND LIKE A PERSON, NOT A SYSTEM:
+- Use short backchannels naturally when you acknowledge what they said: ${touch.backchannels}. One word is enough — never stack them.
+- BEFORE you use any tool, ALWAYS say a short thinking filler out loud first, then call it: ${touch.fillers}. Looking something up takes a moment and silence on a phone line sounds like a dropped call. Never call a tool in silence.
+- End the call the way a person does: ${touch.signoffs}. No recap, no "is there anything else I can help you with today". Never use a time-of-day farewell (good evening, good night, bonsoir) unless the current date and time given above actually says it is that time.
 
 LANGUAGE: start in ${langName}. Arabic means ${dialect} — warm and colloquial, never stiff MSA. Switch instantly and completely to whatever language the caller uses, and stay there.`;
 }
@@ -93,7 +137,6 @@ LANGUAGE: start in ${langName}. Arabic means ${dialect} — warm and colloquial,
  */
 export function buildVoiceSystemPrompt({ clinic = {}, lang = 'ar', nowStr = '' } = {}) {
   const L = ['ar', 'fr', 'en'].includes(lang) ? lang : 'ar';
-  const langName = LANG_NAME[L];
   const dialect = clinic.dialect || 'Tunisian/Libyan colloquial Arabic (Derja), in Arabic script';
   const city = clinic.city || 'Tunisia';
   const kb = buildKbDigest(clinic, L);
@@ -114,7 +157,7 @@ ${kb}`;
 
 THE AGENCY BOOKS NOTHING. You have NO calendar and NO appointment slots. Never propose a time, never confirm a booking, never claim a clinic has accepted anyone. You have no booking tools at all — asking for one is not possible.
 
-${voiceStyleBlock(langName, dialect)}
+${voiceStyleBlock(L, dialect)}
 
 YOUR GOAL IS QUALIFICATION, and it ends in ONE tool call. Conversationally, never as an interrogation, find out: (1) the treatment they want, (2) where they are travelling from, (3) roughly when they can travel. The number they are calling from is already on file, so ask for another only if they offer one.
 
@@ -141,7 +184,7 @@ ${facts}`;
 
   return `${identity} Today is ${nowStr}.
 
-${voiceStyleBlock(langName, dialect)}
+${voiceStyleBlock(L, dialect)}
 
 ${specialtyRule}
 

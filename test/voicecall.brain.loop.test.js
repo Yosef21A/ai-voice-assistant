@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeTestApp } from '../test-helpers/client.js';
 import { createBrainLoop } from '../src/voice-call/brain/loop.js';
+import { clearGreetingCache } from '../src/voice-call/brain/greetingCache.js';
 import { buildEmergencyReply, buildSpokenEmergencyReply } from '../src/notifications/pipeline.js';
 import { t as tr } from '../src/engine/responses.js';
 import { nowString } from '../src/engine/humanize/context.js';
@@ -78,6 +79,10 @@ function fakeMedia({ sdpAnswer = OPUS_SDP } = {}) {
 
 /** Compose a loop over the app's real store/bus/sender. */
 async function setup({ tenantId = CLINIC, config = {}, autoReady = true, ended = [] } = {}) {
+  // The greeting cache is process-global by design (V5-T0). Every test in this
+  // file asserts on the LIVE greeting path, so the tape starts empty — without
+  // this, one test that records a greeting silently changes the next one.
+  clearGreetingCache();
   const app = makeTestApp();
   const clinic = app.store.getClinicById(tenantId);
   const convo = await app.store.conversations.create(tenantId, { patientWaId: WA, status: 'open' });
@@ -483,6 +488,30 @@ test('barge-in flushes every queued frame the instant the caller speaks over us'
 });
 
 // ── 5. the wire ─────────────────────────────────────────────────────────────
+
+test('pacer catches up after an event-loop stall — the stream stays real-time', async (t) => {
+  // Regression for the first live call (2026-07-31): one-frame-per-tick pacing
+  // let Windows timer drift starve the stream — 10 s of speech took ~30 s to
+  // send and the caller heard choppy, dragging audio. The pacer must send
+  // every frame that is DUE by wall clock, not one per timer callback.
+  const s = await setup();
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.live.emit('audio', tone24k(600)); // 30 frames of queued speech
+  await sleep(40); // pacing begins
+  const before = s.media.sent.length;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 300) {
+    // synchronous stall — timers cannot fire, exactly like a loaded event loop
+  }
+  await sleep(80); // one healthy tick after the stall must burst the backlog
+  const sent = s.media.sent.length - before;
+  assert.ok(sent >= 15, `only ${sent} frames left the pacer after a 300 ms stall`);
+});
 
 test('outbound RTP is a well-formed, monotonic 20 ms stream', async (t) => {
   const s = await setup();

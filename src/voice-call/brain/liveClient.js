@@ -41,12 +41,86 @@ const DEFAULT_READY_TIMEOUT_MS = 6000;
 const INPUT_MIME = 'audio/pcm;rate=16000';
 
 /**
+ * The only end-of-speech sensitivities BidiGenerateContentSetup accepts.
+ * An unknown value is DROPPED rather than sent: a setup the server rejects
+ * closes the socket (1007/1008), and that is a whole call degraded to a
+ * WhatsApp apology because someone typed an enum wrong in an .env file.
+ */
+export const END_SENSITIVITIES = new Set([
+  'END_SENSITIVITY_UNSPECIFIED',
+  'END_SENSITIVITY_HIGH',
+  'END_SENSITIVITY_LOW',
+]);
+export const START_SENSITIVITIES = new Set([
+  'START_SENSITIVITY_UNSPECIFIED',
+  'START_SENSITIVITY_HIGH',
+  'START_SENSITIVITY_LOW',
+]);
+
+/**
+ * ENDPOINTING (V5-T0.4). Callers pause mid-sentence — a patient reading a date
+ * off a paper, an older caller in Derja, a noisy Libyan mobile leg. The
+ * server's default end-of-speech detection clips them, and a clipped caller is
+ * the second-loudest "this is a robot" tell after dead air at pickup.
+ *
+ * Field names are the documented camelCase JSON form of
+ * BidiGenerateContentSetup.realtimeInputConfig.automaticActivityDetection
+ * (disabled, startOfSpeechSensitivity, prefixPaddingMs, endOfSpeechSensitivity,
+ * silenceDurationMs). Anything not recognized is left out entirely, so the
+ * server keeps its own default rather than rejecting the setup.
+ *
+ * `endSensitivity: 'off'` returns `{}` — exactly the pre-V5 payload, i.e. the
+ * server's defaults. That is the escape hatch if the API ever changes shape.
+ *
+ * Dropping silently would be its own trap — a typo in an .env file would look
+ * exactly like working endpointing — so every rejected value is logged once,
+ * naming the value AND what was expected.
+ *
+ * @param {object} [vad] { silenceMs, endSensitivity, startSensitivity, prefixPaddingMs }
+ * @param {Function} [log] warn sink (the client's logger)
+ * @returns {object} the automaticActivityDetection block ({} = server defaults)
+ */
+export function buildActivityDetection(vad = {}, log) {
+  const out = {};
+  const warn = typeof log === 'function' ? log : () => {};
+  const reject = (field, value, expected) =>
+    warn(
+      `[voice-brain] ignoring VAD ${field}=${JSON.stringify(value)} — not a value the Live API accepts. ` +
+        `Expected ${expected}. The server's default is being used instead.`
+    );
+  if (!vad || typeof vad !== 'object') return out;
+
+  const end = String(vad.endSensitivity ?? '').trim();
+  if (end.toLowerCase() === 'off') return out; // kill switch: pre-V5 behaviour
+  if (END_SENSITIVITIES.has(end)) out.endOfSpeechSensitivity = end;
+  else if (end) reject('endSensitivity', end, `one of ${[...END_SENSITIVITIES].join(', ')} (or "off")`);
+
+  const start = String(vad.startSensitivity ?? '').trim();
+  if (START_SENSITIVITIES.has(start)) out.startOfSpeechSensitivity = start;
+  else if (start) reject('startSensitivity', start, `one of ${[...START_SENSITIVITIES].join(', ')}`);
+
+  const silence = Number(vad.silenceMs);
+  if (Number.isFinite(silence) && silence > 0) out.silenceDurationMs = Math.round(silence);
+  else if (vad.silenceMs != null && vad.silenceMs !== '') {
+    reject('silenceMs', vad.silenceMs, 'a positive number of milliseconds');
+  }
+
+  const padding = Number(vad.prefixPaddingMs);
+  if (Number.isFinite(padding) && padding > 0) out.prefixPaddingMs = Math.round(padding);
+  else if (vad.prefixPaddingMs != null && vad.prefixPaddingMs !== '') {
+    reject('prefixPaddingMs', vad.prefixPaddingMs, 'a positive number of milliseconds');
+  }
+  return out;
+}
+
+/**
  * @param {object} p
  * @param {string} p.apiKey
  * @param {string} p.model                  e.g. 'gemini-live-2.5-flash-native-audio'
  * @param {string} [p.systemInstruction]
  * @param {Array}  [p.tools]                functionDeclarations (see ./tools.js)
  * @param {number} [p.temperature]
+ * @param {object} [p.vad]                  endpointing knobs (see buildActivityDetection)
  * @param {Function} [p.wsFactory]          (url) => WebSocket-like; tests inject
  * @param {Function} [p.now]
  * @param {Function} [p.logger]
@@ -58,6 +132,7 @@ export function createLiveClient({
   systemInstruction = '',
   tools = [],
   temperature = 0.6,
+  vad,
   wsFactory,
   now,
   logger,
@@ -86,6 +161,8 @@ export function createLiveClient({
   let preReadyCount = 0;
   let readyTimer = null;
   let chain = Promise.resolve();
+  /** The setup we sent, redacted, so a 1007/1008 close is diagnosable. */
+  let lastSetup = null;
 
   let resolveReady;
   let rejectReady;
@@ -120,6 +197,15 @@ export function createLiveClient({
     if (readyTimer) {
       clearTimeout(readyTimer);
       readyTimer = null;
+    }
+  }
+
+  /** Never throws, never explodes a log line. */
+  function safeJson(value) {
+    try {
+      return JSON.stringify(value ?? null).slice(0, 2000);
+    } catch {
+      return '(unserializable)';
     }
   }
 
@@ -158,8 +244,9 @@ export function createLiveClient({
         model: String(model || '').startsWith('models/') ? model : `models/${model}`,
         generationConfig: { responseModalities: ['AUDIO'], temperature },
         // Server-side VAD. It is what makes barge-in work: the server tells us
-        // `interrupted` the moment the caller speaks over the model.
-        realtimeInputConfig: { automaticActivityDetection: {} },
+        // `interrupted` the moment the caller speaks over the model. The block
+        // is empty ⇒ server defaults; tuned ⇒ a caller who pauses is not cut off.
+        realtimeInputConfig: { automaticActivityDetection: buildActivityDetection(vad, log) },
         // BOTH transcriptions are required, not optional: the caller's side is
         // what our deterministic emergency detector reads (the model is never
         // allowed to make that call), and the agent's side is the transcript the
@@ -172,6 +259,14 @@ export function createLiveClient({
     if (Array.isArray(tools) && tools.length) {
       setup.setup.tools = [{ functionDeclarations: tools }];
     }
+    // Kept for the close-code post-mortem below. The key is NEVER in here (it
+    // rides in the URL), and the two unbounded fields are summarized rather
+    // than logged: a rejected setup must be diagnosable from one log line.
+    lastSetup = {
+      ...setup.setup,
+      systemInstruction: systemInstruction ? `[${systemInstruction.length} chars]` : undefined,
+      tools: Array.isArray(tools) && tools.length ? tools.map((d) => d?.name) : undefined,
+    };
     rawSend(setup, true);
   }
 
@@ -298,7 +393,20 @@ export function createLiveClient({
     };
     ws.onclose = (ev) => {
       state.open = false;
+      const wasSetUp = state.setupDone;
       state.closed = true;
+      // A close BEFORE setupComplete means the endpoint refused what we sent —
+      // 1007 (invalid frame payload) and 1008 (policy violation) are how a bad
+      // model id or an unknown setup field come back, and the symptom is a whole
+      // call degraded to a WhatsApp apology. This log is the only evidence that
+      // ever exists, so it carries the code, the reason AND the setup we sent
+      // (minus the credential, which lives in the URL and is never logged).
+      if (!wasSetUp) {
+        log(
+          `[voice-brain] LIVE SETUP REJECTED — the session closed before setupComplete. ` +
+            `code=${ev?.code ?? 'n/a'} reason=${ev?.reason || 'n/a'} setup=${safeJson(lastSetup)}`
+        );
+      }
       failReady(new Error(`live socket closed (${ev?.code ?? 'n/a'})`));
       emit('close', { code: ev?.code ?? null, reason: ev?.reason ?? null });
     };
@@ -359,11 +467,21 @@ export function createLiveClient({
      * words in its mouth — used for the greeting and, critically, for the
      * emergency script, which OUR detector decides on and the model may not
      * override.
+     *
+     * `{ turnComplete: false }` sends the same text as CONTEXT ONLY: the turn is
+     * left open, so the model records it and says nothing until the caller
+     * speaks. That distinction is load-bearing for V5-T0 — "you already greeted
+     * them, stay quiet" and "keep your turns shorter" must not themselves
+     * trigger a spoken reply on top of the caller.
+     *
+     * @param {string} text
+     * @param {object} [opts] { turnComplete = true }
      */
-    sendText(text) {
+    sendText(text, opts) {
       if (!text) return false;
+      const complete = opts?.turnComplete !== false;
       return rawSend({
-        clientContent: { turns: [{ role: 'user', parts: [{ text: String(text) }] }], turnComplete: true },
+        clientContent: { turns: [{ role: 'user', parts: [{ text: String(text) }] }], turnComplete: complete },
       });
     },
 

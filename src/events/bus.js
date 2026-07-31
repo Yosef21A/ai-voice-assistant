@@ -66,6 +66,15 @@ export const EVENT_TYPES = Object.freeze([
   'call.started',
   'call.missed',
   'call.ended',
+  // Catalog drift fixed 2026-07-31: these three were published for a while
+  // without being registered (every publish logged a warn).
+  // P2-F: owner-visible degradation toasts (wa_token_expired / llm_degraded…).
+  //   { kind, detail }
+  'system.alert',
+  // V2 reminders: a reminder button/typed reply cancelled the appointment.
+  'appointment.cancelled',
+  // V2 reminders: any reminder reply resolved (confirm/cancel) — audit + CRM.
+  'reminder.replied',
 ]);
 
 const FIREHOSE = 'event'; // single channel the SSE layer listens on

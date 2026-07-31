@@ -84,6 +84,19 @@ Ordered execution; T0 is free and ships first; T2 is the demo/pilot voice. TTS i
 6. **Personalization:** returning patient → greet by name once; reference prior booking when relevant (store lookup already exists).
 7. **Latency budget instrumentation:** log per-turn ms (caller-stop → agent-first-audio); target median <1.2s with filler coverage beyond 800ms.
 
+#### T0 — SHIPPED (all 7 items). Where each one lives:
+| # | Where | Notes |
+|---|---|---|
+| 1 | `src/voice-call/index.js` `warmBrain()` + `loop.warmUp()`/`start()`; `src/voice-call/brain/greetingCache.js` | The Live handshake now overlaps pre_accept/accept instead of starting after media connects. First call per tenant/lang/**codec** tees its greeting frames; later calls replay them into the paced queue before `start()` returns and the model is told, as CONTEXT (`turnComplete:false`), that it already greeted. Barged-in, tool-calling and PERSONALIZED greetings are never taped. `VOICE_GREETING_CACHE=off`. |
+| 2 | `brain/prompts.js` `voiceStyleBlock` + `brain/loop.js` `noteAgentSpeech()` | Prompt: max 2 short sentences, exactly one question, never a list, never re-explain. Code: 2 turns over 220 chars ⇒ ONE corrective, sent as context, never during an emergency. |
+| 3 | `brain/prompts.js` `HUMAN_TOUCHES` (ar/fr/en) | Backchannels, a MANDATORY thinking filler before every tool call, natural sign-offs. `loop.js` logs any executor call over 600 ms — that log is where "the filler did not cover it" shows up. |
+| 4 | `brain/liveClient.js` `buildActivityDetection()` | `realtimeInputConfig.automaticActivityDetection` = `{ endOfSpeechSensitivity, silenceDurationMs, prefixPaddingMs }`. Unknown enum values are DROPPED rather than sent (a rejected setup closes the socket and degrades the call). `VOICE_VAD_SILENCE_MS=1000`, `VOICE_VAD_END_SENSITIVITY=END_SENSITIVITY_LOW` (`off` ⇒ server defaults), `VOICE_VAD_PREFIX_PADDING_MS=60`. A pre-`setupComplete` close now logs the code, the reason and the redacted setup. |
+| 5 | `brain/loop.js` `flushOutbound('barge_in')` | Frames dropped + flush ms logged per barge-in; count on `stats()` and on `outcome().bargeIns`. |
+| 6 | `brain/loop.js` `loadCallerContext()` | `store.appointments.list(tenantId, { patientWaId })` — tenant-scoped on purpose. Name (sanitized, ≤60 chars, brackets/control chars stripped) + the next pending/confirmed appointment. Nothing else about a patient enters a spoken prompt. |
+| 7 | `brain/loop.js` pacer hook + `latencySummary()` | caller-stop → the first frame actually handed to `media.sendRtp`. `outcome().latency = { turns, medianMs, p95Ms, worstMs, greetingMs, greetingSource }`, rides on `call.ended` and the transcript row; one summary line per call at stop(). |
+
+Live numbers to watch on the next real call: `greeting=<ms> (cache|live)` should be <300 ms on the second call of a tenant, and `median` should sit under 1.2 s.
+
 ### T1 — Cheap human mouth (~$0.01–0.02/min): Azure Neural TTS
 Keep Gemini ears+brain; stream sentence-level TTS via Azure `ar-TN`/`ar-LY` neural voices (verify current voice list + pricing at build). Provider interface: `src/voice-call/brain/tts/` with `geminiNative` (default, free) + `azure` + `elevenlabs` implementations, per-tenant `voice` config. Fallback chain: chosen provider error → geminiNative → degrade path.
 

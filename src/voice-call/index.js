@@ -535,6 +535,18 @@ export function createVoiceCallService({
       return;
     }
 
+    // ── PARALLEL WARM-UP (V5-T0.1a) ────────────────────────────────────────
+    // The Gemini Live handshake used to start AFTER media connected, so every
+    // caller paid the WebSocket + setup + first-generation time as silence
+    // after pickup. It starts HERE instead, overlapping pre_accept, accept and
+    // the ICE/DTLS handshake — none of which need the brain. Caller audio only
+    // flows once media connects, and liveClient buffers anything that arrives
+    // before setupComplete, so nothing is lost and no frame is sent early.
+    // Synchronous up to the point entry.loop is assigned: there is no await
+    // between the finished-check above and the assignment, which is what keeps
+    // a terminate from slipping in and orphaning a socket.
+    warmBrain(entry);
+
     const prepared = session.onAnswerPrepared(media.sdpAnswer, clock().getTime());
     if (prepared.action !== 'send_pre_accept') return await failCall(entry, 'failed');
 
@@ -546,7 +558,10 @@ export function createVoiceCallService({
       sdpType: 'answer',
     });
     if (entry.finished) {
-      closeMedia(media); // terminated while pre_accept was in flight
+      // Terminated while pre_accept was in flight. The warmed brain is now OUR
+      // orphan to close — finish() ran before entry.loop existed.
+      stopLoop(entry, 'call_ended');
+      closeMedia(media);
       return;
     }
     if (!pre.ok) {
@@ -632,21 +647,15 @@ export function createVoiceCallService({
   }
 
   /**
-   * Build and start the Gemini Live loop for a connected call. A brain that
-   * cannot come up inside `voiceBrainConnectMs` is not something we wait out —
-   * the caller is listening to silence, which is worse than a polite goodbye.
+   * Construct the loop, once. Returns null when construction itself blew up —
+   * the breaker is deliberately NOT touched here so a failure is counted once,
+   * by startBrain(), no matter which of the two callers hit it first.
    */
-  async function startBrain(entry) {
-    if (entry.finished || entry.loop) return;
-    // Breaker open ⇒ the endpoint is known-down. Do not spend six seconds of
-    // this caller's life proving it again; go straight to the WhatsApp handover.
-    if (brainBreaker.isOpen()) {
-      console.warn(`[voice-call] brain breaker OPEN — degrading call ${entry.callId} immediately`);
-      return await degradeBrain(entry, { skipAlert: true });
-    }
-    let loop;
+  function buildBrain(entry) {
+    if (entry.loop) return entry.loop;
+    if (entry.brainBuildFailed) return null;
     try {
-      loop = makeBrain({
+      entry.loop = makeBrain({
         clinic: entry.clinic,
         convo: entry.convo || { id: entry.conversationId, patientWaId: entry.from },
         // The webhook's `from` is the authoritative caller id — never a field
@@ -666,10 +675,52 @@ export function createVoiceCallService({
       });
     } catch (err) {
       console.error('[voice-call] brain construction failed:', err?.message || err);
+      entry.brainBuildFailed = true;
+      return null;
+    }
+    return entry.loop;
+  }
+
+  /**
+   * V5-T0.1a — open the Live socket while the Meta handshake is still running.
+   * Fire-and-tracked: it never rejects, it never decides anything. startBrain()
+   * still owns the timeout, the breaker and the degrade, so a warm-up that
+   * fails costs the call nothing it was not already going to pay.
+   */
+  function warmBrain(entry) {
+    if (!brainMode || entry.finished || entry.loop) return;
+    // Breaker open ⇒ the endpoint is known-down; do not open a socket at all.
+    if (brainBreaker.isOpen()) return;
+    const loop = buildBrain(entry);
+    if (!loop) return;
+    if (entry.finished) {
+      stopLoop(entry, 'call_ended'); // terminated while we were constructing
+      return;
+    }
+    if (typeof loop.warmUp === 'function') track(loop.warmUp());
+  }
+
+  /**
+   * Start the Gemini Live loop for a connected call — the caller can hear us
+   * now, so this is where the agent speaks. A brain that cannot come up inside
+   * `voiceBrainConnectMs` is not something we wait out: the caller is listening
+   * to silence, which is worse than a polite goodbye. With the warm-up above,
+   * that budget is usually already spent before we get here.
+   */
+  async function startBrain(entry) {
+    if (entry.finished || entry.brainStarted) return;
+    entry.brainStarted = true;
+    // Breaker open ⇒ the endpoint is known-down. Do not spend six seconds of
+    // this caller's life proving it again; go straight to the WhatsApp handover.
+    if (brainBreaker.isOpen()) {
+      console.warn(`[voice-call] brain breaker OPEN — degrading call ${entry.callId} immediately`);
+      return await degradeBrain(entry, { skipAlert: true });
+    }
+    const loop = buildBrain(entry);
+    if (!loop) {
       brainBreaker.note();
       return await degradeBrain(entry);
     }
-    entry.loop = loop;
     if (entry.finished) {
       stopLoop(entry, 'call_ended'); // terminated while we were constructing
       return;
@@ -679,7 +730,12 @@ export function createVoiceCallService({
       await withTimeout(loop.start(), brainConnectMs, 'brain connect timeout');
     } catch (err) {
       console.error('[voice-call] brain failed to start:', err?.message || err);
-      brainBreaker.note();
+      // SECOND BELT on the same bug the loop guards from its side: if the call
+      // is already over, whatever start() threw is a symptom of the hang-up, not
+      // evidence about Gemini. Counting it would let three impatient callers
+      // open the breaker on a healthy endpoint and cost the next five minutes of
+      // real calls their voice agent.
+      if (!entry.finished) brainBreaker.note();
       return await degradeBrain(entry);
     }
     brainBreaker.noteOk(); // the endpoint answered — close a half-open breaker
@@ -690,6 +746,12 @@ export function createVoiceCallService({
   async function onBrainEnd(entry, outcome) {
     if (entry.finished || entry.brainClosing) return;
     if (outcome?.reason === 'call_ended') return; // WE stopped it from finish()
+    // A socket that died during the PARALLEL WARM-UP is not a mid-call outage:
+    // we have not accepted the call yet, and startBrain() is still to come.
+    // Hanging up here would terminate a call the caller is still hearing ring.
+    // loop.start() rejects on a loop that already died, so the degrade happens
+    // there, once, on the normal path.
+    if (!entry.brainStarted) return;
     entry.brainClosing = true;
     // An EMERGENCY outranks everything, including a socket that died right
     // after it. The script was spoken, the owner paged and the number already
