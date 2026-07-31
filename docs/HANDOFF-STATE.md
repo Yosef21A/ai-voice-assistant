@@ -63,6 +63,23 @@ cloudflared tunnel --url http://localhost:3000   # public tunnel
 - `npm start` must be restarted whenever `.env` changes.
 - Keep `npm test` green (530 pass / 2 skip baseline as of 2026-07-31) before/after every change.
 
+## Session 2026-07-31 (part 2) — LIVE CALLS DEBUGGED + V5 T0/T1 SHIPPED
+LIVE: first real calls answered (media connect 3.1s). Three live bugs found by
+ear and fixed: Gemini Live model id (rolling alias `gemini-2.5-flash-native-audio-latest`,
+1008-close on the pinned id), RTP pacer starvation (wall-clock catch-up — the
+"30s replies"), call_icon_visibility DEFAULT (call button was invisible).
+V5-T0 `76c4131` (human-feel: instant greeting tape, turn discipline, VAD
+patience, personalization, latency metrics) + V5-T1 `dd2b5ae` (per-tenant TTS:
+gemini/azure/elevenlabs chain, decimal-safe splitter, cross-call TTS breaker).
+Suite: **616 tests / 614 pass / 0 fail / 2 PG-skips**.
+TOKEN: the console token proved 1-HOUR class (expired mid-session twice) —
+System-User permanent token is the real fix (RUNBOOK §E), do it before demos.
+TUNNEL (rotates): last URL `https://browsing-opposed-many-nokia.trycloudflare.com/webhook`
+— re-point the console webhook if it died. el-amen fri hours were temporarily
+widened for live tests and are REVERTED. T2 needs: ELEVENLABS_API_KEY + consented
+2-min voice sample → clinic.voice.elevenVoiceId. First TTS-mode live call also
+validates the VAD setup field names (watch for LIVE SETUP REJECTED in logs).
+
 ## Session 2026-07-31 outcome — VOICE TIER SHIPPED (G0→V1→V2→V3), CALLING ENABLED
 The agent now ANSWERS CALLS. Four commits, each adversarially reviewed pre-commit
 (5-lens workflows, refute-verify; 16 confirmed findings fixed across rounds):

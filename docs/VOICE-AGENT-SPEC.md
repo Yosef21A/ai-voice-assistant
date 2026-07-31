@@ -75,7 +75,11 @@ live call tests when you say ready. Update the spec at session end.
 ## V5 — HUMAN-VOICE QUALITY LADDER (founder priority 2026-07-31: "must not feel AI")
 Ordered execution; T0 is free and ships first; T2 is the demo/pilot voice. TTS is ~70% of the human illusion, turn-taking ~20%, conversation design ~10%.
 
-### T0 — Human-feel engineering on the CURRENT stack (free — do immediately)
+### T0 — SHIPPED (commit `76c4131`, 2026-07-31): all 7 items. Parallel brain warm-up + per-tenant greeting tape (tenant:lang:codec[:provider:voice]-keyed; tee aborts on ANY caller speech — review CRITICAL: a caller-influenced tape carried patient PII across callers), turn discipline + one nudge, derja backchannels/fillers, VAD endpointing config (first live call validates field names — LIVE SETUP REJECTED log exists for it), barge-in metering incl. the tape, returning-patient personalization (whitelist name sanitizer), per-turn latency in call.ended.
+### T1 — SHIPPED (commit `dd2b5ae`, 2026-07-31): src/voice-call/brain/tts/ chain — gemini (native, default) / azure (ar-TN-Reem default, raw 24k PCM) / elevenlabs (eleven_flash_v2_5, pcm_24000). TEXT-modality loop w/ decimal-safe sentence splitter, ordered speak queue, barge-in aborts HTTP, deterministic emergency via our mouth, cross-call per-provider breaker (exclusive half-open). Mid-call TTS failure = graceful tts_lost end + WhatsApp follow-up (Live modality is immutable per-session). Settings PUT validates clinic.voice. AZURE_SPEECH_KEY/REGION + ELEVENLABS_API_KEY env; hermeticity-pinned in tests.
+### T2 — NEXT: needs from the founder: ELEVENLABS_API_KEY in .env + a consented 2-min clean voice sample (clone in the ElevenLabs console, put the voice id in clinic.voice.elevenVoiceId via PUT /api/tenant). Everything else is wired. Dashboard Settings UI for the voice block = small follow-up slice.
+
+### T0 — original plan (reference)
 1. **Zero-dead-air pickup:** pre-render/cache the per-tenant greeting audio; play it the instant the call connects (<300ms) while Gemini Live warms. Dead air at pickup is the #1 AI tell.
 2. **Turn discipline:** hard cap 1–2 short sentences per turn in the prompt + post-filter; one question max per turn (mirrors chat humanize law).
 3. **Dialect micro-behaviors in prompt:** backchannels ("أيوا", "تمام", "باهي"), thinking fillers spoken while tools run ("ثانية برك نشوفلك الموعد…") — never silence during executor work; natural sign-offs.
