@@ -25,6 +25,12 @@ const VOICE_PROVIDERS = new Set(['gemini', 'azure', 'elevenlabs', 'fish']);
 const VOICE_ID_FIELDS = ['voiceId', 'azureVoice', 'elevenVoiceId', 'fishVoiceId'];
 const VOICE_KEYS = new Set(['provider', ...VOICE_ID_FIELDS]);
 const MAX_VOICE_ID_CHARS = 80;
+// V7-P2: which BRAIN answers this tenant's calls. Validated exactly like
+// `voice` above and for the same reason — src/voice-call/index.js resolves it a
+// second time at call time (a clinics.json edited by hand never passes through
+// here), and an unrecognized value there means 'live', never the experimental
+// path. '' clears the override and hands the tenant back to VOICE_BRAIN.
+const VOICE_BRAINS = new Set(['live', 'cascade']);
 
 // Redact any per-tenant secrets before returning config to the dashboard.
 function publicTenant(t) {
@@ -134,6 +140,12 @@ function validate(body) {
               : AZURE_VOICE_RE.test(val) || ELEVEN_VOICE_ID_RE.test(val); // generic voiceId: either
         if (!ok) errs.push(`voice.${k} is not a valid voice identifier`);
       }
+    }
+  }
+  if (body.voiceBrain != null) {
+    const b = body.voiceBrain;
+    if (typeof b !== 'string' || (b !== '' && !VOICE_BRAINS.has(b))) {
+      errs.push(`voiceBrain must be ${[...VOICE_BRAINS].join('|')} (or '' to clear)`);
     }
   }
   if (body.crm != null) {
@@ -266,6 +278,12 @@ export function tenantRouter({ store, requireRole }) {
           ...(v.fishVoiceId != null ? { fishVoiceId: String(v.fishVoiceId).trim() } : {}),
         };
       }
+      // V7-P2 per-tenant brain override. '' is STORED, exactly as the voice-id
+      // fields above store a cleared value: the live clinic object is updated
+      // with Object.assign below, which can add a key but never remove one, so
+      // deleting here would leave a stale override on the running process until
+      // the next restart. resolveVoiceBrainMode() reads '' as "no override".
+      if (body.voiceBrain != null) config.voiceBrain = String(body.voiceBrain);
       // V7 CRM sync: outbound webhook URL + signing secret.
       if (body.crm && typeof body.crm === 'object') {
         config.crm = {

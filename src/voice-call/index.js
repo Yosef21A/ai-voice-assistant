@@ -19,6 +19,16 @@
 // This module owns mode selection, the loop's lifecycle and the degrade path;
 // everything the agent actually says lives under ./brain/.
 //
+// V7-P2 — WHICH BRAIN, inside 'brain' mode. `resolveVoiceBrainMode()` picks
+// between the incumbent Live loop (./brain/loop.js) and the fast cascade
+// (./brain-cascade/orchestrator.js, STT → text LLM → TTS, overlapped) from
+// `clinic.voiceBrain` → `config.voiceBrain` → 'live'. The two factories are
+// contract-identical (warmUp/start/onRtp/stop/settled/transcript/outcome/stats),
+// so everything below this line is the same code for both. A cascade that has
+// no mouth or no ears in THIS process is composed as LIVE instead — once, with
+// one warning — because the cascade has no native voice to fall back to and a
+// silently mute phone line is the one outcome this tier refuses.
+//
 // Design notes worth keeping:
 //   • The call state machine (./session.js) is pure and returns action
 //     descriptors; THIS module is the only executor. Sockets, timers, Graph
@@ -45,6 +55,8 @@
 import { createCallSession } from './session.js';
 import { createMediaSession } from './media.js';
 import { createBrainLoop } from './brain/loop.js';
+import { createCascadeLoop } from './brain-cascade/orchestrator.js';
+import { createTtsChain } from './brain/tts/index.js';
 import {
   noteTtsFailure,
   noteTtsOk,
@@ -184,6 +196,100 @@ export function pickLang(convo, clinic) {
   return LANGS.includes(lang) ? lang : 'fr';
 }
 
+/** The two brains a call can be answered by. Anything else means 'live'. */
+export const VOICE_BRAINS = Object.freeze(['live', 'cascade']);
+
+/**
+ * Waterfalls kept on the STORED call record. The loop keeps up to 120 (a
+ * ten-minute call is ~60 turns); this row fans out to the inbox, the Calls tab
+ * and every open SSE stream, so only the tail — the part of a call a complaint
+ * is actually about — is persisted.
+ */
+export const MAX_RECORDED_WATERFALLS = 30;
+
+/** Cascade-only seams the composition layer may inject (tests, harnesses). */
+const CASCADE_DEP_KEYS = Object.freeze([
+  'sttFactory',
+  'llmFactory',
+  'ttsFactory',
+  'ttsChain',
+  'wsFactory',
+  'liveFactory',
+  'fetchImpl',
+  'engineFactory',
+]);
+
+/**
+ * Can this process pay for a given mouth AT ALL? Credential presence only —
+ * whether the vendor is UP is the breaker's job, and whether the voice id is
+ * valid is the chain's (./brain/tts/index.js). This is the composition-level
+ * pre-flight, and it is deliberately cheap.
+ */
+function ttsCredentialPresent(name, config = {}) {
+  if (name === 'fish') return !!config.fishAudioApi;
+  if (name === 'elevenlabs') return !!config.elevenlabsApiKey;
+  if (name === 'azure') return !!(config.azureSpeechKey && config.azureSpeechRegion);
+  return false;
+}
+
+/**
+ * WHICH BRAIN ANSWERS THIS CALL (V7-P2).
+ *
+ * Precedence, and only the exact literals 'live' / 'cascade' count at every rung
+ * — the same rule `voiceCallMode` and graphCalls' transport use, because an
+ * unrecognized value must never silently enable the experimental path:
+ *   1. `clinic.voiceBrain` — the per-tenant override (validated in api/tenant.js
+ *      exactly like `clinic.voice`).
+ *   2. `config.voiceBrain` (VOICE_BRAIN) — the global default.
+ *   3. 'live' — the incumbent Gemini Live loop.
+ *
+ * THEN THE COMPOSITION-LEVEL FALLBACK, which is the whole reason this function
+ * exists rather than a one-line ternary. The cascade has NO native voice and NO
+ * native ears: its mouth is an HTTP TTS provider and its ears are a streaming
+ * STT leg. Composing it without either produces a call that connects, greets
+ * nobody and degrades — dead air, which is the one outcome this tier refuses.
+ * So a cascade that cannot be fed falls back to LIVE, loudly, once per call.
+ *
+ * The mouth check accepts a Fish or ElevenLabs credential (the doctrine
+ * fallback order) OR a tenant/global provider named EXPLICITLY whose own
+ * credential is present — that last clause is what lets an Azure tenant run the
+ * cascade even though Azure is parked out of the automatic order.
+ *
+ * @param {object} p
+ * @param {object} [p.config]
+ * @param {object} [p.clinic]
+ * @returns {{mode:'live'|'cascade', requested:string, source:string, reason:string|null}}
+ */
+export function resolveVoiceBrainMode({ config = {}, clinic } = {}) {
+  // EXACT literals only — no trimming, no case folding. Byte for byte the rule
+  // `config.voiceCallMode === 'brain'` uses two hundred lines up: 'CASCADE',
+  // 'Cascade' and 'cascade ' all mean live, because every way of being wrong
+  // about this flag must land on the brain that already answers phones.
+  const pick = (v) => (VOICE_BRAINS.includes(v) ? v : null);
+  const tenant = pick(clinic?.voiceBrain ?? clinic?.config?.voiceBrain);
+  const requested = tenant || pick(config.voiceBrain) || 'live';
+  const source = tenant ? 'tenant' : pick(config.voiceBrain) ? 'config' : 'default';
+  if (requested !== 'cascade') return { mode: 'live', requested, source, reason: null };
+
+  const voice = (clinic?.voice ?? clinic?.config?.voice) || {};
+  const named = String(voice.provider || config.voiceTtsProvider || '')
+    .trim()
+    .toLowerCase();
+  const mouth =
+    ttsCredentialPresent('fish', config) ||
+    ttsCredentialPresent('elevenlabs', config) ||
+    (!!named && named !== 'gemini' && ttsCredentialPresent(named, config));
+  // liveEars — a Gemini Live session used ONLY as ears — is the free STT leg the
+  // cascade falls through to, so a Gemini key counts as ears on its own.
+  const ears = !!(config.deepgramApiKey || config.speechmaticsApiKey || config.geminiApiKey);
+
+  const missing = [];
+  if (!mouth) missing.push('no TTS credential — set FISH_AUDIO_API or ELEVENLABS_API_KEY');
+  if (!ears) missing.push('no STT credential — set DEEPGRAM_API_KEY, SPEECHMATICS_API_KEY or GEMINI_API_KEY');
+  if (missing.length) return { mode: 'live', requested, source, reason: missing.join('; ') };
+  return { mode: 'cascade', requested, source, reason: null };
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.store
@@ -193,7 +299,9 @@ export function pickLang(convo, clinic) {
  * @param {object} [deps.alerts]      system alerts (owner-visible failures)
  * @param {object} deps.graphCalls    ./graphCalls.js client
  * @param {Function} [deps.mediaFactory] default createMediaSession (inject fakes)
- * @param {Function} [deps.brainFactory] default createBrainLoop (inject fakes)
+ * @param {Function} [deps.brainFactory] OVERRIDES mode selection entirely (fakes)
+ * @param {object} [deps.cascadeFactories] cascade-only seams (stt/llm/tts/…)
+ * @param {Function} [deps.logger]    both loops log through this (default console.error)
  * @param {Function} [deps.now]       inject the clock (tests drive closed hours)
  * @returns {{handleEvents:Function, active:Function, settled:Function, stop:Function}}
  */
@@ -206,11 +314,18 @@ export function createVoiceCallService({
   graphCalls,
   mediaFactory,
   brainFactory,
+  cascadeFactories = {},
+  logger,
   now,
 } = {}) {
   const clock = typeof now === 'function' ? now : () => new Date();
+  const log = typeof logger === 'function' ? logger : (...a) => console.error(...a);
   const makeMedia = typeof mediaFactory === 'function' ? mediaFactory : createMediaSession;
-  const makeBrain = typeof brainFactory === 'function' ? brainFactory : createBrainLoop;
+  // An injected factory WINS over mode selection — that is the seam every voice
+  // suite is built on. The mode is still resolved (and still reported on the
+  // call record), because "which brain did this call think it was" must not
+  // become unanswerable just because a test swapped the implementation.
+  const injectedBrain = typeof brainFactory === 'function' ? brainFactory : null;
   const connectTimeoutMs = Number(config.voiceCallConnectTimeoutMs) || DEFAULT_CONNECT_TIMEOUT_MS;
   const maxSec = Number(config.voiceCallMaxSec) || DEFAULT_MAX_SEC;
   const brainConnectMs = Number(config.voiceBrainConnectMs) || DEFAULT_BRAIN_CONNECT_MS;
@@ -316,6 +431,30 @@ export function createVoiceCallService({
     }
   }
 
+  /**
+   * V7-P2 — what the CLINIC's record says about the brain that answered.
+   *
+   * Two things are folded in here and nowhere else:
+   *   • `mode` ('cascade'|'live'). The founder's quality complaints have to be
+   *     attributable per call. Without this, "the agent sounded slow on Tuesday"
+   *     cannot be tied to a pipeline, and an A/B is just two opinions.
+   *   • the waterfall TAIL. The loop keeps up to 120 turns; this payload fans
+   *     out to every open SSE stream, so only the last MAX_RECORDED_WATERFALLS
+   *     are persisted. The usage meter rides through untouched — it is four
+   *     numbers, and it is what makes pass-through billing a config change.
+   *
+   * A COPY, never the loop's own object: outcome() is the loop's to own, and a
+   * fake loop in a test may well return a shared reference.
+   */
+  function shapeBrainOutcome(raw, entry) {
+    if (!raw) return null;
+    const out = { ...raw, mode: entry.brainKind || 'live' };
+    if (Array.isArray(out.waterfalls) && out.waterfalls.length > MAX_RECORDED_WATERFALLS) {
+      out.waterfalls = out.waterfalls.slice(-MAX_RECORDED_WATERFALLS);
+    }
+    return out;
+  }
+
   // ── the single place a call leaves the world ───────────────────────────────
   // Writes the transcript line, publishes exactly one terminal bus event, drops
   // the socket and the timers. Idempotent: the watchdog and Meta's terminate
@@ -336,7 +475,7 @@ export function createVoiceCallService({
 
     const { session, tenantId, conversationId, lang } = entry;
     const summary = session.summary();
-    const brain = entry.loop ? entry.loop.outcome() : null;
+    const brain = shapeBrainOutcome(entry.loop ? entry.loop.outcome() : null, entry);
     const transcript = entry.loop ? entry.loop.transcript() : null;
     // THE OTHER HALF OF THE TTS BREAKER. A call that actually SPOKE through the
     // provider is the only proof the vendor is healthy — a call that ended
@@ -668,6 +807,58 @@ export function createVoiceCallService({
   }
 
   /**
+   * Decide — ONCE per call — which brain this call gets, and say so out loud if
+   * the answer is not the one that was asked for. Cached on the entry because
+   * warmBrain() and startBrain() both reach for it, and "cascade unavailable"
+   * is a per-call fact, not a per-attempt one: two warnings for one call would
+   * make an outage look twice as bad as it is.
+   */
+  function brainKindFor(entry) {
+    if (entry.brainKind) return entry.brainKind;
+    const r = resolveVoiceBrainMode({ config, clinic: entry.clinic });
+    if (r.reason) {
+      // LOUD, and never dead air: the caller still gets a working phone line,
+      // and whoever set VOICE_BRAIN=cascade gets told exactly what is missing.
+      console.warn(`[voice-call] cascade unavailable (${r.reason}) — live mode for this call`);
+    }
+    entry.brainKind = r.mode;
+    return entry.brainKind;
+  }
+
+  /**
+   * The cascade's extra seams. The mouth is built HERE, with requireMouth:true —
+   * the cascade's brain is a text model, so resolving to the native Gemini voice
+   * is a call it cannot take, and only this caller is allowed to walk the
+   * doctrine fallback order (see brain/tts/index.js). An injected chain wins, so
+   * a test never constructs a real vendor client.
+   */
+  function cascadeDeps(entry) {
+    const extras = {};
+    for (const k of CASCADE_DEP_KEYS) {
+      if (cascadeFactories?.[k] != null) extras[k] = cascadeFactories[k];
+    }
+    if (extras.ttsChain == null && extras.ttsFactory == null) {
+      try {
+        // Forward the injected fetch seam: a harness that fakes fetch but not
+        // the whole chain must never end up POSTing spoken text to the real
+        // vendor (review finding — the seam's stated purpose is hermeticity).
+        extras.ttsChain = createTtsChain({
+          config,
+          clinic: entry.clinic,
+          logger: log,
+          fetchImpl: extras.fetchImpl,
+          requireMouth: true,
+        });
+      } catch (err) {
+        // Never fatal: the orchestrator builds its own chain (and its own
+        // no-mouth degrade) when we hand it nothing.
+        log('[voice-call] cascade TTS chain construction failed:', err?.message || err);
+      }
+    }
+    return extras;
+  }
+
+  /**
    * Construct the loop, once. Returns null when construction itself blew up —
    * the breaker is deliberately NOT touched here so a failure is counted once,
    * by startBrain(), no matter which of the two callers hit it first.
@@ -675,6 +866,8 @@ export function createVoiceCallService({
   function buildBrain(entry) {
     if (entry.loop) return entry.loop;
     if (entry.brainBuildFailed) return null;
+    const kind = brainKindFor(entry);
+    const makeBrain = injectedBrain || (kind === 'cascade' ? createCascadeLoop : createBrainLoop);
     try {
       entry.loop = makeBrain({
         clinic: entry.clinic,
@@ -690,9 +883,11 @@ export function createVoiceCallService({
         lang: entry.lang,
         sdpOffer: entry.sdpOffer,
         now: clock,
+        logger: log,
         // The loop never hangs up by itself: it reports, and THIS module owns
         // the Graph terminate + the transcript + the degrade text.
         onEnd: (outcome) => track(onBrainEnd(entry, outcome)),
+        ...(kind === 'cascade' ? cascadeDeps(entry) : {}),
       });
     } catch (err) {
       console.error('[voice-call] brain construction failed:', err?.message || err);
@@ -943,6 +1138,8 @@ export function createVoiceCallService({
         from: e.from,
         state: e.session.state,
         startedAt: e.session.startedAt,
+        // Which brain this call is on — ops needs it live, not only afterwards.
+        brain: e.brainKind || null,
       }));
     },
 

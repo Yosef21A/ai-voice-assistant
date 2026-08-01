@@ -191,6 +191,76 @@ Per-turn waterfall logged (vad_ms, stt_final_ms, llm_ttft_ms, tts_ttfb_ms, first
 ### P1 STATUS — SHIPPED (2026-08-01): the cascade orchestrator, adversarially hardened
 `src/voice-call/brain-cascade/`: STT chain (deepgram ar-TN → speechmatics [two-step JWT mint — the API key never rides a URL] → liveEars [free, today] → degrade), free LLM failover chain (flash-lite thinkingLevel:'minimal' → 3-flash-preview → cerebras → groq → classic) with per-provider breakers, provider rotation on 429/quota/empty-stream — NEVER silent degradation, waterfall names the answering provider every turn. Fish s2.1-pro-free TTS in the shared chain (explicit/default native is TERMINAL on the incumbent; the cascade opts in via requireMouth; per-provider voice ids never cross vendors; EL monthly soft-cap). Speculative start with drift re-checks on EVERY final (incl. after promotion), one speculation per utterance, filler only after end-of-turn, barge-in kill-chain, localized DTMF phrases per tenant type, sticky-classic-per-call with forced-classic (zero-network) last link + full event parity (owner alerts/leads/SSE preserved). Metering (sttMs/llmTokens/ttsChars) per call. Review round: 8 confirmed + 9 overflow majors + 7 minors fixed, 0 refuted (incl. a critical: the TTS walk would have flipped the LIVE incumbent to Fish un-gated). Suite: 680 tests / 678 pass / 0 fail / 2 PG-skips. NOT yet wired: nothing reads VOICE_BRAIN until P2.
 
+### P2 STATUS — SHIPPED (2026-08-01): the cascade is wired, flagged, labelled and A/B-able
+`VOICE_BRAIN` is finally read by something. `src/voice-call/index.js` now picks the loop factory per call and
+everything downstream is unchanged, because the two brains are contract-identical
+(`warmUp/start/onRtp/stop/settled/transcript/outcome/stats`).
+
+**Selection rules (`resolveVoiceBrainMode({config, clinic})`, exported + unit-tested).** Precedence
+`clinic.voiceBrain` → `config.voiceBrain` (`VOICE_BRAIN`) → `'live'`. **Only the exact literals `'live'` /
+`'cascade'` count at every rung** — no trimming, no case folding, byte for byte the rule `voiceCallMode ===
+'brain'` uses: `'CASCADE'`, `'Cascade'` and `'cascade '` all mean live, because every way of being wrong about
+this flag must land on the brain that already answers phones. An unrecognized TENANT value is junk, not a
+choice, so it falls through to the global flag rather than pinning the tenant. The tenant override is validated
+in `src/api/tenant.js` exactly like `clinic.voice` (closed set, `''` clears it) and re-validated at call time,
+because a hand-edited `clinics.json` never passes through the API.
+
+**Composition-level fallback (loud, once per call, never dead air).** The cascade has no native voice and no
+native ears: composing it without either produces a call that connects, greets nobody and degrades. So
+`cascade` additionally requires **a mouth** — a Fish or ElevenLabs credential (the doctrine fallback order), OR
+a provider named explicitly by the tenant/`VOICE_TTS_PROVIDER` whose own credential is present (this is the
+clause that lets an Azure tenant run the cascade even though Azure is parked out of the automatic order) — AND
+**ears**: any of `DEEPGRAM_API_KEY` / `SPEECHMATICS_API_KEY` / `GEMINI_API_KEY` (the last one because liveEars
+is the free STT leg). Missing either ⇒ the call is composed as **LIVE** with one warning naming exactly what is
+missing: `[voice-call] cascade unavailable (<reason>) — live mode for this call`. Resolved **once per call** and
+cached on the entry, so the parallel warm-up and `startBrain()` cannot each warn about one decision.
+`opts.brainFactory` injection still wins over the factory choice, and the resolved mode is still reported —
+"which brain did this call think it was" must not become unanswerable because a test swapped the loop.
+
+**Attribution.** The cascade's `ttsChain` is built by the service with `requireMouth: true` (the only caller
+allowed to walk the doctrine fallback order), and both loops now log through the service's logger, so the
+per-turn `[voice-cascade] waterfall vad=… stt=… llm_ttft=… tts_ttfb=… first_audio=… · deepgram → flash-lite →
+fish` line is wired end to end. `finish()` folds **`brain.mode` (`'cascade'|'live'`)**, the **waterfall tail**
+(last 30 turns — the loop keeps 120, but this payload fans out to every open SSE stream) and the **usage meter**
+into the call record and the `call.ended` event. `svc.active()` exposes the live mode too. The founder's
+"it sounded slow on Tuesday" is now attributable to a pipeline instead of to the product.
+
+**A/B harness — `scripts/cascade-ab.js` (a founder tool, NOT a test; `npm test` never imports it).**
+`VOICE_BRAIN` is read once at boot, so one server process has one brain and a per-call flip is impossible.
+The A/B is therefore **two runs, compared from the rows the script appends to `docs/V7-AB-RESULTS.md`**:
+
+```
+# terminal 1 — the cascade side:
+VOICE_BRAIN=cascade VOICE_CALL_MODE=brain WHATSAPP_TRANSPORT=mock \
+  VOICE_CALL_TRANSPORT=real VOICE_CALL_GRAPH_BASE=http://localhost:3902 npm start
+# terminal 2:
+node scripts/cascade-ab.js --mode cascade --calls 10
+# then restart the app with VOICE_BRAIN=live and run --mode live
+```
+
+The caller is an **in-process werift peer** (no browser): it plays Meta's exact connect/terminate webhooks at
+the app while serving the Graph side itself on `:3902`, offers Opus **sendrecv**, and streams a 440 Hz tone
+encoded through the real `brain/codec.js` bridge. Measured per call: `connect_ms` (→ pre_accept), `accept_ms`,
+`greeting_ms` (accept → first audio the caller hears) and `turn_ms` (last uplink frame → next agent audio) —
+i.e. **PLUMBING latency, and it says so**. The model-side numbers are never invented: `vad/stt_final/llm_ttft/
+tts_ttfb/first_audio`, the chain, the turn latencies and the usage meter are read back off the call records the
+server wrote. A tone is not speech, so a run may legitimately record zero turns; that prints `n/a` rather than a
+fabricated number, and real Derja turns stay the founder's own live calls (P3). `--mode` is a label **and** a
+safety check: the script shouts if the records say a different `brain.mode` than the row claims, because a
+mislabelled A/B is worse than no A/B. A declined call (outside working hours) aborts the run immediately with
+that diagnosis instead of grinding through nine more. Verified against a throwaway isolated app: 2/2 calls, full
+signaling + DTLS + a 40-frame RTP round trip, records read back.
+
+**Suite: 697 tests / 695 pass / 0 fail / 2 PG-skips** (was 680/678 — +17, all in
+`test/voicecall.p2.integration.test.js`: the precedence + fallback matrix, one-warn-per-call, injection-still-
+wins, a REAL cascade orchestrator driven through the REAL service end to end with only the three vendor legs
+faked, the run-time no-mouth degrade, and the waterfall cap keeping the TAIL). `makeTestApp` stays pinned to
+`voiceBrain: 'live'` with every cascade key blanked. `npm run simulate` exit 0.
+
+**Left for P3:** the founder's own re-test on real Derja (median felt ≤1.2 s, p95 ≤2.0 s, correct booking with
+spell-back, "feels like a person answered") and a Settings toggle for `voiceBrain` — the API accepts it today,
+the dashboard does not yet render it.
+
 ### V7 ZERO-BUDGET DOCTRINE (founder law, 2026-08-01 — supersedes any paid recommendations above)
 **NO money is spent until clients pay. Free tiers only; API costs become per-client pass-through at pilot signing (client's key or client-billed usage).**
 - **TTS PRIMARY: Fish Audio S2.1 Pro** — founder's key is in `.env` as **`FISH_AUDIO_API=`** (use this EXACT var name in config.js). Free API (fair use). P0: measure real streaming TTFB, test Arabic quality with a stock voice, AND test whether 15s voice cloning works on the free key (if gated → best stock Arabic voice now, clone at first paid client). FALLBACKS: ElevenLabs free tier (20k chars/mo — demo-only budget, no cloning on free) → Gemini native audio (last resort).
