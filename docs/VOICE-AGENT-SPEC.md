@@ -361,3 +361,12 @@ V7 cascade thesis holds on measured numbers, and STT + VAD is the only unknown l
   `b5390e1a1ca542dfa80d9fed13a76581`, trained from the placeholder 15 s clip. Free, harmless — delete it or
   overwrite it when the real consented Tunisian sample is recorded.
 - ElevenLabs free-tier consumption for this entire bake-off: **198 / 10 000 chars**.
+
+## V7-P2.1 — DOUBLE-REPLY BUG (founder live test 2026-08-02: "two replies — the first finishes, then a second dictates another reply")
+Signature = TWO TURNS answering ONE caller utterance, sequentially. The RTP-out path has two permitted writers somewhere. Ranked suspects — instrument FIRST, then fix:
+1. **Speculative turn promoted AND final turn generated:** the speculation plays to the wire, then the final transcript triggers a fresh turn instead of recognizing the utterance was already answered. Check turn-ledger: one utterance-id must map to exactly one spoken reply.
+2. **Double turn-end firing:** STT final event + endpointing/VAD both signal end-of-utterance → two generations queued. Debounce: single turn-end per utterance-id.
+3. **liveEars still has a mouth:** if the Gemini Live session used as fallback ears isn't muted (response modality not restricted / its audio still enqueued), cascade answers AND Live answers. Ears must be EARS ONLY — assert no audio frames from liveEars ever reach RTP.
+4. **A/B harness double-running brains on a live call** — A/B must replay recorded turns offline, never run two brains on one live call.
+FIX REQUIREMENTS: (a) single-writer invariant — one speakGen owns RTP-out; any enqueue not holding the current gen is dropped and logged; (b) utterance ledger — turn-end debounced, one reply per utterance-id, asserted in tests; (c) waterfall log tags every audio-out chunk with source (cascade|speculative|live|greeting) so the next field test is attributable; (d) golden test reproducing the double-reply (fake STT emitting interim-stable + final for the same utterance; fake slow TTS) proving exactly one reply plays.
+ACCEPTANCE: 10-turn live call — exactly one reply per caller utterance, zero self-triggering, confirmed from the tagged waterfall.
