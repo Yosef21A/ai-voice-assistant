@@ -103,9 +103,13 @@
 //     is a real future option and a bigger slice than this one. See ./tts/index.js.
 //
 // Nothing here throws into the RTP path or into a WebSocket handler.
-import { createCodecBridge } from './codec.js';
+import { createCodecBridge, BRAIN_OUT_RATE } from './codec.js';
 import { createLiveClient } from './liveClient.js';
 import { createTtsChain } from './tts/index.js';
+// The splitter moved to ./chunker.js at V7-P1 so the cascade orchestrator cuts
+// speech with the SAME rules. Behaviour here is byte-identical: takeSentences()
+// below is the old closure, now delegating to the pure function.
+import { takeSentences as splitSpeakable, SPEAKABLE_RE } from './chunker.js';
 import { buildVoiceSystemPrompt } from './prompts.js';
 import { buildToolDeclarations, createToolExecutor, formatWhenSpoken } from './tools.js';
 import { getGreeting, putGreeting, MAX_GREETING_FRAMES } from './greetingCache.js';
@@ -146,36 +150,25 @@ const MAX_NAME_CHARS = 60;
 const MAX_NAME_WORDS = 4;
 
 // ── V5-T1 tuning (TTS mode only) ───────────────────────────────────────────
+// The splitter's constants and rules (SENTENCE_END, MIN/MAX_SENTENCE_CHARS,
+// SPEAKABLE_RE, ABBREVIATIONS, the decimal and abbreviation guards) moved to
+// ./chunker.js at V7-P1 so the cascade orchestrator cuts speech identically.
+// SPEAKABLE_RE is imported at the top because this file also uses it OUTSIDE
+// the splitter: "is there anything left to say" is the hang-up gate.
+
+// ── V5-T2: THE HANG-UP ─────────────────────────────────────────────────────
 /**
- * What ends a spoken sentence. `؟` is the Arabic question mark and `।` the
- * danda — models reach for both when writing Arabic, and neither is in the
- * Latin set. A newline counts: models use them as hard breaks.
+ * How long the line has to be genuinely SILENT after end_call before we drop it.
+ *
+ * "The queue is empty" alone is not the end of the farewell: Gemini delivers
+ * audio in bursts and a TTS sentence arrives over HTTP, so there are ordinary
+ * gaps of tens of milliseconds in the middle of a spoken word. Hanging up in one
+ * of those gaps cuts the goodbye in half — which is a worse tell than not
+ * hanging up at all. A short quiet period distinguishes "a gap" from "finished".
  */
-const SENTENCE_END = new Set(['.', '!', '?', '؟', '।', '…', '\n']);
-/**
- * Below this, a "sentence" is an abbreviation or an initial, not a clause.
- * Synthesizing "د." on its own would cost a whole HTTP round trip to say
- * nothing, and would chop the sentence it belongs to in half.
- */
-const MIN_SENTENCE_CHARS = 12;
-/**
- * A run-on with no terminator in sight gets spoken anyway at this length. A
- * model that forgets its punctuation must not translate into dead air.
- */
-const MAX_SENTENCE_CHARS = 240;
-/**
- * Something has to be SAID for an utterance to be worth an HTTP request. A
- * piece of pure punctuation is not: it costs a round trip to say nothing, and —
- * proven in review — a provider error on that nothing would end the call.
- */
-const SPEAKABLE_RE = /[\p{L}\p{N}]/u;
-const LETTER_RE = /\p{L}/u;
-/**
- * Words whose full stop does not end a sentence. Single LETTERS are handled
- * separately (any initial: "M.", "د.", the two dots of "a.m."), so this list is
- * only for the multi-letter ones.
- */
-const ABBREVIATIONS = new Set(['dr', 'mr', 'mrs', 'ms', 'mme', 'mlle', 'prof', 'st', 'ste', 'no', 'vs', 'etc']);
+const HANGUP_QUIET_MS = 300;
+/** Belt for the brace: hang up even if audio never drains. Config overrides it. */
+const DEFAULT_HANGUP_GRACE_MS = 8000;
 /**
  * What a NAME is allowed to look like: letters (any script, so Arabic and its
  * combining marks qualify) joined by an apostrophe or a hyphen. Nothing else —
@@ -319,6 +312,8 @@ export function createBrainLoop({
     toolBatchId: 0,
     lastCallerSpeechAt: 0,
     speechSinceStage: '',
+    /** V5-T2: end_call was called. The LOOP decides when that actually happens. */
+    endRequested: false,
   };
   const transcript = [];
   const cancelledToolIds = new Set();
@@ -332,6 +327,14 @@ export function createBrainLoop({
   let stopped = false;
   let outcomeReason = null;
   let toolCalls = 0;
+
+  // ── V5-T2 hang-up state ──────────────────────────────────────────────────
+  /** Wall clock at which the wire first went quiet with end_call pending. */
+  let hangupQuietSince = 0;
+  /** The belt: fires even if the farewell audio never arrives at all. */
+  let hangupTimer = null;
+  /** Instrumentation: how the call actually ended, for the one-line summary. */
+  let hangupBy = null;
 
   // Outbound pacing.
   let outQueue = [];
@@ -398,6 +401,8 @@ export function createBrainLoop({
   /** Set once, on the first provider failure. The call ends after it. */
   let ttsFailed = false;
   let sentencesSpoken = 0;
+  /** Utterances queued or in flight. The hang-up waits for this to reach zero. */
+  let speakPending = 0;
 
   function track(p) {
     const q = Promise.resolve(p).catch((err) => log('[voice-brain] background task failed:', err?.message || err));
@@ -482,6 +487,9 @@ export function createBrainLoop({
       }
       const payload = outQueue.shift();
       if (tapePending > 0) tapePending -= 1;
+      // We are still speaking, so any silence we had started counting towards
+      // the hang-up was a gap in the middle of a word, not the end of one.
+      hangupQuietSince = 0;
       // THE measurement point. Not "when Gemini sent us audio" and not "when we
       // queued it" — the first frame that actually reaches the wire is the first
       // thing the caller can hear, and that is the number that matters.
@@ -502,6 +510,88 @@ export function createBrainLoop({
         log('[voice-brain] sendRtp failed:', err?.message || err);
       }
     }
+    maybeHangUp(nowMs);
+  }
+
+  // ── THE HANG-UP (V5-T2) ───────────────────────────────────────────────────
+  // Found on a real call: the conversation ended, both sides said goodbye, and
+  // the agent held the line open until the CALLER hung up. A receptionist who
+  // cannot put the phone down is unmistakably a machine — and the silence is
+  // billed by the second.
+  //
+  // The model asks (tools.js end_call); this decides WHEN. The order is
+  // non-negotiable: the farewell has to reach the wire first. Hanging up the
+  // instant the tool returns cuts "بالسلامة" in half, which is a worse tell
+  // than the bug it fixes.
+
+  /** True while a sentence is still being written or synthesized (TTS mode). */
+  function speechInFlight() {
+    if (!ttsMode) return false;
+    return speakPending > 0 || SPEAKABLE_RE.test(sentenceBuf);
+  }
+
+  /**
+   * Called on every pacer tick. Hangs up once the line has been genuinely quiet
+   * for HANGUP_QUIET_MS — not merely "the queue emptied for one tick", which
+   * happens in the middle of ordinary speech.
+   */
+  function maybeHangUp(nowMs) {
+    if (stopped || !callState.endRequested) return;
+    // An EMERGENCY owns the ending. Its grace timer is the authority, and it is
+    // deliberately longer: nothing may shorten the ambulance script.
+    if (callState.emergency) return;
+    if (outQueue.length || tapePending > 0 || speechInFlight()) {
+      hangupQuietSince = 0;
+      return;
+    }
+    if (!hangupQuietSince) {
+      hangupQuietSince = nowMs;
+      return;
+    }
+    if (nowMs - hangupQuietSince < HANGUP_QUIET_MS) return;
+    hangupBy = 'agent';
+    log('[voice-brain] end_call: the goodbye finished playing — hanging up');
+    stop('completed');
+  }
+
+  /**
+   * The model called end_call. Start watching for the line to go quiet, and arm
+   * the belt: a farewell that never arrives (a dead TTS provider, a model that
+   * called the tool and then said nothing) must not leave the caller holding an
+   * open line forever — which is the exact bug this whole feature exists for.
+   */
+  function armHangup() {
+    if (hangupTimer || stopped) return;
+    hangupQuietSince = 0;
+    const graceMs = Number(config.voiceCallHangupGraceMs) || DEFAULT_HANGUP_GRACE_MS;
+    hangupTimer = setTimeout(() => {
+      if (stopped || !callState.endRequested) return;
+      hangupBy = 'grace';
+      log(`[voice-brain] end_call: the goodbye never finished within ${graceMs}ms — hanging up anyway`);
+      stop('completed');
+    }, graceMs);
+    hangupTimer.unref?.();
+    // The pacer is what NOTICES the wire going quiet. If the model called
+    // end_call without ever queuing audio there may be no interval running at
+    // all, and the drain check would never fire.
+    ensurePacing();
+  }
+
+  /**
+   * "Wait — one more thing!" The caller gets to keep talking, always. A goodbye
+   * is a suggestion until the line actually drops, and hanging up on a patient
+   * who just remembered something is a worse failure than not hanging up.
+   */
+  function cancelHangup(why) {
+    if (!callState.endRequested && !hangupTimer) return;
+    callState.endRequested = false;
+    hangupQuietSince = 0;
+    hangupBy = null;
+    if (hangupTimer) {
+      clearTimeout(hangupTimer);
+      hangupTimer = null;
+    }
+    log(`[voice-brain] end_call cancelled (${why}) — the caller is still speaking`);
   }
 
   function ensurePacing() {
@@ -570,16 +660,21 @@ export function createBrainLoop({
   }
 
   /**
-   * PCM16 @24 kHz from whichever mouth is fitted → paced 20 ms wire frames.
+   * PCM16 from whichever mouth is fitted → paced 20 ms wire frames.
    *
    * The ONE place brain audio becomes RTP, shared by the native 'audio' handler
    * and the TTS synthesis path so the tape, the latency mark and the pacer
    * cannot drift apart between the two modes. Never throws.
+   *
+   * `rate` defaults to the brain's 24 kHz — what Gemini Live, Azure and
+   * ElevenLabs all produce. A provider that answers at another rate (Fish
+   * Audio: 8 kHz) declares it on the chain, and playing its samples as if they
+   * were 24 kHz would slow the voice to a third of its speed on the wire.
    */
-  function emitPcm(pcm24) {
+  function emitPcm(pcm24, rate = BRAIN_OUT_RATE) {
     try {
       const queueWasEmpty = outQueue.length === 0;
-      const frames = codec.encodeOut(pcm24);
+      const frames = codec.encodeOut(pcm24, rate);
       if (!frames.length) return;
       // The first audio of the turn that ANSWERS the caller. Marked here,
       // measured in tick() when the frame actually leaves.
@@ -628,6 +723,7 @@ export function createBrainLoop({
    */
   function enqueueSpeak(fn) {
     const gen = speakGen;
+    speakPending += 1;
     speakChain = speakChain
       .then(async () => {
         if (stopped || gen !== speakGen) return;
@@ -635,7 +731,10 @@ export function createBrainLoop({
       })
       // The chain must never stay rejected: everything queued behind a failed
       // utterance would be skipped, including the end-of-turn commit.
-      .catch((err) => log('[voice-brain] speech queue error:', err?.message || err));
+      .catch((err) => log('[voice-brain] speech queue error:', err?.message || err))
+      .finally(() => {
+        speakPending = Math.max(0, speakPending - 1);
+      });
     // Tracked so loop.settled() — which the service awaits before reading the
     // outcome — waits for the mouth as well as for the tool calls.
     track(speakChain);
@@ -663,9 +762,10 @@ export function createBrainLoop({
     const ac = new AbortController();
     if (!emergency) synthAbort = ac;
     try {
+      const rate = Number(ttsChain.sampleRate) > 0 ? Number(ttsChain.sampleRate) : BRAIN_OUT_RATE;
       for await (const chunk of ttsChain.synthesize(said, { lang: L, signal: ac.signal })) {
         if (cancelled()) return;
-        if (chunk && chunk.length) emitPcm(chunk);
+        if (chunk && chunk.length) emitPcm(chunk, rate);
       }
       sentencesSpoken += 1;
     } catch (err) {
@@ -698,110 +798,17 @@ export function createBrainLoop({
   }
 
   /**
-   * A '.' between two digits is a DECIMAL, not a full stop. Proven in review:
-   * "الفحص يبدا من 1.500 دينار للكشف." was split into "…من 1." and "500 دينار
-   * للكشف." — the caller heard a WRONG PRICE, in two pieces, from a medical
-   * clinic. Same shape for "14.30" and "9.30".
-   */
-  function isDecimalDot(buf, i) {
-    if (buf[i] !== '.') return false;
-    return /\d/.test(buf[i - 1] || '') && /\d/.test(buf[i + 1] || '');
-  }
-
-  /**
-   * "Dr. Amine" and "a.m." are one utterance, not two. Walk back over the
-   * letters immediately before the dot: a SINGLE letter is an initial (M., د.,
-   * and both dots of a.m.), and a known abbreviation is not a sentence end.
-   */
-  function isAbbreviationDot(buf, i) {
-    if (buf[i] !== '.') return false;
-    let k = i - 1;
-    let word = '';
-    while (k >= 0 && LETTER_RE.test(buf[k])) {
-      word = buf[k] + word;
-      k -= 1;
-    }
-    if (!word) return false;
-    if (word.length === 1) return true;
-    return ABBREVIATIONS.has(word.toLowerCase());
-  }
-
-  /** Runs of terminators ("...", "?!") are ONE terminator; returns its last index. */
-  function terminatorRunEnd(buf, i) {
-    let j = i;
-    while (j + 1 < buf.length && SENTENCE_END.has(buf[j + 1])) j += 1;
-    return j;
-  }
-
-  /**
-   * Cut the model's text stream into things worth saying.
-   *
-   * Speech has to start on the first CLAUSE, not at the end of the reply: a
-   * provider round trip is ~200-400 ms and waiting for the whole paragraph
-   * stacks that on top of the model's own generation time.
-   *
-   * FOUR RULES, every one of them paid for by a real broken utterance:
-   *   1. A terminator only counts when WHITESPACE follows it (or the terminator
-   *      itself is a newline). "1.500" and "www.x" are not two sentences.
-   *   2. A terminator at the very END of the buffer WAITS. Mid-stream we cannot
-   *      yet tell "1." from "1.500", or "Dr." from "Dr. Amine" — the next
-   *      fragment decides, and the end-of-turn flush is the backstop. The cost
-   *      is one text fragment of latency; the alternative is a wrong price.
-   *   3. Decimals and abbreviations are never terminators (above).
-   *   4. A piece with no letter or digit in it is never an utterance: it is
-   *      glued onto whatever follows instead of becoming an HTTP request.
-   * Plus the originals: shorter than MIN_SENTENCE_CHARS glues forward, and a
-   * run-on past MAX_SENTENCE_CHARS is spoken anyway rather than held.
+   * Cut the model's text stream into things worth saying — the SHARED rule set
+   * (./chunker.js), so the cascade orchestrator and this loop can never
+   * disagree about where a price ends. Behaviour is byte-identical to the
+   * closure this replaced; only the buffer bookkeeping stayed here.
    *
    * @returns {string[]} complete utterances, in order
    */
   function takeSentences() {
-    const out = [];
-    for (;;) {
-      let cut = -1;
-      for (let i = 0; i < sentenceBuf.length; i += 1) {
-        if (!SENTENCE_END.has(sentenceBuf[i])) continue;
-        if (isDecimalDot(sentenceBuf, i)) continue;
-        if (isAbbreviationDot(sentenceBuf, i)) continue;
-        const end = terminatorRunEnd(sentenceBuf, i);
-        const after = sentenceBuf[end + 1];
-        // Rule 2: nothing after it yet ⇒ we cannot know. Wait.
-        if (after === undefined) break;
-        // Rule 1: a newline IS the break; anything else needs whitespace after.
-        const hardBreak = /\s/.test(sentenceBuf.slice(i, end + 1));
-        if (!hardBreak && !/\s/.test(after)) {
-          i = end; // skip the whole run, not just its first char
-          continue;
-        }
-        const piece = sentenceBuf.slice(0, end + 1);
-        if (piece.trim().length < MIN_SENTENCE_CHARS) {
-          i = end;
-          continue;
-        }
-        // Rule 4: nothing to say ⇒ glue it forward.
-        if (!SPEAKABLE_RE.test(piece)) {
-          i = end;
-          continue;
-        }
-        cut = end + 1;
-        break;
-      }
-      if (cut < 0) {
-        if (sentenceBuf.length < MAX_SENTENCE_CHARS) break;
-        // No terminator and too long to keep waiting: break at the last space
-        // so we do not cut a word in half, and take the lot if there is none.
-        const space = sentenceBuf.lastIndexOf(' ', MAX_SENTENCE_CHARS);
-        cut = space > MIN_SENTENCE_CHARS ? space + 1 : MAX_SENTENCE_CHARS;
-      }
-      const piece = sentenceBuf.slice(0, cut);
-      sentenceBuf = sentenceBuf.slice(cut);
-      // The scan above already guarantees a speakable piece. The forced
-      // MAX_SENTENCE_CHARS cut does not, and re-buffering it there would spin
-      // forever — 240 characters of pure punctuation is a broken model, not an
-      // utterance, so it is dropped.
-      if (SPEAKABLE_RE.test(piece)) out.push(piece);
-    }
-    return out;
+    const { pieces, rest } = splitSpeakable(sentenceBuf);
+    sentenceBuf = rest;
+    return pieces;
   }
 
   /** A fragment of model text arrived (TEXT modality). */
@@ -912,6 +919,11 @@ export function createBrainLoop({
     // caller speaking IS the interrupt signal. Emergencies are the one case
     // where we deliberately keep talking.
     if (!callState.emergency) flushTape();
+    // "بالسلامة" — "wait, one more thing!". They spoke after the goodbye, so
+    // there is no goodbye. This has to live HERE and not only in `interrupted`:
+    // once the farewell has finished playing there is nothing left to interrupt,
+    // and their first word arrives as a transcription and nothing else.
+    if (!callState.emergency && callState.endRequested) cancelHangup('the caller spoke again');
 
     if (callState.emergency) return;
     // THE WINDOW IS ONE UTTERANCE, NOT ONE CALL. It exists only to rejoin
@@ -1073,6 +1085,9 @@ export function createBrainLoop({
       responses.push({ id: c.id, name: c.name, response: { result } });
     }
     if (responses.length && !stopped) live?.sendToolResponse(responses);
+    // end_call is inert by design (tools.js): it raises the flag, and THIS is
+    // where the phone actually starts being put down — after the farewell.
+    if (callState.endRequested) armHangup();
   }
 
   function onToolCancellation(ids) {
@@ -1154,6 +1169,8 @@ export function createBrainLoop({
       // talking over the caller deliberately: being interrupted out of reading
       // an ambulance number is a worse outcome than being rude.
       if (callState.emergency) return;
+      // Talked over mid-goodbye: the call is not over after all.
+      if (callState.endRequested) cancelHangup('barge-in');
       // A greeting the caller talked over is a HALF greeting. Never cache it.
       abortTee();
       endAgentTurn();
@@ -1536,6 +1553,11 @@ export function createBrainLoop({
         voice: voiceSummary(),
         sentenceBuf: sentenceBuf.length,
         sentencesSpoken,
+        speakPending,
+        // ── V5-T2 ──
+        endRequested: !!callState.endRequested,
+        hangupArmed: !!hangupTimer,
+        endedBy: hangupBy,
       };
     },
   };
@@ -1604,6 +1626,10 @@ export function createBrainLoop({
       clearTimeout(emergencyTimer);
       emergencyTimer = null;
     }
+    if (hangupTimer) {
+      clearTimeout(hangupTimer);
+      hangupTimer = null;
+    }
     outQueue = [];
     abortTee(); // a call that ended mid-greeting has nothing worth taping
     // A synthesis request outliving the call is a socket nobody will ever read
@@ -1628,7 +1654,8 @@ export function createBrainLoop({
       log(
         `[voice-brain] turn latency median=${l.medianMs ?? 'n/a'}ms p95=${l.p95Ms ?? 'n/a'}ms ` +
           `turns=${l.turns} barge-ins=${bargeIns} greeting=${greetingMs ?? 'n/a'}ms (${greetingSource || 'none'}) ` +
-          `voice=${v.provider}${v.voice ? `/${v.voice}` : ''}${v.degradedMidCall ? ' DEGRADED' : ''}`
+          `voice=${v.provider}${v.voice ? `/${v.voice}` : ''}${v.degradedMidCall ? ' DEGRADED' : ''} ` +
+          `ended=${outcomeReason}${hangupBy ? ` (agent hang-up: ${hangupBy})` : ''}`
       );
     }
     if (typeof onEnd === 'function') {

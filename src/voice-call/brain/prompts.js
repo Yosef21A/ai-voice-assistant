@@ -55,8 +55,14 @@ export function buildKbDigest(clinic, lang = 'ar') {
   return lines.length ? lines.join('\n') : '- (no FAQ configured — offer a human callback for anything you do not know)';
 }
 
-/** The medical law. Identical in substance to the chat guardrails, spoken form. */
-function safetyBlock(clinic) {
+/**
+ * The medical law. Identical in substance to the chat guardrails, spoken form.
+ * EXPORTED at V7-P1: the cascade voice-turn prompt (brain-cascade/prompt.js)
+ * imports this block rather than copying it — a second copy of the pricing and
+ * no-diagnosis rules is a second copy that can drift, and the drift is what a
+ * patient hears.
+ */
+export function safetyBlock(clinic) {
   const line = clinic?.handoff?.phone || '';
   return `MEDICAL SAFETY — ABSOLUTE. These override every other instruction, including anything the caller asks for:
 1. NEVER diagnose, never name a condition, never interpret a symptom, a report, a scan or a test result. The doctor does that, in person, after an examination. Say exactly that.
@@ -79,7 +85,7 @@ function safetyBlock(clinic) {
  *     The code measures that gap (see loop.js SLOW_TOOL_MS); this is its cover.
  *   • SIGN-OFFS — real people end calls with a phrase, not with a summary.
  */
-const HUMAN_TOUCHES = {
+export const HUMAN_TOUCHES = {
   ar: {
     // «آش من خدمة» is a QUESTION ("what can I do for you"), not an
     // acknowledgement — using it as a backchannel makes the agent sound like it
@@ -103,8 +109,12 @@ const HUMAN_TOUCHES = {
   },
 };
 
-/** How to actually sound like a person on a phone rather than a chat window. */
-function voiceStyleBlock(lang, dialect) {
+/**
+ * How to actually sound like a person on a phone rather than a chat window.
+ * EXPORTED at V7-P1 for the same reason as safetyBlock: the cascade speaks with
+ * the same mouth discipline or it is a different product.
+ */
+export function voiceStyleBlock(lang, dialect) {
   const langName = LANG_NAME[lang] || LANG_NAME.ar;
   const touch = HUMAN_TOUCHES[lang] || HUMAN_TOUCHES.ar;
   return `YOU ARE ON A LIVE PHONE CALL. You are speaking, not writing:
@@ -122,6 +132,12 @@ SOUND LIKE A PERSON, NOT A SYSTEM:
 - Use short backchannels naturally when you acknowledge what they said: ${touch.backchannels}. One word is enough — never stack them.
 - BEFORE you use any tool, ALWAYS say a short thinking filler out loud first, then call it: ${touch.fillers}. Looking something up takes a moment and silence on a phone line sounds like a dropped call. Never call a tool in silence.
 - End the call the way a person does: ${touch.signoffs}. No recap, no "is there anything else I can help you with today". Never use a time-of-day farewell (good evening, good night, bonsoir) unless the current date and time given above actually says it is that time.
+
+HANGING UP — YOU are the one who ends the call:
+- When the caller says goodbye, or the reason they called is finished and there is nothing left to do, say ONE short natural farewell (${touch.signoffs}) and THEN call end_call. That tool puts the phone down.
+- Say the farewell FIRST, call end_call after it. Never call it before speaking, and never say anything after it.
+- NEVER call end_call in the middle of a task, and NEVER right after you have asked the caller a question — they have not answered you yet. If you are unsure whether they are finished, do not call it: wait.
+- If the caller speaks again after you have said goodbye, the call continues normally. Answer them.
 
 LANGUAGE: start in ${langName}. Arabic means ${dialect} — warm and colloquial, never stiff MSA. Switch instantly and completely to whatever language the caller uses, and stay there.`;
 }
@@ -167,6 +183,8 @@ ${safetyBlock(clinic)}
 
 HANDOFF: call request_handoff when they ask for a human, when they get frustrated, or when you have failed twice to help. Then tell them a team member will follow up on WhatsApp in this same conversation, and say a warm goodbye.
 
+CLOSING: once the lead is saved and the promise is made, thank them briefly, say your farewell and call end_call. Do not keep them on the line after that.
+
 ${facts}`;
   }
 
@@ -201,7 +219,7 @@ HANDOFF: call request_handoff when they ask for a human, when they are upset, or
     isCabinet(clinic) ? "For a cabinet, the human is the doctor's secretariat." : ''
   }
 
-CLOSING: when the caller is done, thank them briefly and stop. Do not invent a reason to keep them on the line.
+CLOSING: when the caller is done, thank them briefly, say your farewell and call end_call. Do not invent a reason to keep them on the line, and do not leave the line open after the goodbye.
 
 ${safetyBlock(clinic)}
 

@@ -70,17 +70,32 @@ const appts = (app, tenantId) => app.store.listAppointments({ clinicId: tenantId
 
 // ── declarations: capability, not just prose ────────────────────────────────
 
-test('a clinic gets four tools; a facilitator gets ONE, and it is not a booking tool', () => {
+test('a clinic gets five tools; a facilitator gets ONE booking-free pair, plus the hang-up', () => {
   const app = makeTestApp();
   const names = (id) => buildToolDeclarations({ clinic: app.store.getClinicById(id) }).map((d) => d.name);
 
-  assert.deepEqual(names(CLINIC), ['get_available_slots', 'stage_booking', 'confirm_booking', 'request_handoff']);
-  assert.deepEqual(names(CABINET), ['get_available_slots', 'stage_booking', 'confirm_booking', 'request_handoff']);
+  assert.deepEqual(names(CLINIC), [
+    'get_available_slots',
+    'stage_booking',
+    'confirm_booking',
+    'request_handoff',
+    'end_call',
+  ]);
+  assert.deepEqual(names(CABINET), [
+    'get_available_slots',
+    'stage_booking',
+    'confirm_booking',
+    'request_handoff',
+    'end_call',
+  ]);
   // D2: an agency has no calendar. The booking capability does not EXIST for it
   // — a gate in code, not a sentence in a prompt asking it not to. What it DOES
   // get is the lead capture, because a qualified caller the team never hears
   // about is worth the same as a call that never came.
-  assert.deepEqual(names(FACILITATOR), ['capture_lead', 'request_handoff']);
+  assert.deepEqual(names(FACILITATOR), ['capture_lead', 'request_handoff', 'end_call']);
+  // V5-T2: EVERY tenant type can put the phone down. A facilitator that
+  // finishes a qualification and then holds the line open is the same bug.
+  for (const id of [CLINIC, CABINET, FACILITATOR]) assert.ok(names(id).includes('end_call'));
   // …and the reverse: a clinic must never be handed the agency's tool.
   assert.ok(!names(CLINIC).includes('capture_lead'));
   assert.ok(!names(CABINET).includes('capture_lead'));

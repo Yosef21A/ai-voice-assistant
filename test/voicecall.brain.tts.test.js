@@ -1263,6 +1263,11 @@ function serviceFakeBrain({ provider = 'azure', spoke = false } = {}) {
         loop.stopped = loop.stopped || 'tts_lost';
         deps.onEnd?.({ ...loop.outcome(), reason: 'tts_lost' });
       },
+      /** V5-T2: the loop said goodbye and stopped itself. */
+      hangUp() {
+        loop.stopped = loop.stopped || 'completed';
+        deps.onEnd?.({ ...loop.outcome(), reason: 'completed' });
+      },
     };
     made.push(loop);
     return loop;
@@ -1505,6 +1510,214 @@ test('BREAKER: a call that never spoke does NOT close a breaker', async (t) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// 5c. THE HANG-UP (V5-T2) — found on a real call: the agent NEVER hung up
+// ════════════════════════════════════════════════════════════════════════════
+
+const endCall = (id = 'end_call') => [{ id, name: 'end_call', args: {} }];
+
+test('HANG-UP: the agent says goodbye, end_call fires, and the line drops only AFTER it has played', async (t) => {
+  const chain = fakeTts();
+  const ended = [];
+  const s = await setup({ ttsChain: chain, ended });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  // The conversation is over: the caller says goodbye, the agent says goodbye.
+  s.live.emit('inputTranscription', 'باهي، شكرا برشا');
+  s.live.emit('text', 'يعطيك الصحة، بالسلامة! ');
+  await s.loop.settled();
+  assert.deepEqual(chain.calls.map((c) => c.text), ['يعطيك الصحة، بالسلامة!']);
+
+  // …and only THEN does it ask for the phone to be put down.
+  s.live.emit('toolCall', endCall());
+  await s.loop.settled();
+  assert.equal(s.live.toolResponses[0][0].response.result.ok, true);
+  assert.equal(s.loop.stats().endRequested, true);
+  assert.equal(s.loop.stats().hangupArmed, true, 'the safety belt is armed the moment it is requested');
+
+  // THE ORDER THAT MATTERS. The farewell frames are still queued, so we are
+  // still on the line — dropping it here would cut «بالسلامة» in half.
+  assert.ok(s.loop.stats().outQueue > 0, 'the goodbye has not finished playing');
+  assert.equal(ended.length, 0, 'so we have NOT hung up');
+
+  // Let the pacer drain it, then go quiet.
+  await waitFor(() => ended.length === 1, 'the call to end once the goodbye finished', 6000);
+  assert.equal(ended[0].reason, 'completed');
+  assert.equal(s.loop.stats().endedBy, 'agent');
+  assert.equal(s.media.sent.length > 0, true, 'the farewell really reached the wire first');
+  assert.equal(s.live.closed, 1);
+});
+
+test('HANG-UP: native mode drains the model audio the same way', async (t) => {
+  const ended = [];
+  const s = await setup({ ttsChain: nativeSpyChain(), ended });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.live.emit('inputTranscription', 'مرسي، بالسلامة');
+  s.live.emit('audio', tone24k(300)); // the spoken farewell
+  s.live.emit('outputTranscription', 'بالسلامة!');
+  s.live.emit('toolCall', endCall());
+  await s.loop.settled();
+  assert.ok(s.loop.stats().outQueue > 0);
+  assert.equal(ended.length, 0);
+
+  await waitFor(() => ended.length === 1, 'the drain-then-hang-up', 6000);
+  assert.equal(ended[0].reason, 'completed');
+  assert.equal(s.loop.stats().endedBy, 'agent');
+});
+
+test('HANG-UP: "wait — one more thing!" — speaking after the goodbye cancels it', async (t) => {
+  const ended = [];
+  const s = await setup({ ttsChain: nativeSpyChain(), ended });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.live.emit('audio', tone24k(60));
+  s.live.emit('toolCall', endCall());
+  await s.loop.settled();
+  assert.equal(s.loop.stats().endRequested, true);
+  assert.equal(s.loop.stats().hangupArmed, true);
+
+  // THE CALLER IS NOT DONE. A goodbye is a suggestion until the line drops, and
+  // hanging up on a patient who just remembered something is the worse failure.
+  s.live.emit('inputTranscription', 'استنى، عندي سؤال أخير');
+  assert.equal(s.loop.stats().endRequested, false, 'the hang-up is cancelled');
+  assert.equal(s.loop.stats().hangupArmed, false, 'and so is the safety timer');
+
+  // The line stays open, and stays open.
+  await sleep(400);
+  assert.equal(ended.length, 0, 'the call is still live');
+  assert.equal(s.loop.stats().endedBy, null);
+
+  // …and the agent can answer them normally.
+  s.live.emit('audio', tone24k(60));
+  s.live.emit('outputTranscription', 'أيوا، تفضل');
+  await s.loop.settled();
+  assert.ok(s.loop.transcript().some((e) => e.who === 'agent' && e.text.includes('تفضل')));
+});
+
+test('HANG-UP: a barge-in over the farewell cancels it too', async (t) => {
+  const ended = [];
+  const s = await setup({ ttsChain: nativeSpyChain(), ended });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.live.emit('audio', tone24k(400));
+  s.live.emit('toolCall', endCall());
+  await s.loop.settled();
+  assert.equal(s.loop.stats().endRequested, true);
+
+  s.live.emit('interrupted', true); // they talked over the goodbye
+  assert.equal(s.loop.stats().endRequested, false);
+  assert.equal(s.loop.stats().hangupArmed, false);
+  await sleep(400);
+  assert.equal(ended.length, 0);
+});
+
+test('HANG-UP: the safety belt fires when the farewell audio never arrives at all', async (t) => {
+  // A model that calls end_call and then says nothing (or a TTS provider that
+  // died) must not leave the caller holding an open line — which is the exact
+  // bug this whole feature exists to remove.
+  const ended = [];
+  const s = await setup({ ttsChain: nativeSpyChain(), config: { voiceCallHangupGraceMs: 120 }, ended });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.live.emit('toolCall', endCall()); // not one frame of audio, ever
+  await s.loop.settled();
+  assert.equal(s.loop.stats().hangupArmed, true);
+
+  await waitFor(() => ended.length === 1, 'the grace timer to force the hang-up', 4000);
+  assert.equal(ended[0].reason, 'completed');
+  assert.equal(s.media.sent.length, 0, 'nothing was ever spoken');
+});
+
+test('HANG-UP: an EMERGENCY outranks end_call — nothing may shorten the ambulance script', async (t) => {
+  const ended = [];
+  const s = await setup({
+    ttsChain: nativeSpyChain(),
+    config: { voiceBrainEmergencyGraceMs: 400, voiceCallHangupGraceMs: 60 },
+    ended,
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.live.emit('toolCall', endCall());
+  await s.loop.settled();
+  s.live.emit('inputTranscription', 'عندي وجع قوي في صدري');
+  await s.loop.settled();
+  assert.equal(s.loop.outcome().emergency, true);
+
+  // The emergency grace timer is the authority, and it is deliberately longer.
+  await sleep(150);
+  const reason = ended.length ? ended[0].reason : null;
+  assert.notEqual(reason, 'completed', 'the hang-up must not pre-empt the script');
+  await waitFor(() => ended.length === 1, 'the emergency grace timer', 4000);
+  assert.equal(ended[0].reason, 'emergency');
+});
+
+test('SERVICE: a loop-initiated end_call really terminates the call on the Graph', async (t) => {
+  // The whole point: the call has to ACTUALLY end on the caller's phone.
+  resetTtsBreakers();
+  const app = makeTestApp();
+  const media = serviceFakeMedia();
+  const alerts = spyAlerts();
+  const brain = serviceFakeBrain({ spoke: true });
+  const { svc, graphCalls, events, unsub } = makeService(app, { media, brain, alerts });
+  t.after(async () => {
+    unsub();
+    await svc.stop();
+  });
+
+  const from = '21690007300';
+  await svc.handleEvents(normalizeCallEvents(connectBody({ callId: 'wacid.BYE', from })));
+  await svc.settled();
+  assert.equal(svc.active().length, 1);
+
+  // The loop decides the conversation is over and stops itself.
+  brain.made[0].hangUp();
+  await svc.settled();
+
+  assert.deepEqual(
+    graphCalls.recorded.map((r) => r.action),
+    ['pre_accept', 'accept', 'terminate'],
+    'the Graph terminate is what actually drops the line on the phone'
+  );
+  assert.equal(svc.active().length, 0);
+  assert.equal(media.made[0].closed, 1, 'the UDP socket is released');
+
+  // It is a call that HAPPENED — not a missed one — and nobody is apologised to.
+  const ended = ofType(events, 'call.ended');
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].call.brain.reason, 'completed');
+  assert.equal(ofType(events, 'call.missed').length, 0);
+  const out = (await app.store.conversations.listMessages(CLINIC, `${CLINIC}:${from}`, {})).filter(
+    (m) => m.direction === 'outbound'
+  );
+  assert.equal(out.length, 0, 'a normal goodbye is not a degrade: no "sorry, write to us" message');
+  assert.equal(alerts.fired.length, 0, 'and nobody is paged');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // 5b. THE WIRE'S TIMERS — every network read is on a budget
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -1579,7 +1792,11 @@ test('SETTINGS: PUT /api/tenant validates voice, persists it, and the LIVE clini
     body: { voice: { provider: 'azure', azureVoice: '  ar-TN-HediNeural  ' } },
   });
   assert.equal(ok.status, 200);
-  assert.deepEqual(ok.body.tenant.config.voice, { provider: 'azure', azureVoice: 'ar-TN-HediNeural' });
+  // Field-by-field, not deepEqual: data/clinics.json carries the founder's live
+  // voice settings, and a test that pins the WHOLE block breaks every time a
+  // real tenant is configured.
+  assert.equal(ok.body.tenant.config.voice.provider, 'azure');
+  assert.equal(ok.body.tenant.config.voice.azureVoice, 'ar-TN-HediNeural', 'trimmed on the way in');
 
   // Persisted…
   const get = await request(server, 'GET', '/api/tenant', { cookie });
@@ -1599,11 +1816,9 @@ test('SETTINGS: PUT /api/tenant validates voice, persists it, and the LIVE clini
     body: { voice: { elevenVoiceId: 'clone_youssef_1' } },
   });
   assert.equal(merged.status, 200);
-  assert.deepEqual(merged.body.tenant.config.voice, {
-    provider: 'azure',
-    azureVoice: 'ar-TN-HediNeural',
-    elevenVoiceId: 'clone_youssef_1',
-  });
+  assert.equal(merged.body.tenant.config.voice.elevenVoiceId, 'clone_youssef_1');
+  assert.equal(merged.body.tenant.config.voice.provider, 'azure', 'the untouched fields survive');
+  assert.equal(merged.body.tenant.config.voice.azureVoice, 'ar-TN-HediNeural');
 
   // These values are interpolated into SSML and into a provider URL, so the
   // shape is a CLOSED set — an unknown key is refused, not stored and ignored —

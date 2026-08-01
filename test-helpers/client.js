@@ -57,6 +57,18 @@ export function makeTestApp(overrides = {}, appOpts = {}) {
     voiceTtsProvider: '',
     azureSpeechKey: '',
     elevenlabsApiKey: '',
+    // V7: the SAME law a third time, for the cascade. A machine-global
+    // VOICE_BRAIN=cascade would swap the brain under every existing voice
+    // suite, and a real FISH_AUDIO_API / DEEPGRAM_API_KEY / CEREBRAS_API_KEY /
+    // GROQ_API_KEY in a developer's .env would let a unit test POST a patient's
+    // words — or their audio — to a vendor. The cascade suites build their
+    // chains explicitly, with fake providers, always.
+    voiceBrain: 'live',
+    fishAudioApi: '',
+    deepgramApiKey: '',
+    speechmaticsApiKey: '',
+    cerebrasApiKey: '',
+    groqApiKey: '',
     ...overrides,
   });
   const bus = createBus();

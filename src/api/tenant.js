@@ -18,8 +18,11 @@ const TENANT_TYPES = new Set(['clinic', 'cabinet', 'facilitator']);
 // TTS_PROVIDERS in src/voice-call/brain/tts/index.js — the chain validates it a
 // second time at call time, because a clinics.json edited by hand never passes
 // through here at all.
-const VOICE_PROVIDERS = new Set(['gemini', 'azure', 'elevenlabs']);
-const VOICE_ID_FIELDS = ['voiceId', 'azureVoice', 'elevenVoiceId'];
+const VOICE_PROVIDERS = new Set(['gemini', 'azure', 'elevenlabs', 'fish']);
+// `fishVoiceId` is a PRE-CREATED Fish voice-model id (scripts/fish-create-voice.js).
+// It shares ELEVEN_VOICE_ID_RE's shape by construction — both are opaque
+// alphanumeric ids — so the generic branch below already validates it.
+const VOICE_ID_FIELDS = ['voiceId', 'azureVoice', 'elevenVoiceId', 'fishVoiceId'];
 const VOICE_KEYS = new Set(['provider', ...VOICE_ID_FIELDS]);
 const MAX_VOICE_ID_CHARS = 80;
 
@@ -260,6 +263,7 @@ export function tenantRouter({ store, requireRole }) {
           ...(v.voiceId != null ? { voiceId: String(v.voiceId).trim() } : {}),
           ...(v.azureVoice != null ? { azureVoice: String(v.azureVoice).trim() } : {}),
           ...(v.elevenVoiceId != null ? { elevenVoiceId: String(v.elevenVoiceId).trim() } : {}),
+          ...(v.fishVoiceId != null ? { fishVoiceId: String(v.fishVoiceId).trim() } : {}),
         };
       }
       // V7 CRM sync: outbound webhook URL + signing secret.

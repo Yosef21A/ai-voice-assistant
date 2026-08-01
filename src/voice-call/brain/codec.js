@@ -144,11 +144,18 @@ export function createCodecBridge({ sdpAnswer, sdpOffer, logger } = {}) {
   // 8 kHz averages groups of THREE, so a chunk whose length is not a multiple of
   // 3 silently loses its last one or two samples. Do that fifty times a second
   // and the outbound stream drifts and clicks. So the remainder is held at the
-  // BRAIN rate (pendingIn) and only the largest divisible prefix is converted;
+  // SOURCE rate (pendingIn) and only the largest divisible prefix is converted;
   // pendingOut then holds whatever does not fill a 20 ms frame at the wire rate.
-  const inDivisor = wireRate < BRAIN_OUT_RATE ? BRAIN_OUT_RATE / wireRate : 1;
-  /** Un-resampled remainder, at the BRAIN's 24 kHz output rate. */
+  const divisorFor = (rate) => (wireRate < rate && rate % wireRate === 0 ? rate / wireRate : 1);
+  /** Un-resampled remainder, at the rate it was handed to us at. */
   let pendingIn = EMPTY_INT16;
+  /**
+   * The rate `pendingIn` was captured at. Gemini Live and Azure/ElevenLabs speak
+   * 24 kHz; Fish Audio answers at 8 kHz (V7-P0: `sample_rate` is honoured, which
+   * deletes the resample stage from a G.711 leg outright). Whoever is speaking
+   * declares their rate per chunk and this follows it.
+   */
+  let pendingInRate = BRAIN_OUT_RATE;
   /** Resampled remainder, at the WIRE rate, awaiting a full 20 ms frame. */
   let pending = EMPTY_INT16;
 
@@ -177,12 +184,22 @@ export function createCodecBridge({ sdpAnswer, sdpOffer, logger } = {}) {
   }
 
   /** Buffer brain audio, convert only what converts EXACTLY, keep the rest. */
-  function feedOutbound(int16) {
+  function feedOutbound(int16, srcRate) {
+    const rate = Number(srcRate) > 0 ? Number(srcRate) : BRAIN_OUT_RATE;
+    // A mouth swap mid-call (native → TTS, or a provider fallback) would
+    // otherwise reinterpret held samples at the NEW rate — the pitch-shift bug
+    // that is impossible to hear as anything but "the line went strange".
+    if (rate !== pendingInRate && pendingIn.length) {
+      pending = concat(pending, downsample(pendingIn, pendingInRate, wireRate));
+      pendingIn = EMPTY_INT16;
+    }
+    pendingInRate = rate;
     pendingIn = concat(pendingIn, int16);
+    const inDivisor = divisorFor(rate);
     const usable = Math.floor(pendingIn.length / inDivisor) * inDivisor;
     if (usable === 0) return;
     const prefix = usable === pendingIn.length ? pendingIn : pendingIn.subarray(0, usable);
-    pending = concat(pending, downsample(prefix, BRAIN_OUT_RATE, wireRate));
+    pending = concat(pending, downsample(prefix, rate, wireRate));
     pendingIn = usable === pendingIn.length ? EMPTY_INT16 : pendingIn.slice(usable);
   }
 
@@ -225,16 +242,22 @@ export function createCodecBridge({ sdpAnswer, sdpOffer, logger } = {}) {
     },
 
     /**
-     * Brain PCM16 mono @24 kHz → zero or more 20 ms RTP payloads.
+     * Brain PCM16 mono → zero or more 20 ms RTP payloads.
      * Whatever does not fill a frame is held for the next call.
+     *
      * @param {Int16Array} int16
+     * @param {number} [srcRate] the rate `int16` was produced at. Defaults to
+     *   the brain's 24 kHz, which is what every pre-V7 caller passes, so their
+     *   behaviour is byte-identical. A TTS provider that answers at another
+     *   rate (Fish Audio: 8 kHz, G.711-ready) declares it here — and when it
+     *   equals the wire rate, no resampling happens at all.
      * @returns {Buffer[]}
      */
-    encodeOut(int16) {
+    encodeOut(int16, srcRate = BRAIN_OUT_RATE) {
       if (state.closed || !int16 || !int16.length) return [];
       const out = [];
       try {
-        feedOutbound(int16);
+        feedOutbound(int16, srcRate);
         if (!usePcma && !opusCodecs()) {
           state.encodeErrors += 1;
           pending = EMPTY_INT16;

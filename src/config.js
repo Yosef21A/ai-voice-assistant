@@ -143,6 +143,14 @@ export function getConfig(overrides = {}) {
     voiceCallConnectTimeoutMs: Number(process.env.VOICE_CALL_CONNECT_TIMEOUT_MS) || 20000,
     // Hard cap on a single call (cost + stuck-session insurance).
     voiceCallMaxSec: Number(process.env.VOICE_CALL_MAX_SEC) || 600,
+    // THE HANG-UP BELT (V5-T2). When the agent calls end_call we wait for its
+    // farewell to actually reach the wire before dropping the line — cutting
+    // "بالسلامة" in half is a worse tell than the bug it fixes. This is the
+    // ceiling on that wait: a farewell that never arrives (a dead TTS provider,
+    // a model that called the tool and then said nothing) must not leave the
+    // caller holding an open line, which is the exact failure end_call exists
+    // to remove. Found on a live call: the agent NEVER hung up.
+    voiceCallHangupGraceMs: Number(process.env.VOICE_CALL_HANGUP_GRACE_MS) || 8000,
     // ── the talking brain (V2 voice tier) ──────────────────────────────────
     // 'brain' = Gemini Live realtime loop (per-tenant persona, KB grounding,
     //           deterministic booking gate, our own emergency detector).
@@ -216,6 +224,55 @@ export function getConfig(overrides = {}) {
     // through after the cooldown to find out whether the vendor came back.
     voiceTtsBreakerThreshold: Number(process.env.VOICE_TTS_BREAKER_THRESHOLD) || 2,
     voiceTtsBreakerCooldownMs: Number(process.env.VOICE_TTS_BREAKER_COOLDOWN_MS) || 300000,
+    // ── THE FAST CASCADE (V7) ──────────────────────────────────────────────
+    // WHICH BRAIN answers a call:
+    //   'live'    = the incumbent Gemini Live S2S loop (brain/). Measured 1.97 s
+    //               to first audio — slowest of its class, and the reason V7
+    //               exists. It stays the DEFAULT until the cascade has been
+    //               A/B'd on real calls (P2), and stays forever as the fallback.
+    //   'cascade' = brain-cascade/: streaming STT → text LLM → streaming TTS,
+    //               overlapped. Measured budget ≈1.2 s brain-to-first-audio.
+    // Anything unrecognized means 'live', the same rule voiceCallMode uses: an
+    // unrecognized value must never silently enable the experimental path.
+    voiceBrain: process.env.VOICE_BRAIN || 'live',
+    // TTS PRIMARY under the zero-budget doctrine. The founder's key is in .env
+    // under this EXACT name — FISH_AUDIO_API, not FISH_API_KEY.
+    fishAudioApi: process.env.FISH_AUDIO_API || '',
+    // STT. Both are key-gated: the adapters exist, and without a key the chain
+    // falls through to liveEars (a Gemini Live session used ONLY as ears) and
+    // then to the degrade-to-chat path. Deepgram is the primary the moment the
+    // founder signs up (card-free, $200 credit ≈ 690 h).
+    deepgramApiKey: process.env.DEEPGRAM_API_KEY || '',
+    speechmaticsApiKey: process.env.SPEECHMATICS_API_KEY || '',
+    // LLM rotation targets. Both free tiers, both OpenAI-compatible, both
+    // UNBENCHMARKED on derja — which is why they are rotation targets and never
+    // the primary (doctrine: nothing unbenchmarked on derja ships as primary).
+    cerebrasApiKey: process.env.CEREBRAS_API_KEY || '',
+    groqApiKey: process.env.GROQ_API_KEY || '',
+    // ── cascade tunables ───────────────────────────────────────────────────
+    // How long after a final transcript we wait for more speech before deciding
+    // the caller finished. The single biggest latency line item per Vapi/Pipecat
+    // data; 250–400 ms is the band, and the STT's own `speech_final` short-cuts
+    // it whenever the vendor is confident.
+    voiceCascadeEotMs: Number(process.env.VOICE_CASCADE_EOT_MS) || 300,
+    // Two consecutive interims sharing this many normalized characters of prefix
+    // are stable enough to start the LLM on. Lower = more speculation (and more
+    // wasted tokens); higher = more of the caller's pause spent silent.
+    voiceCascadeSpecMinPrefix: Number(process.env.VOICE_CASCADE_SPEC_MIN_PREFIX) || 12,
+    // Beyond this without a first LLM token, the caller hears a cached filler
+    // clip. Perceived latency is the metric: a filled 1.5 s feels instant, a
+    // silent 900 ms feels broken.
+    voiceCascadeFillerTtftMs: Number(process.env.VOICE_CASCADE_FILLER_TTFT_MS) || 700,
+    // The barge-in budget: caller speaks over us ⇒ the wire must be quiet within
+    // this. It is asserted in the suite, not merely hoped for.
+    voiceCascadeBargeKillMs: Number(process.env.VOICE_CASCADE_BARGE_KILL_MS) || 150,
+    // ElevenLabs' free tier is 10 000 characters a MONTH (measured live from
+    // /v1/user/subscription during P0) — about sixty-five spoken replies. It is
+    // the #2 voice in the chain, so a Fish outage could drain the entire month
+    // through the FALLBACK in one afternoon and the founder would discover it
+    // mid-demo. Past this soft cap the fallback stops choosing it; a tenant who
+    // named ElevenLabs explicitly is never blocked (they may be paying for it).
+    voiceElMonthlySoftCap: Number(process.env.VOICE_EL_MONTHLY_SOFT_CAP) || 8000,
     // ── ops (P2-F) ─────────────────────────────────────────────────────────
     // One JSON line per request (skips /health). On in production; opt-in
     // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.

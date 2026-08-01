@@ -146,7 +146,7 @@ test('AR booking end to end: greet → stage → recap → confirm → appointme
   assert.equal(s.live.opts.model, 'test-live');
   assert.deepEqual(
     s.live.opts.tools.map((d) => d.name),
-    ['get_available_slots', 'stage_booking', 'confirm_booking', 'request_handoff']
+    ['get_available_slots', 'stage_booking', 'confirm_booking', 'request_handoff', 'end_call']
   );
   const sys = s.live.opts.systemInstruction;
   assert.ok(sys.includes('NEVER diagnose'), 'the guardrail preamble is present');
@@ -716,7 +716,7 @@ test('a facilitator loop books nothing but CAPTURES the lead', async (t) => {
   });
   await s.loop.start();
 
-  assert.deepEqual(s.live.opts.tools.map((d) => d.name), ['capture_lead', 'request_handoff']);
+  assert.deepEqual(s.live.opts.tools.map((d) => d.name), ['capture_lead', 'request_handoff', 'end_call']);
   assert.ok(s.live.opts.systemInstruction.includes('THE AGENCY BOOKS NOTHING'));
   assert.ok(
     s.live.opts.systemInstruction.includes('CALL capture_lead'),

@@ -207,6 +207,23 @@ export function buildToolDeclarations({ clinic } = {}) {
     },
   };
 
+  /**
+   * THE HANG-UP (V5-T2). Found on a real call: the conversation finished, both
+   * sides said goodbye — and the agent just sat there, holding the line open
+   * until the caller gave up and hung up themselves. Every human receptionist
+   * ends a call; an assistant that cannot is unmistakably a machine, and it
+   * bills for the silence.
+   *
+   * Available to EVERY tenant type: a facilitator finishing a qualification and
+   * a cabinet finishing a booking both need to put the phone down.
+   */
+  const endCall = {
+    name: 'end_call',
+    description:
+      'Call this after you have said goodbye and the conversation is finished. It hangs up the phone. Never call it in the middle of a task, and never call it right after you have asked the caller a question — they have not answered yet.',
+    parameters: { type: 'OBJECT', properties: {} },
+  };
+
   // D2: an agency books nothing — but a qualified caller MUST reach the team.
   if (isFacilitator(clinic)) {
     return [
@@ -226,6 +243,7 @@ export function buildToolDeclarations({ clinic } = {}) {
         },
       },
       handoff,
+      endCall,
     ];
   }
 
@@ -275,6 +293,7 @@ export function buildToolDeclarations({ clinic } = {}) {
       parameters: { type: 'OBJECT', properties: {} },
     },
     handoff,
+    endCall,
   ];
 }
 
@@ -612,18 +631,33 @@ export function createToolExecutor({
     };
   }
 
+  /**
+   * The model has said goodbye and wants the line closed. This writes NOTHING
+   * and decides NOTHING: it raises a flag, and brain/loop.js hangs up only once
+   * the farewell has actually reached the wire. Keeping it inert is the point —
+   * a tool that terminated the call directly would cut the model off mid-word,
+   * which is precisely the failure it exists to fix.
+   */
+  async function endCall() {
+    state.endRequested = true;
+    return { ok: true, note: 'The call will end as soon as your goodbye has finished playing. Say nothing further.' };
+  }
+
   const TOOLS = {
     get_available_slots: getAvailableSlots,
     stage_booking: stageBooking,
     confirm_booking: confirmBooking,
     request_handoff: requestHandoff,
     capture_lead: captureLead,
+    end_call: endCall,
   };
   // Capability, not prose. A model can hallucinate a tool name it was never
   // given, so the executor re-checks what this tenant type may do at all.
+  // end_call is on BOTH lists: every tenant type has to be able to put the
+  // phone down.
   const ALLOWED = facilitator
-    ? new Set(['capture_lead', 'request_handoff'])
-    : new Set(['get_available_slots', 'stage_booking', 'confirm_booking', 'request_handoff']);
+    ? new Set(['capture_lead', 'request_handoff', 'end_call'])
+    : new Set(['get_available_slots', 'stage_booking', 'confirm_booking', 'request_handoff', 'end_call']);
 
   return {
     /**
