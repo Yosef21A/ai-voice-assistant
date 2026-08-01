@@ -30,6 +30,9 @@
 //     That is why it is third in the chain and not first.
 //   • It has no `speech_final`. End of turn is signalled by the server deciding
 //     the caller finished (it starts generating), or by an idle timer here.
+//   • It transcribes WHATEVER IT HEARS — including our own TTS coming back
+//     through the caller's speaker. See isEchoOfAgent below: a final that is
+//     the opening of what we are saying right now is echo, not a caller.
 import { createLiveClient } from '../../brain/liveClient.js';
 
 /** Silence is asked for, never relied on. See the header. */
@@ -39,6 +42,34 @@ export const EARS_INSTRUCTION =
 /** No fragment for this long ⇒ the utterance is over, even if the server never says so. */
 export const EARS_IDLE_MS = 700;
 
+/** Below this, a final is too short for an echo comparison to mean anything. */
+const MIN_ECHO_CHARS = 4;
+
+/**
+ * Compare-only normalization: letters and digits, lowercased, no spaces.
+ * Deliberately crude — an echo of our own sentence comes back through a
+ * speaker, a microphone and a codec, so punctuation and spacing are the first
+ * things to differ and the last things worth comparing.
+ */
+export function normalizeEcho(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+/**
+ * DID WE JUST TRANSCRIBE OURSELVES? True when `text` is the opening of what the
+ * agent is saying right now. Prefix-only, on purpose: an echo starts where our
+ * sentence starts, while a caller who happens to repeat a phrase we used
+ * mid-sentence is a caller and must be answered.
+ */
+export function isEchoOfAgent(text, agentText) {
+  const heard = normalizeEcho(text);
+  const said = normalizeEcho(agentText);
+  if (heard.length < MIN_ECHO_CHARS || !said) return false;
+  return said.startsWith(heard);
+}
+
 /**
  * @param {object} p
  * @param {object} p.config          needs geminiApiKey + geminiLiveModel + VAD knobs
@@ -46,15 +77,38 @@ export const EARS_IDLE_MS = 700;
  * @param {Function} [p.liveFactory] default createLiveClient — tests inject
  * @param {Function} [p.logger]
  * @param {number} [p.idleMs]
+ * @param {Function} [p.agentSpeaking] () => boolean — is OUR audio on the wire?
+ * @param {Function} [p.agentSaid]     () => string  — the last thing we said
  */
-export function createLiveEarsStt({ config = {}, lang = 'ar', liveFactory, logger, idleMs = EARS_IDLE_MS } = {}) {
+export function createLiveEarsStt({
+  config = {},
+  lang = 'ar',
+  liveFactory,
+  logger,
+  idleMs = EARS_IDLE_MS,
+  agentSpeaking,
+  agentSaid,
+} = {}) {
   const log = typeof logger === 'function' ? logger : () => {};
   const makeLive = typeof liveFactory === 'function' ? liveFactory : createLiveClient;
+  const speaking = typeof agentSpeaking === 'function' ? agentSpeaking : () => false;
+  const saidByUs = typeof agentSaid === 'function' ? agentSaid : () => '';
   const handlers = new Map();
-  const counts = { interims: 0, finals: 0, swallowed: 0 };
+  const counts = { interims: 0, finals: 0, swallowed: 0, echoDropped: 0, dupSuppressed: 0 };
   let buffer = '';
   let idleTimer = null;
   let closed = false;
+  /**
+   * Is there an utterance in progress that has NOT been emitted as a final yet?
+   *
+   * THE DUPLICATE THIS KILLS. Two independent things end an utterance here: the
+   * 700 ms idle timer and the server's own `turnComplete`/`generationComplete`.
+   * On a slow line both fire, and a second `flushFinal` for the same speech
+   * used to be prevented only by the buffer happening to be empty — which stops
+   * being true the moment ONE more fragment arrives between them. One utterance
+   * is one final; anything else answers the caller twice.
+   */
+  let utteranceOpen = false;
 
   function emit(event, payload) {
     for (const cb of [...(handlers.get(event) || [])]) {
@@ -79,6 +133,23 @@ export function createLiveEarsStt({ config = {}, lang = 'ar', liveFactory, logge
     const text = buffer.trim();
     buffer = '';
     if (!text) return;
+    if (!utteranceOpen) {
+      // Already flushed by the other end-of-turn signal. Counted rather than
+      // ignored: "the idle timer and turnComplete are racing" is a real
+      // property of this transport and it should be visible in stats().
+      counts.dupSuppressed += 1;
+      return;
+    }
+    utteranceOpen = false;
+    // OUR OWN VOICE, COMING BACK. Gemini transcribes whatever it hears, and on
+    // a speakerphone that includes the agent. A final that is the opening of
+    // what we are saying right now is echo, not a caller, and answering it
+    // would have the agent hold a conversation with itself.
+    if (speaking() && isEchoOfAgent(text, saidByUs())) {
+      counts.echoDropped += 1;
+      log(`[voice-cascade] liveEars dropped an echo of our own utterance (${text.slice(0, 40)})`);
+      return;
+    }
     counts.finals += 1;
     emit('final', { text, endOfTurn: !!endOfTurn });
   }
@@ -109,6 +180,7 @@ export function createLiveEarsStt({ config = {}, lang = 'ar', liveFactory, logge
     const s = String(text || '');
     if (!s) return;
     buffer += s;
+    utteranceOpen = true;
     counts.interims += 1;
     emit('interim', { text: buffer });
     armIdle();
@@ -132,6 +204,9 @@ export function createLiveEarsStt({ config = {}, lang = 'ar', liveFactory, logge
   live.on('error', (err) => emit('error', err instanceof Error ? err : new Error(String(err))));
   live.on('close', (info) => {
     clearIdle();
+    // P2.1 ears-only assertion, in the log where a field test can read it:
+    // everything the model tried to say through this session was swallowed.
+    log(`[liveEars] ears-only: swallowed ${counts.swallowed} model outputs, forwarded 0`);
     emit('close', { ...(info || {}), wasReady: true });
   });
 
@@ -163,7 +238,7 @@ export function createLiveEarsStt({ config = {}, lang = 'ar', liveFactory, logge
         /* close() is contractually non-throwing */
       }
     },
-    stats: () => ({ provider: 'liveEars', ...counts, buffered: buffer.length }),
+    stats: () => ({ provider: 'liveEars', ...counts, buffered: buffer.length, utteranceOpen }),
   };
 }
 

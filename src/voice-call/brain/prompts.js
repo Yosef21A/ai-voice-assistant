@@ -113,10 +113,38 @@ export const HUMAN_TOUCHES = {
  * How to actually sound like a person on a phone rather than a chat window.
  * EXPORTED at V7-P1 for the same reason as safetyBlock: the cascade speaks with
  * the same mouth discipline or it is a different product.
+ *
+ * @param {string} lang
+ * @param {string} dialect
+ * @param {object} [opts]
+ * @param {boolean} [opts.compact] THE PROMPT DIET (V7-P2.1). The incumbent
+ *   sends its system instruction ONCE per call; the cascade sends one with
+ *   EVERY turn, and the founder's first live call billed ~3.8 k tokens a turn
+ *   for it — paid twice, in money and in time-to-first-token. The compact form
+ *   is the SAME rules with the prose removed: same file, same author, so the
+ *   two cannot drift into two different receptionists. Nothing that a caller
+ *   could be harmed by is abbreviated — the medical law is safetyBlock() and it
+ *   is never compacted.
  */
-export function voiceStyleBlock(lang, dialect) {
+export function voiceStyleBlock(lang, dialect, { compact = false } = {}) {
   const langName = LANG_NAME[lang] || LANG_NAME.ar;
   const touch = HUMAN_TOUCHES[lang] || HUMAN_TOUCHES.ar;
+  if (compact) {
+    // Two paragraphs are missing here ON PURPOSE, because the cascade prompt
+    // states them ONCE, in stronger form, in its own words:
+    //   • the noise / ask-again / two-strike rules  → NOISE_POLICY (V6.2 verbatim)
+    //   • which language to speak, and the dialect  → languageLockBlock()
+    // Saying either of them twice cost tokens on every single turn and taught
+    // the model nothing it had not already been told — and a duplicated rule is
+    // a rule that can be edited in one place and not the other.
+    return `YOU ARE ON A LIVE PHONE CALL. You are speaking, not writing:
+- MAXIMUM two SHORT sentences and EXACTLY ONE question per turn, then stop and listen.
+- NEVER a list, never more than three options, never a recap of the call, never repeat yourself unless asked.
+- No emojis, no markdown, no symbols. Say numbers, dates and times the way a person says them out loud.
+- If the caller interrupts you, stop immediately and listen.
+- Backchannel in ONE word (${touch.backchannels}). Before every tool call, say a short filler out loud (${touch.fillers}): a silent lookup sounds like a dropped line.
+- HANGING UP: you end the call. ONE farewell (${touch.signoffs}), THEN end_call — never before speaking, never mid-task, never straight after a question, never a time-of-day farewell unless the clock above says so. If they speak again, the call continues.`;
+  }
   return `YOU ARE ON A LIVE PHONE CALL. You are speaking, not writing:
 - MAXIMUM two SHORT sentences per turn. Not three. If you need more, you are explaining too much.
 - EXACTLY ONE question per turn. Ask it, then stop talking and wait for the answer.

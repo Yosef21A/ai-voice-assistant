@@ -66,6 +66,21 @@ export function isLlmError(err) {
   return !!(err && (err.isLlmError === true || err instanceof LlmError));
 }
 
+/**
+ * Observe a promise we are not going to await. `reader.cancel()` is called for
+ * its side effect, but on an errored (aborted) stream it returns a promise
+ * already rejected with the abort reason — and a rejection nobody looks at ends
+ * the process. Not interested is not the same as not looking. (V7-P2.1.)
+ */
+function settle(maybePromise) {
+  if (maybePromise && typeof maybePromise.then === 'function') {
+    maybePromise.then(
+      () => {},
+      () => {}
+    );
+  }
+}
+
 /** True for the failures that mean "try somebody else RIGHT NOW". */
 export function isRotatable(err) {
   if (!isLlmError(err)) return false;
@@ -295,9 +310,13 @@ export async function* postSse({
         }
       } finally {
         // Abandoning the generator (a barge-in broke the consumer's loop) must
-        // not leave a socket half-read.
+        // not leave a socket half-read — and must not leave the promise
+        // cancel() returns unobserved. On an ABORTED body that promise is
+        // already rejected with the abort reason, and an unhandled rejection is
+        // a fatal exception in this runtime: the same shape that killed the
+        // process on the founder's live call (see brain/tts/wire.js §4).
         try {
-          reader.cancel?.();
+          settle(reader.cancel?.());
         } catch {
           /* best-effort */
         }

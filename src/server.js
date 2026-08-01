@@ -375,12 +375,27 @@ export function createApp(opts = {}) {
       llm: alerts.recent('llm_degraded'),
       waToken: alerts.recent('wa_token_expired'),
     };
+    // V7-P2.1 — WHAT IS ON THE PHONE RIGHT NOW, and on which brain. One call
+    // has exactly one brain (the service decides once, at pickup, and caches
+    // it), and scripts/cascade-ab.js refuses to place synthetic calls into a
+    // process that already has a live one — a second caller is the one way an
+    // A/B run could put two brains on one line. Deliberately counts and brain
+    // names ONLY: this endpoint is public, so no caller id, no tenant, nothing
+    // that identifies a patient goes in it.
+    let calls = { active: 0, brains: [] };
+    try {
+      const live = typeof voiceCalls?.active === 'function' ? voiceCalls.active() : [];
+      calls = { active: live.length, brains: live.map((c) => c.brain || 'unknown') };
+    } catch {
+      /* health must never fail on an optional field */
+    }
     res.status(storeWritable ? 200 : 503).json({
       ok: storeWritable,
       provider: provider.name,
       store: store.name,
       storeWritable,
       degraded,
+      calls,
       clinics,
     });
   });

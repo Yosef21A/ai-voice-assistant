@@ -371,6 +371,77 @@ Signature = TWO TURNS answering ONE caller utterance, sequentially. The RTP-out 
 FIX REQUIREMENTS: (a) single-writer invariant — one speakGen owns RTP-out; any enqueue not holding the current gen is dropped and logged; (b) utterance ledger — turn-end debounced, one reply per utterance-id, asserted in tests; (c) waterfall log tags every audio-out chunk with source (cascade|speculative|live|greeting) so the next field test is attributable; (d) golden test reproducing the double-reply (fake STT emitting interim-stable + final for the same utterance; fake slow TTS) proving exactly one reply plays.
 ACCEPTANCE: 10-turn live call — exactly one reply per caller utterance, zero self-triggering, confirmed from the tagged waterfall.
 
+### STATUS 2026-08-02 — SHIPPED (code + tests green; the acceptance call is still owed)
+
+**THE EVIDENCE (instrumented call, source-tagged RTP-out).** The tags found it in one call:
+
+```
+[rtp-out] src=spec utt=4 frames=24 (480ms)                 ← a GUESS reached the wire
+[rtp-out] killed 50 queued frames (barge_in): {"spec":50}
+Error: barge_in
+  at killSpeech (orchestrator.js:670) ← noteEnergy (962) ← onRtp ← werift
+  → uncaughtException (fromPromise)                        ← the PROCESS died mid-call
+barge-in #3 / #4: killed 0 queued frames                   ← the energy trigger firing into silence
+```
+
+**THE TWO WRITERS, NAMED.**
+1. **The speculative turn.** Its audio played as it was generated; the final's turn then answered the
+   same utterance again, sequentially. That is the founder's "the first finishes, then a second
+   dictates another reply", exactly.
+2. **The endpointer, with no model behind it.** Deepgram sends `speech_final` with the words and
+   `UtteranceEnd` on a LATER frame. The second one found the utterance already consumed and spoke the
+   V6.2 "sorry, it is noisy" line straight over a perfectly good answer — a second reply that never
+   touched an LLM.
+
+**FIXES SHIPPED** (`src/voice-call/brain-cascade/orchestrator.js` unless noted):
+- **(a) Single-writer speakGen on RTP-out.** Every frame — greeting, filler, turn, promoted guess,
+  emergency, replayed tape — goes through one door (`pushFrames`) holding the generation it was made
+  under; anything stale is dropped, logged (`[rtp-out] dropped N frames: stale gen (src=… utt=…)`) and
+  counted (`stats.staleFramesDropped`). The emergency writer is the ONE documented exemption, matching
+  the cancellation exemption it already had.
+- **Speculation is PREPARE-ONLY.** The model streams and the mouth pre-warms, but audio is HELD (raw
+  PCM, un-encoded) and the transcript rows with it. On promotion the held audio flushes atomically
+  under the current generation and is tagged `turn`; **no frame is ever tagged `spec` again** —
+  `outBySrc.spec === 0` is now an invariant, asserted per test. A guess that misses is discarded
+  unheard: it costs the caller 0 ms, leaves no transcript row and no assistant line in the context.
+- **(b) Utterance ledger + debounced turn-end.** `uttId → {answered, generations, revokedBy, turnEndAt}`.
+  One reply per utterance ever; a second turn-start is refused and counted (`stats.ledgerRefused`).
+  `speech_final`, the flush frame and the EOT timer collapse into ONE turn-end
+  (`voiceCascadeTurnEndDebounceMs`, default 250 ms, `stats.turnEndsDebounced`) — but only when nothing
+  new was heard in between, so a fast real second turn is never eaten. The drift restart is the one
+  legitimate second generation: it revokes the answer (`revokedBy:'drift'`) under a `killSpeech` gen
+  bump, and two generations per utterance is a hard cap.
+- **(c) liveEars stays muzzled**, now asserted from the ORCHESTRATOR: 50 model `audio`/`text` events
+  change `outBySrc` by nothing at all, and the echo drop is asserted at the adapter with the two
+  predicates the orchestrator lends it.
+- **(d) A/B harness cannot put two brains on a line.** `scripts/cascade-ab.js` refuses to start while
+  the target app reports an active call, and re-asserts after every call it places; `GET /health` now
+  reports `calls: {active, brains[]}` (counts and brain names only — it is a public endpoint). The
+  script composes no brain at all: it imports one codec helper and otherwise speaks HTTP and RTP,
+  and the server decides a call's brain once at pickup.
+- **(e) The crash, root-caused.** A barge-in aborts the fetch, which **errors the response body
+  stream**; per the streams spec `reader.cancel()` on an errored stream returns a promise already
+  **rejected** with the stored error. `brain/tts/wire.js` (and `brain-cascade/llm/http.js`) called it
+  for its side effect inside a *synchronous* try/catch, which cannot catch a rejection — so the abort
+  reason escaped as an unhandled rejection and Node escalated it to a fatal exception out of the RTP
+  path. Both call sites now observe the promise (`settle()`); the abort reason is a tagged error
+  (`speechAbortReason`) and every controller is aborted through `abortQuietly`.
+- **(f) Energy barge gate**, re-checked where it fires (`outQueue || tapePending || speechInFlight`),
+  with an honest log (frames queued + utterances in flight) and `stats.energyBargeSilent` for the
+  fired-into-silence case.
+
+**TESTS** (12 new, whole suite green): golden promotion (one reply, `outBySrc.spec === 0`, ledger
+`{answered, generations:1}`, zero stale frames); golden drift variant (answer un-said, ONE new reply,
+`generations:2`, `revokedBy:'drift'`); a guess that misses reaches neither wire nor transcript nor
+context; ledger refusal; the `UtteranceEnd` flush that must not speak, plus the real-second-turn case
+it must not eat; **process-level `unhandledRejection` assertions** on both the orchestrator barge-in
+and the exact `cancel()`-rejects wire shape (verified to fail before the fix); the energy gate on a
+silent wire; liveEars muzzle + echo drop.
+
+**ACCEPTANCE (still owed): 10-turn live call — one tagged reply per utterance**, read off the
+`[rtp-out] src=…` lines: every reply tagged `turn` (or `greeting`/`filler`/`emergency`), never `spec`,
+`ledgerRefused`/`turnEndsDebounced` explaining any suppression, and `staleFramesDropped === 0`.
+
 ## V8 — MONDAY DEMO WAR PLAN (founder sells in person Monday; this is the ONLY active voice work order until then)
 Verdict from war-room code audit + leader research (Sesame/GPT-Live/ElevenLabs/Vapi/Retell playbooks, sourced in war-room log): pipeline bones are correct (deterministic gate, guaranteed filler, language lock = leader consensus) but the turn system is antique and one open bug is demo-fatal. Real measured turns: VAD 702–1442ms + LLM ~850ms + TTS ~570ms ≈ 2.2–2.5s felt with high jitter. Target for Monday: ≤1.3s felt, ZERO double-replies, interruption-proof. Execute in THIS order — stop gold-plating anything else:
 

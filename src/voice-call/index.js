@@ -57,6 +57,7 @@ import { createMediaSession } from './media.js';
 import { createBrainLoop } from './brain/loop.js';
 import { createCascadeLoop } from './brain-cascade/orchestrator.js';
 import { createTtsChain } from './brain/tts/index.js';
+import { negotiatedCodecName } from './brain/codec.js';
 import {
   noteTtsFailure,
   noteTtsOk,
@@ -848,6 +849,16 @@ export function createVoiceCallService({
           logger: log,
           fetchImpl: extras.fetchImpl,
           requireMouth: true,
+          // THE LEG DECIDES THE SYNTHESIS RATE (V7-P2.1). The mouth is built
+          // here, before the orchestrator exists, so the negotiation is read
+          // straight off the SDP we already have: Fish answers at 24 kHz on an
+          // Opus leg (no band loss) and 8 kHz on G.711 (no resampling). The
+          // founder's first live call was synthesized at telephone band onto a
+          // 48 kHz wire — "the voice quality is low".
+          wireCodec: negotiatedCodecName({
+            sdpAnswer: entry.media?.sdpAnswer,
+            sdpOffer: entry.sdpOffer,
+          }),
         });
       } catch (err) {
         // Never fatal: the orchestrator builds its own chain (and its own

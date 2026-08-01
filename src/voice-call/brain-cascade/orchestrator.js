@@ -19,7 +19,7 @@
 // numbers rather than opinions, and every turn logs its own waterfall so the
 // next verdict is arguable with data.
 //
-// SEVEN THINGS THIS FILE IS RESPONSIBLE FOR:
+// NINE THINGS THIS FILE IS RESPONSIBLE FOR:
 //
 //  1. THE SAME LAW AS THE INCUMBENT. The emergency detector runs on every final
 //     BEFORE the LLM sees it; the booking gate is brain/tools.js, unchanged,
@@ -48,18 +48,49 @@
 //     tenant/lang/codec/voice and replayed from brain/greetingCache.js on every
 //     later call. The filler clip rides the same cache under a `filler:` voice
 //     key, which is the generalization the V7 brief asked for.
-//  7. THE DEGRADE. No ears, no mouth, or a brain chain that cannot answer ⇒
+//  7. NOT TRUSTING THE EARS (V7-P2.1, after the first live call). A final in a
+//     script nobody on this line speaks is a transcription hallucination, not a
+//     caller: it never becomes a turn, and a reply in such a script never
+//     reaches a mouth (./script.js, both directions). Barge-in no longer
+//     depends on the transcript at all — sustained caller ENERGY while we are
+//     speaking runs the same kill-chain, because on the call that produced this
+//     rule the transcripts were too late and too wrong to fire it even once.
+//  8. THE DEGRADE. No ears, no mouth, or a brain chain that cannot answer ⇒
 //     outcome 'brain_lost' / 'tts_lost'. This loop does NOT hang up: it
 //     reports, and src/voice-call/index.js terminates the call and sends the
 //     WhatsApp follow-up so the chat engine picks the patient up. Same contract
 //     as brain/loop.js, because the service must not know which brain it has.
+//  9. ONE MOUTH (V7-P2.1, after the founder heard TWO replies to one sentence).
+//     The instrumented call named both writers: a SPECULATIVE turn's audio
+//     reached the wire (`[rtp-out] src=spec utt=4 frames=24`) and then the
+//     final's turn answered the same utterance again. So:
+//       • speculation is PREPARE-ONLY. The model streams and the mouth may
+//         pre-warm, but every frame is HELD; zero frames enqueue while a turn
+//         is speculative. On promotion the held audio flushes atomically under
+//         the CURRENT speakGen — and a guess that missed is simply dropped,
+//         unheard, which is cheaper than the apology it used to cost.
+//       • ONE WRITER OWNS THE WIRE. Every enqueue — greeting, filler, turn,
+//         emergency, replayed tape — goes through pushFrames() holding the
+//         generation it was created under. Anything else is stale by
+//         definition: dropped, logged and counted (stats.staleFramesDropped).
+//       • AN UTTERANCE LEDGER. uttId → { answered, generations, revokedBy }.
+//         One reply per utterance, ever; a second turn-start for an answered
+//         utterance is refused (stats.ledgerRefused). The drift restart is the
+//         ONE legitimate second generation: it revokes the answer under a
+//         killSpeech gen bump, and two generations per utterance is the cap.
+//       • ONE TURN-END. The vendor's `speech_final`, the flush signal and our
+//         own EOT timer all mean the same thing; landing inside
+//         voiceCascadeTurnEndDebounceMs of each other they collapse into one
+//         (stats.turnEndsDebounced). The second one used to become the
+//         "sorry, it is noisy" line spoken straight over a perfectly good
+//         answer.
 //
 // CONTRACT: the surface is byte-compatible with createBrainLoop —
 // warmUp/start/onRtp/stop/settled/transcript/outcome/stats — so P2 can swap
 // them on a flag with no change to src/voice-call/index.js.
 //
 // Nothing here throws into the RTP path or into a socket handler.
-import { createCodecBridge, BRAIN_OUT_RATE } from '../brain/codec.js';
+import { createCodecBridge, negotiatedCodecName, BRAIN_IN_RATE, BRAIN_OUT_RATE } from '../brain/codec.js';
 import { createTtsChain } from '../brain/tts/index.js';
 import { createSttChain } from './stt/index.js';
 import { createLlmChain } from './llm/index.js';
@@ -74,6 +105,7 @@ import {
   buildUnclearText,
   buildTwoStrikeText,
 } from './prompt.js';
+import { isAlienScript, describeScript } from './script.js';
 import { detectEmergency } from '../../notifications/detector.js';
 import { buildEmergencyReply, buildSpokenEmergencyReply } from '../../notifications/pipeline.js';
 import { isFacilitator } from '../../engine/tenantProfile.js';
@@ -105,6 +137,38 @@ const ACTIVE_APPT_STATUS = new Set(['pending', 'confirmed']);
 const MIN_MEANINGFUL_CHARS = 2;
 /** Cap on the strings the Levenshtein comparison will look at. */
 const DIFF_MAX_CHARS = 200;
+/**
+ * ENERGY BARGE-IN (V7-P2.1). RMS of a decoded 16 kHz frame above this, held for
+ * `voiceCascadeBargeRmsMs`, is a human talking over us. PCM16 silence on a
+ * mobile leg sits in the low hundreds; conversational speech is thousands.
+ * Deliberately conservative: a false barge-in costs the caller a cut-off
+ * sentence, so the sustain window (240 ms — longer than any click, cough or
+ * packet-loss artefact) does most of the work.
+ */
+const DEFAULT_BARGE_RMS = 1200;
+const DEFAULT_BARGE_RMS_MS = 240;
+/**
+ * ONE TURN-END PER UTTERANCE (V7-P2.1). Deepgram sends `speech_final` and then
+ * `UtteranceEnd` on a later frame; our own EOT timer is a third opinion about
+ * the same silence. Two of them landing inside this window are one endpoint
+ * firing twice, and the second one used to speak.
+ */
+const DEFAULT_TURN_END_DEBOUNCE_MS = 250;
+/**
+ * Generations of reply allowed per utterance. TWO: the answer, and the ONE
+ * legitimate restart when the finished sentence contradicts what we answered.
+ * A third would be the agent arguing with itself out loud.
+ */
+const MAX_GENERATIONS_PER_UTT = 2;
+/** Ledger rows kept for stats(). A 10-minute call is ~60 utterances. */
+const MAX_LEDGER_ROWS = 120;
+/**
+ * Ceiling on the PCM a speculative turn may hold before it is confirmed —
+ * ~20 s at 24 kHz. A guess is a fragment of a sentence; anything past this is a
+ * model that will not stop writing, and holding it would be a leak on a call
+ * that may last an hour.
+ */
+const MAX_HELD_SAMPLES = 480000;
 
 const rand32 = () => Math.floor(Math.random() * 0xffffffff) >>> 0;
 const rand16 = () => Math.floor(Math.random() * 0xffff) & 0xffff;
@@ -195,6 +259,67 @@ export function materialDrift(guess = '', final = '') {
   return g.length / f.length < 0.5;
 }
 
+/**
+ * THE ABORT REASON, and why it has a type (V7-P2.1).
+ *
+ * On the founder's instrumented call an energy barge-in KILLED THE SERVER:
+ *
+ *   Error: barge_in
+ *     at killSpeech (orchestrator.js:670) ← noteEnergy ← onRtp ← werift
+ *   → uncaughtException (fromPromise)
+ *
+ * The stack is where the reason was CONSTRUCTED, not where it was thrown: the
+ * controller's abort reason travelled into the TTS wire, a promise there was
+ * left floating (`reader.cancel()` returns one, and it rejects with the stream's
+ * stored error), and Node turns an unhandled rejection into a fatal exception.
+ * A caller interrupting the agent must never be able to end the process, so:
+ * every abort reason is tagged, every await in the speak chain treats a tagged
+ * reason as "we cancelled this" rather than as a provider failure, and the wire
+ * (brain/tts/wire.js) never leaves a cancellation promise unobserved.
+ *
+ * @param {string} reason
+ * @returns {Error}
+ */
+export function speechAbortReason(reason) {
+  const err = new Error(reason || 'barge-in');
+  err.isSpeechAbort = true;
+  err.speechAbortReason = reason || 'barge-in';
+  return err;
+}
+
+/** True for a cancellation this loop caused. Never a provider failure. */
+export function isSpeechAbort(err) {
+  return !!(err && err.isSpeechAbort === true);
+}
+
+/**
+ * Abort a controller without ever throwing INTO the caller. Every call site is
+ * on a path — RTP, a WebSocket handler, the pacer — where a throw is a dead
+ * call at best and a dead process at worst.
+ */
+function abortQuietly(controller, reason) {
+  try {
+    controller?.abort(speechAbortReason(reason));
+  } catch {
+    /* an already-settled controller is fine */
+  }
+}
+
+/**
+ * Root-mean-square level of one decoded frame. Exported because "was the caller
+ * actually speaking" is now a decision this loop makes fifty times a second and
+ * it deserves its own test rather than a hand-wave about energy.
+ *
+ * @param {Int16Array} int16
+ * @returns {number} 0 … 32767
+ */
+export function frameRms(int16) {
+  if (!int16 || !int16.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < int16.length; i += 1) sum += int16[i] * int16[i];
+  return Math.sqrt(sum / int16.length);
+}
+
 /** The stable-prefix test two consecutive interims must pass to be speculated on. */
 export function sharedPrefixLength(a = '', b = '') {
   const s = normalize(String(a)).replace(/\s+/g, ' ').trim();
@@ -252,6 +377,25 @@ export function createCascadeLoop({
   const eotMs = Number(config.voiceCascadeEotMs) || 300;
   const specMinPrefix = Number(config.voiceCascadeSpecMinPrefix) || 12;
   const fillerTtftMs = Number(config.voiceCascadeFillerTtftMs) || 700;
+  /**
+   * ENERGY BARGE-IN (V7-P2.1). On the founder's first live call the caller
+   * talked over the agent repeatedly and barge-in fired ZERO times in 101
+   * seconds — because the kill-chain hung entirely off the transcript, and the
+   * transcript was late, empty or hallucinated. So the interruption test no
+   * longer depends on the ears being right: sustained speech ENERGY while our
+   * own audio is on the wire is enough. Flagged, because a wrongly tuned
+   * threshold on a noisy line would cut the agent off mid-sentence, and that
+   * must be switchable from an env var at 2 a.m. rather than a deploy.
+   */
+  const energyBargeOn = config.voiceCascadeEnergyBarge !== false;
+  const bargeRms = Number(config.voiceCascadeBargeRms) || DEFAULT_BARGE_RMS;
+  const bargeRmsMs = Number(config.voiceCascadeBargeRmsMs) || DEFAULT_BARGE_RMS_MS;
+  /** Two end-of-turn signals inside this window are ONE turn-end (V7-P2.1). */
+  const turnEndDebounceMs = Number.isFinite(Number(config.voiceCascadeTurnEndDebounceMs))
+    ? Math.max(0, Number(config.voiceCascadeTurnEndDebounceMs))
+    : DEFAULT_TURN_END_DEBOUNCE_MS;
+  /** The leg we are actually on — the mouth synthesizes for THIS wire. */
+  const wireCodec = negotiatedCodecName({ sdpAnswer: media?.sdpAnswer, sdpOffer });
 
   // ── the three legs ────────────────────────────────────────────────────────
   function buildTts() {
@@ -260,7 +404,10 @@ export function createCascadeLoop({
       // requireMouth: the cascade has NO native voice — Gemini's own audio
       // belongs to the incumbent loop. So, and only here, a chain that resolves
       // to `gemini` walks the doctrine fallback order instead of stopping.
-      return makeTts({ config, clinic, logger: log, fetchImpl, requireMouth: true });
+      //
+      // wireCodec: Fish synthesizes AT the wire's rate. 8 kHz onto a 48 kHz
+      // Opus leg is what the founder heard as "the voice quality is low".
+      return makeTts({ config, clinic, logger: log, fetchImpl, requireMouth: true, wireCodec });
     } catch (err) {
       log('[voice-cascade] TTS chain construction failed:', err?.message || err);
       return { mode: 'native', provider: 'gemini', voice: null, synthesize: null };
@@ -369,6 +516,100 @@ export function createCascadeLoop({
    */
   let uttId = 0;
   let utterance = { id: 0, startedAt: 0, prevInterim: '', lastInterim: '', finalText: '', finalAt: 0 };
+  /**
+   * THE UTTERANCE LEDGER (V7-P2.1). uttId → what this call has already done
+   * about that sentence. It is the memory the double-reply bug proved this loop
+   * did not have: `lastAnswered` remembered only the LAST utterance, so any
+   * path that reached startTurn from somewhere else could answer a sentence a
+   * second time and nothing in the process disagreed.
+   *
+   *   answered    — a reply for this utterance reached the WIRE (not merely a
+   *                 turn that ran: a held, unpromoted guess has said nothing).
+   *   generations — turns allowed to speak for it. Capped at two.
+   *   revokedBy   — the answer was un-said (killSpeech + gen bump) because the
+   *                 finished sentence contradicted it. 'drift' is the only
+   *                 legitimate reason there has ever been.
+   *   turnEndAt   — when we last acted on an end-of-turn signal for it.
+   */
+  const ledger = new Map();
+  /** A finished SPECULATIVE turn holding its audio, waiting to be confirmed. */
+  let pendingSpec = null;
+  /** When we last acted on ANY end-of-turn signal (the debounce clock). */
+  let lastTurnEndAt = 0;
+  /** Has the STT delivered anything at all since that turn-end? */
+  let signalSinceTurnEnd = false;
+
+  function ledgerFor(id) {
+    let e = ledger.get(id);
+    if (!e) {
+      e = { utt: id, answered: false, generations: 0, revokedBy: null, turnEndAt: 0, refused: 0 };
+      // Bounded: a long call must not grow a map forever. The OLDEST row goes,
+      // and an utterance old enough to fall off cannot still be answered.
+      if (ledger.size >= MAX_LEDGER_ROWS) ledger.delete(ledger.keys().next().value);
+      ledger.set(id, e);
+    }
+    return e;
+  }
+
+  /** A reply for this utterance is on the wire. There is never a second one. */
+  function noteAnswered(id) {
+    if (!id) return;
+    const e = ledgerFor(id);
+    if (!e.answered) {
+      e.answered = true;
+      e.answeredAt = Date.now();
+    }
+  }
+
+  /**
+   * UN-SAY IT. The finished sentence contradicted the one we answered, so the
+   * utterance's answered slot is revoked and ONE more generation is allowed.
+   * The caller ALWAYS follows this with killSpeech() — the audio of the answer
+   * being revoked must die under the same gen bump, or the "correction" plays
+   * after the thing it corrects.
+   */
+  function revokeAnswer(id, why) {
+    if (!id) return;
+    const e = ledgerFor(id);
+    e.answered = false;
+    e.revokedBy = why || 'drift';
+  }
+
+  /**
+   * ONE TURN-END PER UTTERANCE, PER WINDOW.
+   *
+   * Three signals mean "the caller stopped": the vendor's `speech_final`, its
+   * later empty `UtteranceEnd` flush frame, and our own EOT timer. On the
+   * founder's call the second one arrived a few milliseconds after the first,
+   * found the utterance already consumed, and spoke the unclear line straight
+   * over the answer — a second reply to one sentence, from a path that never
+   * touches an LLM.
+   *
+   * @returns {boolean} false ⇒ this signal is a duplicate; do nothing
+   */
+  function claimTurnEnd(id) {
+    const at = Date.now();
+    const e = id ? ledgerFor(id) : null;
+    // With an utterance open the ledger is the clock; with none open (it was
+    // just consumed) the call-level one is — but ONLY when nothing new has been
+    // heard since, because a caller who spoke again is a new turn-end, not an
+    // echo of the last one.
+    const dup = e
+      ? e.turnEndAt && at - e.turnEndAt < turnEndDebounceMs
+      : lastTurnEndAt && at - lastTurnEndAt < turnEndDebounceMs && !signalSinceTurnEnd;
+    if (dup) {
+      turnEndsDebounced += 1;
+      log(
+        `[voice-cascade] turn-end debounced (utt ${id || 'none'}, ` +
+          `${at - (e ? e.turnEndAt : lastTurnEndAt)}ms after the last one) — one utterance, one turn-end`
+      );
+      return false;
+    }
+    if (e) e.turnEndAt = at;
+    lastTurnEndAt = at;
+    signalSinceTurnEnd = false;
+    return true;
+  }
 
   function beginUtterance() {
     if (utterance.startedAt) return;
@@ -395,6 +636,45 @@ export function createCascadeLoop({
   let fillersPlayed = 0;
   let speculations = 0;
   let speculativeRestarts = 0;
+  /** Finals the ears invented in a script nobody on this line speaks. */
+  let hallucinatedFinals = 0;
+  /** Replies the MODEL wrote in a language nobody spoke — discarded unheard. */
+  let langRejected = 0;
+  /** Finals with nothing sayable in them ('.', '…'): never a turn. */
+  let emptyFinals = 0;
+  /** Barge-ins triggered by ENERGY rather than by a transcript. */
+  let energyBargeIns = 0;
+  /** Consecutive milliseconds of caller energy over the threshold. */
+  let bargeHotMs = 0;
+  // ── V7-P2.1 — the double-reply counters ───────────────────────────────────
+  /** Frames whose owner did not hold the current speakGen. Never sent. */
+  let staleFramesDropped = 0;
+  /** Held speculative PCM chunks thrown away because the wire moved on. */
+  let staleHeldDropped = 0;
+  /** Frames of a CONFIRMED guess flushed onto the wire on promotion. */
+  let specFramesFlushed = 0;
+  /** Speculative PCM chunks discarded unheard (a guess that missed costs 0 ms). */
+  let specChunksDiscarded = 0;
+  /** Turn-starts the ledger refused: that utterance already has its reply. */
+  let ledgerRefused = 0;
+  /** End-of-turn signals collapsed into the one that came first. */
+  let turnEndsDebounced = 0;
+  /** Energy barge-ins that fired with nothing of ours actually on the wire. */
+  let energyBargeSilent = 0;
+  /**
+   * The last thing WE said out loud. liveEars compares finals against it: a
+   * Gemini Live session listening to a phone leg sometimes transcribes our own
+   * TTS bleeding back, and answering our own voice is the loop that turns one
+   * agent into two.
+   */
+  let lastAgentUtterance = '';
+  /**
+   * Turns whose waterfall row exists but whose FIRST AUDIO has not reached the
+   * wire yet. Emptied by markFirstAudio() or, failing that, by stop().
+   */
+  const openWaterfalls = new Set();
+  /** The turn that owns the next real reply frame (for first_audio_ms). */
+  let audioOwner = null;
 
   // ── caller context (personalization) ──────────────────────────────────────
   let contextPromise = null;
@@ -456,6 +736,29 @@ export function createCascadeLoop({
   const MAX_CATCHUP_FRAMES = 25;
   let paceAnchor = null;
   let frameSlots = 0;
+  // ── P2.1 INSTRUMENTATION: every RTP-out frame is source-tagged ────────────
+  // The founder heard TWO sequential replies to one utterance. Before any fix,
+  // the wire must say WHO spoke: queue entries carry {src, uttId}, the pacer
+  // logs one line per contiguous source segment, and stats() counts frames by
+  // source. srcs: greeting | filler | spec | turn | emergency.
+  const outBySrc = { greeting: 0, filler: 0, spec: 0, turn: 0, emergency: 0, unknown: 0 };
+  let outSeg = null; // { src, uttId, frames } — the segment being played now
+
+  function logSegment() {
+    if (!outSeg) return;
+    log(`[rtp-out] src=${outSeg.src} utt=${outSeg.uttId ?? '-'} frames=${outSeg.frames} (${outSeg.frames * FRAME_MS}ms)`);
+    outSeg = null;
+  }
+
+  function noteOutFrame(entry, nowMs) {
+    const src = entry.src || 'unknown';
+    outBySrc[src] = (outBySrc[src] || 0) + 1;
+    if (!outSeg || outSeg.src !== src || outSeg.uttId !== entry.uttId) {
+      logSegment();
+      outSeg = { src, uttId: entry.uttId, frames: 0, startedAt: nowMs };
+    }
+    outSeg.frames += 1;
+  }
 
   function tick() {
     if (stopped || !codec) return;
@@ -468,9 +771,12 @@ export function createCascadeLoop({
       rtpTs = (rtpTs + codec.timestampIncrement) >>> 0;
       if (!outQueue.length) {
         markNext = true;
+        logSegment(); // the wire went quiet — close the segment for the log
         continue;
       }
-      const payload = outQueue.shift();
+      const entry = outQueue.shift();
+      const payload = entry.p;
+      noteOutFrame(entry, nowMs);
       if (tapePending > 0) tapePending -= 1;
       hangupQuietSince = 0;
       if (markGreetingFrame) {
@@ -483,7 +789,14 @@ export function createCascadeLoop({
         if (callerStopAt && turnLatencies.length < MAX_LATENCY_SAMPLES) {
           turnLatencies.push(nowMs - callerStopAt);
         }
-        if (turn && !turn.firstAudioAt) turn.firstAudioAt = nowMs;
+        // THE TURN THAT OWNS THIS AUDIO, not "whatever turn is running now".
+        // That was the P1 bug behind `first_audio: None` on every waterfall of
+        // the founder's live call: by the time a frame reached the wire, the
+        // module-level `turn` had already been set to null by runTurn(), so the
+        // mark landed on nothing. The owner is captured when the audio is
+        // queued and travels with it.
+        markFirstAudio(audioOwner, nowMs);
+        audioOwner = null;
       }
       try {
         media?.sendRtp?.(buildRtpPacket(payload));
@@ -502,29 +815,132 @@ export function createCascadeLoop({
     paceTimer.unref?.();
   }
 
-  function emitPcm(pcm, rate = ttsRate) {
+  /**
+   * THE ONE DOOR TO THE WIRE (V7-P2.1).
+   *
+   * Every frame this call ever sends — greeting, filler, turn, promoted guess,
+   * emergency, replayed tape — is pushed here, and it must present the
+   * generation it was made under. A generation that is no longer current means
+   * something has happened since (a barge-in, a restart, an emergency, the
+   * hang-up), so those frames belong to a sentence the caller must not hear:
+   * they are dropped, logged and counted rather than quietly appended behind
+   * whatever is speaking now. That is what "one writer owns the wire" means in
+   * code, and it is the invariant the double-reply bug violated.
+   *
+   * `gen === null` is the ONE exemption, and it is the emergency: the ambulance
+   * number outranks the generation counter, exactly as speakSentence() already
+   * exempts it from cancellation.
+   *
+   * @param {Array<Buffer>} frames encoded 20 ms payloads
+   * @param {object} p { src, uttId, gen, owner, tapeable }
+   * @returns {number} frames actually queued
+   */
+  function pushFrames(frames, { src = 'unknown', uttId: frameUtt = null, gen = null, owner = null, tapeable = true } = {}) {
+    if (!frames || !frames.length) return 0;
+    if (gen != null && gen !== speakGen) {
+      staleFramesDropped += frames.length;
+      log(`[rtp-out] dropped ${frames.length} frames: stale gen (src=${src} utt=${frameUtt ?? '-'})`);
+      return 0;
+    }
+    const queueWasEmpty = outQueue.length === 0;
+    // ONLY when the queue was empty: if we were still speaking, the first frame
+    // out is the tail of the PREVIOUS sentence, and timing to it would report a
+    // latency the caller never experienced.
+    //
+    // AND NEVER FOR A FILLER. «ثانية برك…» is what we say INSTEAD of the
+    // answer; timing the reply to it would report a latency that flatters us by
+    // exactly the amount the brain was late — turning the metric that exists to
+    // expose slowness into one that hides it.
+    if (awaitingReply && !markTurnFrame && queueWasEmpty && src !== 'filler' && src !== 'greeting') {
+      markTurnFrame = true;
+      audioOwner = owner;
+    }
+    for (const payload of frames) {
+      outQueue.push({ p: payload, src, uttId: frameUtt });
+      if (!tapeable) continue;
+      if (activeTape && activeTape.frames.length < MAX_GREETING_FRAMES) activeTape.frames.push(payload);
+      else if (activeTape) activeTape.overflow = true;
+    }
+    // A REPLY THIS UTTERANCE CAN NEVER GET TWICE. The ledger's `answered` is
+    // set HERE — where audio really becomes audible — and not when a turn
+    // finishes: a held guess that was never promoted has said nothing at all.
+    if (frameUtt && (src === 'turn' || src === 'emergency')) noteAnswered(frameUtt);
+    ensurePacing();
+    return frames.length;
+  }
+
+  /**
+   * Synthesized PCM on its way out. A SPECULATIVE turn's audio never reaches
+   * pushFrames: it is held raw (un-encoded, so a guess that misses costs the
+   * codec nothing) until a final confirms the guess.
+   */
+  function emitPcm(pcm, rate = ttsRate, owner = null, src = null, gen = null) {
+    const frameSrc =
+      src || (emittingFiller ? 'filler' : owner?.speculative ? 'spec' : owner ? 'turn' : 'unknown');
+    if (owner && owner.speculative) {
+      holdPcm(owner, pcm, rate, gen);
+      return;
+    }
     try {
-      const queueWasEmpty = outQueue.length === 0;
       const frames = codec.encodeOut(pcm, rate);
-      if (!frames.length) return;
-      // ONLY when the queue was empty: if we were still speaking, the first
-      // frame out is the tail of the PREVIOUS sentence, and timing to it would
-      // report a latency the caller never experienced.
-      //
-      // AND NEVER FOR A FILLER. «ثانية برك…» is what we say INSTEAD of the
-      // answer; timing the reply to it would report a latency that flatters us
-      // by exactly the amount the brain was late — turning the metric that
-      // exists to expose slowness into one that hides it.
-      if (awaitingReply && !markTurnFrame && queueWasEmpty && !emittingFiller) markTurnFrame = true;
-      for (const payload of frames) {
-        outQueue.push(payload);
-        if (activeTape && activeTape.frames.length < MAX_GREETING_FRAMES) activeTape.frames.push(payload);
-        else if (activeTape) activeTape.overflow = true;
-      }
-      ensurePacing();
+      pushFrames(frames, { src: frameSrc, uttId: owner?.uttId ?? null, gen, owner });
     } catch (err) {
       log('[voice-cascade] outbound encode failed:', err?.message || err);
     }
+  }
+
+  /** PREPARE-ONLY. Pre-warmed audio for a guess nobody has confirmed yet. */
+  function holdPcm(t, pcm, rate, gen) {
+    if (!pcm || !pcm.length) return;
+    if (t.heldSamples >= MAX_HELD_SAMPLES) {
+      if (!t.heldOverflow) {
+        t.heldOverflow = true;
+        log(`[voice-cascade] speculative audio exceeded ${MAX_HELD_SAMPLES} samples — holding no more of it`);
+      }
+      return;
+    }
+    t.heldSamples += pcm.length;
+    t.held.push({ pcm, rate, gen });
+  }
+
+  /**
+   * THE GUESS WAS RIGHT. Everything held is encoded and queued now, in order,
+   * under the CURRENT generation — one atomic handover, so no other writer can
+   * interleave a frame into the middle of a sentence.
+   */
+  function flushHeld(t) {
+    const held = t.held;
+    t.held = [];
+    t.heldSamples = 0;
+    for (const chunk of held) {
+      // Held under a generation that has since been superseded: a barge-in or an
+      // emergency happened while we were guessing, and this audio answers a
+      // moment that is over.
+      if (chunk.gen != null && chunk.gen !== speakGen) {
+        staleHeldDropped += 1;
+        continue;
+      }
+      try {
+        const frames = codec.encodeOut(chunk.pcm, chunk.rate);
+        specFramesFlushed += pushFrames(frames, {
+          src: 'turn',
+          uttId: t.uttId,
+          gen: speakGen,
+          owner: t,
+        });
+      } catch (err) {
+        log('[voice-cascade] outbound encode failed:', err?.message || err);
+      }
+    }
+  }
+
+  /** The guess missed. It never reached a mouth, so there is nothing to unsay. */
+  function dropHeld(t) {
+    if (!t) return;
+    specChunksDiscarded += t.held.length;
+    t.held = [];
+    t.heldSamples = 0;
+    t.heldTranscript = [];
   }
 
   /**
@@ -536,6 +952,12 @@ export function createCascadeLoop({
   function killSpeech(reason) {
     const t0 = Date.now();
     const dropped = outQueue.length;
+    if (dropped) {
+      const bySrc = {};
+      for (const e of outQueue) bySrc[e.src || 'unknown'] = (bySrc[e.src || 'unknown'] || 0) + 1;
+      log(`[rtp-out] killed ${dropped} queued frames (${reason}): ${JSON.stringify(bySrc)}`);
+    }
+    logSegment();
     outQueue = [];
     tapePending = 0;
     markNext = true;
@@ -545,11 +967,13 @@ export function createCascadeLoop({
     activeTape = null;
     const ac = synthAbort;
     synthAbort = null;
-    try {
-      ac?.abort(new Error(reason || 'barge-in'));
-    } catch {
-      /* an already-settled controller is fine */
-    }
+    // THE LINE THAT KILLED THE SERVER. Aborting a controller is synchronous and
+    // cannot throw here — but the REASON travels into the synthesis chain, and
+    // anything there that leaves a rejected promise unobserved becomes an
+    // unhandled rejection, which Node turns into a fatal exception out of the
+    // RTP path. Tagged so every layer below can tell "we cancelled this" from
+    // "the provider died"; see speechAbortReason above and brain/tts/wire.js.
+    abortQuietly(ac, reason);
     const ms = Date.now() - t0;
     if (reason === 'barge_in') {
       bargeIns += 1;
@@ -590,7 +1014,7 @@ export function createCascadeLoop({
    *   the cache (the greeting and the filler); `emergency` marks the one
    *   utterance nothing may cancel.
    */
-  async function speakSentence(text, gen, { emergency = false, tape = null, filler = false } = {}) {
+  async function speakSentence(text, gen, { emergency = false, tape = null, filler = false, owner = null } = {}) {
     if (!hasMouth) return;
     const said = ttsChain.normalizeSpoken ? ttsChain.normalizeSpoken(text, L) : String(text || '').trim();
     // Punctuation-only text is not an utterance, and turning it into an HTTP
@@ -603,6 +1027,9 @@ export function createCascadeLoop({
     const ac = new AbortController();
     if (!emergency) synthAbort = ac;
     if (tape) activeTape = { frames: [], overflow: false, key: tape.key, text: tape.text };
+    // What the ears may hear coming back out of the caller's speaker — a
+    // SPECULATIVE sentence has not been said, so it is not echo material.
+    if (!owner?.speculative) lastAgentUtterance = said;
     const startedAt = Date.now();
     let firstChunkAt = 0;
     if (filler) emittingFiller = true;
@@ -612,10 +1039,25 @@ export function createCascadeLoop({
         if (!chunk || !chunk.length) continue;
         if (!firstChunkAt) {
           firstChunkAt = Date.now();
+          // THE MOUTH'S OWN LATENCY, attributed to the turn that ORDERED this
+          // sentence rather than to whatever `turn` happens to be now — the
+          // speech queue is asynchronous, so by the time a provider answers,
+          // runTurn() has usually finished and cleared it. That is why every
+          // waterfall in the founder's live call read `tts_ttfb: None`.
+          //
           // A filler's synthesis time is not the REPLY's time-to-first-byte.
-          if (!filler && turn && !turn.ttsTtfbMs) turn.ttsTtfbMs = firstChunkAt - startedAt;
+          if (!filler && owner && owner.ttsTtfbMs == null) owner.ttsTtfbMs = firstChunkAt - startedAt;
         }
-        emitPcm(chunk);
+        emitPcm(
+          chunk,
+          ttsRate,
+          owner,
+          emergency ? 'emergency' : filler ? 'filler' : owner ? 'turn' : 'greeting',
+          // THE GENERATION THIS AUDIO BELONGS TO. The emergency writer alone
+          // presents none: it outranks the counter, exactly as `cancelled()`
+          // above exempts it from being cancelled at all.
+          emergency ? null : gen
+        );
       }
       sentencesSpoken += 1;
       commitTape();
@@ -678,11 +1120,16 @@ export function createCascadeLoop({
         at: Date.now(),
       });
       if (tape) {
-        // Straight into the paced queue, bypassing emitPcm entirely — so a
-        // cached filler cannot consume the reply's latency mark either.
-        for (const frame of tape.frames) outQueue.push(frame);
-        tapePending += tape.frames.length;
-        ensurePacing();
+        // Already encoded, so it skips the codec — but NOT the one door: a
+        // replayed tape acquires the current generation like every other
+        // writer, and `tapeable:false` keeps a replay from being re-recorded.
+        lastAgentUtterance = text;
+        const queued = pushFrames(tape.frames, {
+          src: filler ? 'filler' : 'greeting',
+          gen: speakGen,
+          tapeable: false,
+        });
+        tapePending += queued;
         return true; // played from cache, inside one pacing tick
       }
     }
@@ -780,6 +1227,68 @@ export function createCascadeLoop({
     emergencyWindow = '';
   }
 
+  /** Is any of OUR audio queued, taped or still being synthesized right now? */
+  function agentSpeaking() {
+    return outQueue.length > 0 || tapePending > 0 || speechInFlight();
+  }
+
+  /** Is any of it AUDIBLE — actually on the wire, as opposed to being made? */
+  function agentAudible() {
+    return outQueue.length > 0 || tapePending > 0;
+  }
+
+  /**
+   * ENERGY BARGE-IN — the interruption test that does not trust the ears.
+   *
+   * On the founder's first live cascade call the caller talked over the agent
+   * again and again and `bargeIns` was ZERO for 101 seconds: every path to the
+   * kill-chain went through a transcript, and the transcripts were late, empty
+   * or hallucinated. Meanwhile the ONE thing we always have, on every frame, at
+   * zero cost, is how loud the caller is.
+   *
+   * Two deliberate restrictions:
+   *   • energy is only accumulated WHILE WE ARE SPEAKING. Otherwise a caller
+   *     who was mid-sentence when the agent started would trip the barge-in on
+   *     the agent's very first frame — cutting off the answer they asked for.
+   *   • the sustain window is 240 ms. A click, a cough, a burst of line noise
+   *     or one loud packet does not survive it; a human syllable does.
+   *
+   * @param {Int16Array} pcm decoded caller audio @16 kHz
+   */
+  function noteEnergy(pcm) {
+    if (!energyBargeOn || stopped || callState.emergency) return;
+    if (!agentSpeaking()) {
+      bargeHotMs = 0;
+      return;
+    }
+    if (frameRms(pcm) < bargeRms) {
+      bargeHotMs = 0;
+      return;
+    }
+    bargeHotMs += (pcm.length / BRAIN_IN_RATE) * 1000;
+    if (bargeHotMs < bargeRmsMs) return;
+    bargeHotMs = 0;
+    // THE GATE, CHECKED WHERE IT FIRES (V7-P2.1). On the instrumented call two
+    // of four energy barge-ins killed ZERO queued frames — they fired into
+    // silence, because the sustain window can outlive the sentence it was
+    // measured against. Killing silence is not an interruption, it is noise in
+    // the one counter that says whether callers can interrupt this agent.
+    if (!agentSpeaking()) {
+      energyBargeSilent += 1;
+      return;
+    }
+    const queued = outQueue.length + tapePending;
+    if (!queued) energyBargeSilent += 1;
+    energyBargeIns += 1;
+    log(
+      `[voice-cascade] energy barge-in: ${Math.round(bargeRmsMs)}ms of speech over us ` +
+        `(rms ≥ ${bargeRms}) with no usable transcript — stopping anyway ` +
+        `(${queued} frames queued, ${speakPending} utterances in flight)`
+    );
+    abortTurn('barge_in');
+    killSpeech('barge_in');
+  }
+
   async function fireEmergency(hit) {
     // Localize from the table that MATCHED, not the ambient guess. Arabizi is
     // Arabic typed in Latin ⇒ Arabic reply.
@@ -857,6 +1366,9 @@ export function createCascadeLoop({
     if (stopped || callState.emergency) return;
     const text = String(ev?.text || '');
     if (!text.trim()) return;
+    // The ears delivered something: the next end-of-turn signal is about NEW
+    // speech, not a second opinion on the last silence (see claimTurnEnd).
+    signalSinceTurnEnd = true;
     noteCallerSpeech(text, { final: false });
     beginUtterance();
 
@@ -903,18 +1415,69 @@ export function createCascadeLoop({
     if (!utterance.prevInterim || !utterance.lastInterim) return;
     const shared = sharedPrefixLength(utterance.prevInterim, utterance.lastInterim);
     if (shared < specMinPrefix) return;
-    // A turn that already ANSWERED this utterance blocks re-speculation too:
-    // the next thing that may start work is the end-of-turn path.
-    if (lastAnswered && lastAnswered.uttId === utterance.id) return;
+    // A hallucinated INTERIM is the same lie as a hallucinated final, and
+    // speculation is the one path that would hand it straight to a model
+    // without passing the final gate. It still barged in (energy and interims
+    // are how we know the caller is talking) — it just does not get a turn.
+    if (isAlienScript(utterance.lastInterim)) {
+      utterance.speculated = true; // do not retry this utterance every interim
+      return;
+    }
+    // A GUESS THAT IS ALREADY MADE. One held, un-confirmed reply per utterance
+    // is enough; a second would be a second thing to flush. (An utterance that
+    // has already been ANSWERED is refused by the ledger inside startTurn,
+    // where every path to a turn has to pass.)
+    if (pendingSpec && pendingSpec.uttId === utterance.id) return;
     utterance.speculated = true;
     speculations += 1;
     startTurn(utterance.lastInterim, { speculative: true, uttId: utterance.id });
+  }
+
+  /**
+   * THE EARS ARE NOT ORACLES (V7-P2.1). Two ways a "final" is not speech, and
+   * both of them answered a caller on the founder's first live call:
+   *
+   *  1. IT IS PUNCTUATION. A '.'-only final became a full LLM turn — a model
+   *     round trip, a spoken reply and a token bill, for a caller who had said
+   *     nothing at all. The two-strike rule already covers this; it just was
+   *     not reached, because the text was non-empty.
+   *  2. IT IS ANOTHER ALPHABET. The transcriber hallucinated Mongolian Cyrillic
+   *     («ийм шийд хэд за это») out of noisy derja, the model answered in
+   *     Mongolian, and a Tunisian patient heard a language they do not speak
+   *     from their own clinic. No prompt can repair a transcript that never
+   *     contained the caller's words.
+   *
+   * Both are treated as what they are — an unclear turn — which reuses the V6.2
+   * two-strike ladder (warm ask-again, then change the medium) instead of
+   * inventing a third behaviour for the same human situation.
+   *
+   * @returns {boolean} true ⇒ handled here; this final is not speech
+   */
+  function refuseFinal(text, endOfTurn) {
+    if (countSpeakable(text) < MIN_MEANINGFUL_CHARS) {
+      emptyFinals += 1;
+      // Punctuation is not an utterance — but an END-OF-TURN full of nothing
+      // still closes whatever real words we were already holding.
+      if (endOfTurn) endOfTurnSignal();
+      return true;
+    }
+    if (isAlienScript(text)) {
+      hallucinatedFinals += 1;
+      log(
+        `[voice-cascade] the ears hallucinated a foreign script (${describeScript(text)}) — ` +
+          `refusing it as an unclear turn; no model sees this`
+      );
+      noteUnclear();
+      return true;
+    }
+    return false;
   }
 
   function onFinal(ev) {
     if (stopped) return;
     const text = String(ev?.text || '');
     const endOfTurn = !!ev?.endOfTurn;
+    if (text.trim()) signalSinceTurnEnd = true;
     if (!text.trim()) {
       // AN EMPTY END-OF-TURN FINAL IS A FLUSH SIGNAL, NOT A SILENT CALLER.
       // Deepgram sends `UtteranceEnd` (and an empty speech_final) on its own
@@ -922,11 +1485,18 @@ export function createCascadeLoop({
       // that as "I could not hear you" answered a perfectly good sentence with
       // "sorry, it is noisy" — found in review. So: if we are holding finals,
       // this CLOSES them; only a turn with nothing in it at all is unclear.
+      //
+      // V7-P2.1: and when the finals were ALREADY closed a moment ago — by
+      // `speech_final` or by our own timer — this frame is the same endpoint
+      // speaking twice. It used to answer the caller a second time, out of a
+      // path that never touches an LLM. claimTurnEnd() collapses it.
       if (!endOfTurn) return;
-      if (utterance.finalText.trim()) endOfTurnNow();
-      else noteUnclear();
+      endOfTurnSignal();
       return;
     }
+    // Before ANYTHING else: is this speech at all, and is it in a script a
+    // caller on this line could have produced?
+    if (refuseFinal(text, endOfTurn)) return;
     noteCallerSpeech(text, { final: true });
     beginUtterance(); // a final with no interim before it (Speechmatics, liveEars)
     appendTranscript('patient', text);
@@ -952,20 +1522,34 @@ export function createCascadeLoop({
     // promoted turn was never re-checked, so the agent answered the booking
     // request and ignored the correction entirely. A caller correcting
     // themselves is not an edge case on a phone line — it is most of them.
-    if (turn && turn.uttId === utterance.id && !turn.locked) {
-      if (materialDrift(turn.text, utterance.finalText)) {
+    const live = turn && turn.uttId === utterance.id && !turn.locked ? turn : null;
+    // A guess that FINISHED before the caller did is still a guess: it is
+    // holding its audio, it has said nothing, and this final decides its fate.
+    const held = !live && pendingSpec && pendingSpec.uttId === utterance.id ? pendingSpec : null;
+    const candidate = live || held;
+    if (candidate) {
+      if (materialDrift(candidate.text, utterance.finalText)) {
         speculativeRestarts += 1;
         log(
-          `[voice-cascade] turn discarded (drift ${diffRatio(turn.text, utterance.finalText).toFixed(2)}) ` +
+          `[voice-cascade] turn discarded (drift ${diffRatio(candidate.text, utterance.finalText).toFixed(2)}) ` +
             `— restarting on the full final`
         );
-        abortTurn('speculation_missed');
+        // THE REVOKE, THEN THE KILL, IN THAT ORDER (V7-P2.1). If any of this
+        // utterance's answer already reached the wire it is un-said under a
+        // generation bump; if it never did (a held guess) there is nothing to
+        // unsay, and the caller never learns we guessed wrong.
+        revokeAnswer(utterance.id, 'drift');
+        if (live) abortTurn('speculation_missed');
+        else discardSpec('drift');
         killSpeech('speculation_missed');
+      } else if (candidate.speculative) {
+        // It still answers this sentence: PROMOTE it — the held audio goes to
+        // the wire now, atomically, under the current generation.
+        promoteTurn(candidate, { text: utterance.finalText });
       } else {
-        // It still answers this sentence: promote it and keep its text in step
-        // with what the caller has actually now said.
-        turn.speculative = false;
-        turn.text = utterance.finalText;
+        // Already promoted by an earlier final: keep its text in step with what
+        // the caller has actually now said.
+        candidate.text = utterance.finalText;
       }
     }
     // A COMPLETED answer for this utterance: we cannot unsay it, but the
@@ -979,11 +1563,25 @@ export function createCascadeLoop({
     clearEot();
     // `speech_final` is the vendor's own endpointer saying the caller STOPPED.
     // Trusting it is how the 300 ms timer stops being paid on most turns.
-    if (endOfTurn) endOfTurnNow();
+    if (endOfTurn) endOfTurnSignal();
     else {
-      eotTimer = setTimeout(endOfTurnNow, eotMs);
+      eotTimer = setTimeout(endOfTurnSignal, eotMs);
       eotTimer.unref?.();
     }
+  }
+
+  /**
+   * AN END-OF-TURN SIGNAL ARRIVED — from the vendor's `speech_final`, from its
+   * empty flush frame, or from our own timer. All three mean one thing, so all
+   * three come through one door, and the door only opens once per utterance
+   * per debounce window.
+   */
+  function endOfTurnSignal() {
+    clearEot();
+    if (stopped || callState.emergency) return;
+    if (!claimTurnEnd(utterance.id)) return;
+    if (utterance.finalText.trim()) endOfTurnNow();
+    else noteUnclear();
   }
 
   function clearEot() {
@@ -1007,20 +1605,49 @@ export function createCascadeLoop({
       return;
     }
     unclearStrikes = 0;
-    // A speculative turn that ALREADY FINISHED answered this utterance while
-    // the caller was still finishing it. If the finished sentence says the same
-    // thing, that answer stands — answering twice is the failure speculation is
-    // most likely to cause. If it drifted, we cannot unsay what was said, so we
-    // answer the real question and let the model correct itself out loud.
     let reuseEntry = null;
+    // A GUESS THAT FINISHED BEFORE THE CALLER DID, holding its whole reply. The
+    // finished sentence is the verdict: say it, or throw it away unheard. This
+    // is the case that produced the founder's double reply — the guess used to
+    // play as it was generated, and then this path answered the same sentence
+    // again.
+    if (pendingSpec && pendingSpec.uttId === id) {
+      const guess = pendingSpec;
+      if (!materialDrift(guess.text, text)) {
+        promoteTurn(guess, { text, vadMs, sttFinalMs, eotAt: Date.now() });
+        return;
+      }
+      speculativeRestarts += 1;
+      log('[voice-cascade] the completed guess drifted from the final — dropping it unheard and answering for real');
+      discardSpec('drift');
+    }
+    // A turn that ALREADY ANSWERED this utterance out loud. If the finished
+    // sentence says the same thing, that answer stands — answering twice is the
+    // failure speculation is most likely to cause. If it drifted, the answer is
+    // revoked (killSpeech, under the generation bump) and the real question
+    // gets the ONE restart the ledger allows.
     if (lastAnswered && lastAnswered.uttId === id) {
       if (!materialDrift(lastAnswered.answeredText, text)) return;
       speculativeRestarts += 1;
       log('[voice-cascade] a completed speculative answer drifted from the final — answering the real sentence');
+      revokeAnswer(id, 'drift');
+      killSpeech('drift_restart');
       // The history entry for this utterance already exists and already carries
       // the caller's real words (rewritten in onFinal). The corrected turn
       // updates it rather than pushing the same sentence a second time.
       reuseEntry = lastAnswered.entry || null;
+    }
+    // A guess still RUNNING when the caller stopped: the final is its verdict
+    // too, and it never needed the caller to pause for us to check.
+    if (turn && turn.speculative && turn.uttId === id) {
+      if (!materialDrift(turn.text, text)) {
+        promoteTurn(turn, { text, vadMs, sttFinalMs, eotAt: Date.now() });
+        turn.locked = true;
+        armFiller(turn);
+        return;
+      }
+      abortTurn('speculation_missed');
+      killSpeech('speculation_missed');
     }
     if (turn && !turn.speculative && turn.uttId === id) {
       // The turn was promoted and survived every drift check: it is already
@@ -1064,22 +1691,77 @@ export function createCascadeLoop({
     const dying = turn;
     turn = null;
     clearFiller();
+    // NOTHING THIS TURN PREPARED WAS EVER HEARD if it was still a guess: the
+    // audio is held, not queued, and the transcript rows are held with it.
+    dropHeld(dying);
+    if (pendingSpec === dying) pendingSpec = null;
     // KEEP THE CONTEXT. Whatever the model already said is what the caller
     // heard; dropping it would make the next turn repeat itself. A SPECULATIVE
     // turn's prompt was a guess at a half-finished sentence, so its user text
-    // is deliberately not recorded — only real speech becomes history.
+    // is deliberately not recorded — only real speech becomes history, and a
+    // guess that never reached a mouth leaves no assistant line either: a
+    // sentence nobody heard in the context window is how the next turn learns
+    // not to say it.
     if (!dying.speculative && dying.text) history.push({ role: 'user', text: dying.text });
-    if (dying.said.trim()) history.push({ role: 'assistant', text: dying.said.trim() });
+    if (!dying.speculative && dying.said.trim()) history.push({ role: 'assistant', text: dying.said.trim() });
     // TOKENS ARE SPENT WHETHER OR NOT WE USED THE ANSWER. An aborted turn still
     // billed a prompt, and under-reporting the cost of speculation and barge-in
     // would make the meter flatter than the invoice — which is the one direction
     // a cost number must never be wrong in.
     meterTurn(dying);
-    try {
-      dying.abort.abort(new Error(why || 'aborted'));
-    } catch {
-      /* already settled */
+    abortQuietly(dying.abort, why || 'aborted');
+  }
+
+  /**
+   * THE GUESS WAS RIGHT — hand it the wire.
+   *
+   * One place, so there is exactly one way a speculative turn can start
+   * speaking: it stops being speculative, its held transcript rows become real,
+   * its held audio is flushed under the CURRENT generation, and the ledger
+   * records that this utterance now has its one reply. A turn that had already
+   * finished writing is committed here too, because its commit was deferred
+   * until somebody confirmed it was answering the right sentence.
+   *
+   * @param {object} t
+   * @param {object} [p] { text, vadMs, sttFinalMs, eotAt }
+   */
+  function promoteTurn(t, { text = '', vadMs = null, sttFinalMs = null, eotAt = 0 } = {}) {
+    if (!t || !t.speculative) return false;
+    const e = t.uttId ? ledgerFor(t.uttId) : null;
+    if (e && e.generations >= MAX_GENERATIONS_PER_UTT) {
+      // Unreachable by design (a promotion IS the utterance's generation), and
+      // loud rather than silent if the design is ever wrong.
+      ledgerRefused += 1;
+      log(`[voice-cascade] ledger refused to promote utt ${t.uttId}: ${e.generations} generations already`);
+      discardSpec('ledger');
+      return false;
     }
+    t.speculative = false;
+    if (text) t.text = text;
+    if (vadMs != null) t.vadMs = vadMs;
+    if (sttFinalMs != null) t.sttFinalMs = sttFinalMs;
+    if (eotAt) t.eotAt = eotAt;
+    if (pendingSpec === t) pendingSpec = null;
+    if (e) e.generations += 1;
+    for (const piece of t.heldTranscript) appendTranscript('agent', piece);
+    t.heldTranscript = [];
+    // What the ears may now hear coming back off the caller's speaker.
+    if (t.said.trim()) lastAgentUtterance = t.said.trim();
+    flushHeld(t);
+    // It finished writing while it was still a guess: its history row, its
+    // waterfall and its place in the ledger were all waiting on this.
+    if (t.finished) commitTurn(t);
+    return true;
+  }
+
+  /** The guess missed, and it never spoke. Drop it; the caller heard nothing. */
+  function discardSpec(why) {
+    const t = pendingSpec;
+    if (!t) return;
+    pendingSpec = null;
+    dropHeld(t);
+    meterTurn(t); // the tokens were spent whether or not we used the answer
+    log(`[voice-cascade] a speculative reply was discarded unheard (${why}) — utt ${t.uttId}`);
   }
 
   /** Fold ONE turn's token usage into the call meter, exactly once. */
@@ -1125,6 +1807,40 @@ export function createCascadeLoop({
     if (stopped || callState.emergency || !hasMouth) return;
     const said = String(text || '').trim();
     if (!said) return;
+    // ── THE LEDGER (V7-P2.1) ────────────────────────────────────────────────
+    // Every path to a spoken reply comes through here — speculation, the
+    // end-of-turn path, the keypad — so this is where "one reply per utterance"
+    // is enforced rather than in each of them. A keypad phrase has no utterance
+    // (id 0) and is governed by the keypad instead.
+    if (id) {
+      const e = ledgerFor(id);
+      if (e.answered) {
+        ledgerRefused += 1;
+        e.refused += 1;
+        log(
+          `[voice-cascade] ledger REFUSED a second reply for utt ${id} ` +
+            `(${speculative ? 'speculative' : 'end-of-turn'}): it has already been answered`
+        );
+        return;
+      }
+      // Speculation reserves nothing: a guess that is never confirmed never
+      // speaks, so it cannot spend one of the utterance's two generations.
+      if (!speculative) {
+        if (e.generations >= MAX_GENERATIONS_PER_UTT) {
+          ledgerRefused += 1;
+          e.refused += 1;
+          log(
+            `[voice-cascade] ledger REFUSED generation ${e.generations + 1} for utt ${id} — ` +
+              `the cap is ${MAX_GENERATIONS_PER_UTT} (answer + one drift restart)`
+          );
+          return;
+        }
+        e.generations += 1;
+      }
+    }
+    // A held guess for a DIFFERENT sentence is dead the moment we start work on
+    // this one: nobody is ever going to confirm it.
+    if (pendingSpec && pendingSpec.uttId !== id) discardSpec('superseded');
     if (turn) abortTurn('superseded');
     const t = {
       gen: (turnGen += 1),
@@ -1143,12 +1859,23 @@ export function createCascadeLoop({
       ttftMs: null,
       ttsTtfbMs: null,
       firstAudioAt: 0,
+      /** The waterfall row this turn owns, once it has one, and whether it is closed. */
+      row: null,
+      rowLogged: false,
       vadMs,
       sttFinalMs,
       said: '',
       buffer: '',
       usage: { tokensIn: 0, tokensOut: 0 },
       metered: false,
+      /** PREPARE-ONLY (V7-P2.1): audio and transcript rows a guess may not publish. */
+      held: [],
+      heldSamples: 0,
+      heldOverflow: false,
+      heldTranscript: [],
+      /** The model stopped writing (so a promotion must commit it immediately). */
+      finished: false,
+      committed: false,
     };
     turn = t;
     armFiller(t);
@@ -1184,8 +1911,18 @@ export function createCascadeLoop({
             const { pieces, rest } = takeSentences(t.buffer);
             t.buffer = rest;
             for (const piece of pieces) {
-              appendTranscript('agent', piece.trim());
-              enqueueSpeak((gen) => speakSentence(piece, gen));
+              // THE BACKSTOP (V7-P2.1). The prompt tells the model to answer in
+              // one of three languages; this makes it true. Checked per SPOKEN
+              // PIECE, which is the last moment before a vendor turns it into
+              // audio — and the first piece is where a wandered model wanders.
+              if (rejectAlienReply(t, piece)) return;
+              // A GUESS DOES NOT GO ON THE RECORD. The transcript is what the
+              // clinic can prove it said out loud; a speculative sentence has
+              // not been said, and may never be. Held with its audio, published
+              // together on promotion.
+              if (t.speculative) t.heldTranscript.push(piece.trim());
+              else appendTranscript('agent', piece.trim());
+              enqueueSpeak((gen) => speakSentence(piece, gen, { owner: t }));
             }
             continue;
           }
@@ -1212,11 +1949,11 @@ export function createCascadeLoop({
           log('[voice-cascade] speculative turn wanted a tool — abandoning it; a guess may not write');
           turn = null;
           clearFiller();
-          try {
-            t.abort.abort(new Error('speculation reached a tool'));
-          } catch {
-            /* already settled */
-          }
+          // Whatever it had already prepared goes with it: held audio for a
+          // sentence nobody will ever confirm is a reply waiting to escape.
+          dropHeld(t);
+          if (pendingSpec === t) pendingSpec = null;
+          abortQuietly(t.abort, 'speculation reached a tool');
           return;
         }
 
@@ -1247,31 +1984,26 @@ export function createCascadeLoop({
       if (turn === t && t.buffer.trim() && SPEAKABLE_RE.test(t.buffer)) {
         const tail = t.buffer;
         t.buffer = '';
-        appendTranscript('agent', tail.trim());
-        enqueueSpeak((gen) => speakSentence(tail, gen));
+        if (rejectAlienReply(t, tail)) return;
+        if (t.speculative) t.heldTranscript.push(tail.trim());
+        else appendTranscript('agent', tail.trim());
+        enqueueSpeak((gen) => speakSentence(tail, gen, { owner: t }));
       }
 
       if (turn !== t) return;
-      // ONE history row per utterance. A corrected turn UPDATES the row its
-      // predecessor left behind instead of asking the same question twice; the
-      // row's text is the caller's real words either way (see onFinal).
-      let entry = t.reuseEntry;
-      if (entry) entry.text = t.text;
-      else {
-        entry = { role: 'user', text: t.text };
-        history.push(entry);
-      }
-      if (t.said.trim()) history.push({ role: 'assistant', text: t.said.trim() });
-      meterTurn(t);
-      noteWaterfall(t);
-      // Remember WHAT was answered, so the end-of-turn path cannot answer the
-      // same utterance a second time (see `lastAnswered`). `answeredText` is the
-      // text this turn was actually given — the drift decision compares against
-      // it, while `entry.text` is kept truthful for the model.
-      if (t.uttId) lastAnswered = { uttId: t.uttId, answeredText: t.text, entry };
+      t.finished = true;
       turn = null;
       clearFiller();
-      if (callState.endRequested) armHangup();
+      // A GUESS THAT FINISHED FIRST. It has said nothing — its audio and its
+      // transcript are held — so it gets no history row, no waterfall and no
+      // claim on the utterance yet. The final decides: promoteTurn() commits
+      // it, discardSpec() throws it away and nobody ever knows.
+      if (t.speculative) {
+        pendingSpec = t;
+        meterTurn(t);
+        return;
+      }
+      commitTurn(t);
     } catch (err) {
       if (turn !== t) return; // aborted by a barge-in or a restart: not a failure
       turn = null;
@@ -1286,25 +2018,121 @@ export function createCascadeLoop({
   }
 
   /**
+   * THE TURN IS ON THE RECORD. History, meter, waterfall and the ledger's
+   * memory of what this utterance was answered with — done exactly once, and
+   * deferred for a speculative turn until somebody confirms it (promoteTurn).
+   */
+  function commitTurn(t) {
+    if (!t || t.committed) return;
+    t.committed = true;
+    // ONE history row per utterance. A corrected turn UPDATES the row its
+    // predecessor left behind instead of asking the same question twice; the
+    // row's text is the caller's real words either way (see onFinal).
+    let entry = t.reuseEntry;
+    if (entry) entry.text = t.text;
+    else {
+      entry = { role: 'user', text: t.text };
+      history.push(entry);
+    }
+    if (t.said.trim()) history.push({ role: 'assistant', text: t.said.trim() });
+    meterTurn(t);
+    noteWaterfall(t);
+    // Remember WHAT was answered, so the end-of-turn path cannot answer the
+    // same utterance a second time (see `lastAnswered`). `answeredText` is the
+    // text this turn was actually given — the drift decision compares against
+    // it, while `entry.text` is kept truthful for the model.
+    if (t.uttId) lastAnswered = { uttId: t.uttId, answeredText: t.text, entry };
+    if (callState.endRequested) armHangup();
+  }
+
+  /**
+   * A MODEL MAY NOT SPEAK A LANGUAGE NOBODY SPOKE. The prompt asks; this
+   * enforces. On a rejection the whole turn is discarded — the caller hears the
+   * deterministic "sorry, it is noisy" line instead, which is both true (the
+   * ears very probably fed it garbage) and recoverable.
+   *
+   * The rejected sentence is deliberately NOT kept as history: a Mongolian
+   * assistant line in the context window is how the next turn learns to do it
+   * again. The caller's own words stay, so the repeat has somewhere to land.
+   *
+   * @returns {boolean} true ⇒ the turn is over, return immediately
+   */
+  function rejectAlienReply(t, piece) {
+    if (!isAlienScript(piece)) return false;
+    langRejected += 1;
+    log(
+      `[voice-cascade] the model replied in a foreign script (${describeScript(piece)}) — ` +
+        `discarding the reply unheard and asking the caller to repeat`
+    );
+    if (turn === t) {
+      turn = null;
+      clearFiller();
+    }
+    dropHeld(t);
+    if (pendingSpec === t) pendingSpec = null;
+    if (!t.speculative && t.text) history.push({ role: 'user', text: t.text });
+    meterTurn(t);
+    abortQuietly(t.abort, 'reply language rejected');
+    // Anything earlier in the SAME reply that already reached the queue goes
+    // too: half a discarded answer is still a discarded answer.
+    killSpeech('lang_rejected');
+    noteUnclear();
+    return true;
+  }
+
+  /**
    * THE WATERFALL — one line per turn, and the array on the outcome. This is
    * how "the agent feels slow" stops being an opinion: every hop is a number,
    * and the provider that answered is NAMED, so a quality complaint is
    * attributable to a model rather than to the product.
+   *
+   * THE ROW IS CREATED HERE AND FINISHED LATER (V7-P2.1). The mouth's two
+   * numbers do not exist yet when the brain stops writing: TTS time-to-first-
+   * byte is known when the vendor answers, and first-audio only when a frame
+   * actually leaves for the wire — both after this point, on the speech queue
+   * and the pacer respectively. P1 read them off the module-level `turn`, which
+   * runTurn() had already cleared, so the founder's whole live call logged
+   * `tts_ttfb=None first_audio=None`. The row object stays mutable in
+   * `waterfalls` (outcome() copies it on read) and is logged exactly once, when
+   * it is complete or when the call ends — whichever comes first.
    */
   function noteWaterfall(t) {
-    const firstAudioMs = t.firstAudioAt && t.eotAt ? t.firstAudioAt - t.eotAt : null;
     const row = {
       vad_ms: t.vadMs ?? null,
       stt_final_ms: t.sttFinalMs ?? null,
       llm_ttft_ms: t.ttftMs ?? null,
       tts_ttfb_ms: t.ttsTtfbMs ?? null,
-      first_audio_ms: firstAudioMs,
+      first_audio_ms: t.firstAudioAt && t.eotAt ? t.firstAudioAt - t.eotAt : null,
       speculative: !!t.wasSpeculative,
       stt: sttProvider,
       llm: llmProvider,
       tts: ttsChain?.provider ?? null,
     };
+    t.row = row;
     if (waterfalls.length < MAX_WATERFALLS) waterfalls.push(row);
+    // A turn with audio already on the wire (a fast mouth, a slow tool round)
+    // is complete right now; anything else waits for its first frame.
+    if (row.first_audio_ms != null || !hasMouth) finalizeWaterfall(t);
+    else openWaterfalls.add(t);
+  }
+
+  /** The first REAL reply frame of turn `t` just went to the socket. */
+  function markFirstAudio(t, nowMs) {
+    if (!t || t.firstAudioAt) return;
+    t.firstAudioAt = nowMs;
+    if (t.row) finalizeWaterfall(t);
+  }
+
+  /** Fill in whatever the mouth learned late, log the line, and close the row. */
+  function finalizeWaterfall(t) {
+    const row = t?.row;
+    if (!row || t.rowLogged) return;
+    t.rowLogged = true;
+    openWaterfalls.delete(t);
+    if (row.tts_ttfb_ms == null && t.ttsTtfbMs != null) row.tts_ttfb_ms = t.ttsTtfbMs;
+    if (row.first_audio_ms == null && t.firstAudioAt && t.eotAt) {
+      row.first_audio_ms = t.firstAudioAt - t.eotAt;
+    }
     log(
       `[voice-cascade] waterfall vad=${row.vad_ms ?? 'n/a'}ms stt=${row.stt_final_ms ?? 'n/a'}ms ` +
         `llm_ttft=${row.llm_ttft_ms ?? 'n/a'}ms tts_ttfb=${row.tts_ttfb_ms ?? 'n/a'}ms ` +
@@ -1479,7 +2307,21 @@ export function createCascadeLoop({
           }
         },
       });
-      stt = makeStt({ config, lang: L, wsFactory, liveFactory, fetchImpl, logger: log });
+      stt = makeStt({
+        config,
+        lang: L,
+        wsFactory,
+        liveFactory,
+        fetchImpl,
+        logger: log,
+        // ECHO SUPPRESSION FOR THE LEG THAT NEEDS IT (liveEars). A Gemini Live
+        // session on a phone leg sometimes transcribes OUR OWN voice bleeding
+        // back through the caller's speaker; answering that is how one agent
+        // becomes two. Only the orchestrator knows what we are saying and
+        // whether we are still saying it, so it lends both, as functions.
+        agentSpeaking,
+        agentSaid: () => lastAgentUtterance,
+      });
       sttStartedAt = Date.now();
       stt.on('interim', onInterim);
       stt.on('final', onFinal);
@@ -1648,7 +2490,11 @@ export function createCascadeLoop({
         // off an ambulance number.
         if (callState.emergency) return;
         const pcm = codec.decodeIn(payload);
-        if (pcm.length) stt?.sendAudio(pcm);
+        if (!pcm.length) return;
+        // BEFORE the ears, and independent of them: the caller's own loudness
+        // is the one interruption signal no transcriber can get wrong.
+        noteEnergy(pcm);
+        stt?.sendAudio(pcm);
       } catch (err) {
         log('[voice-cascade] inbound RTP handling failed:', err?.message || err);
       }
@@ -1669,6 +2515,7 @@ export function createCascadeLoop({
     stats() {
       return {
         outQueue: outQueue.length,
+        outBySrc: { ...outBySrc },
         pacing: !!paceTimer,
         codec: codec ? codec.stats() : null,
         stt: typeof stt?.stats === 'function' ? stt.stats() : null,
@@ -1687,6 +2534,33 @@ export function createCascadeLoop({
         speculations,
         speculativeRestarts,
         unclearStrikes,
+        // V7-P2.1 — the field-fix counters. Every one of these was a silent
+        // failure on the founder's first live call.
+        hallucinatedFinals,
+        langRejected,
+        emptyFinals,
+        energyBargeIns,
+        energyBargeSilent,
+        // V7-P2.1 — the double-reply invariants, as numbers a test can assert
+        // and a field call can print. `outBySrc.spec` is 0 on every healthy
+        // call BY CONSTRUCTION: a speculative frame that reaches the wire has
+        // been promoted first, and is tagged 'turn'.
+        staleFramesDropped,
+        staleHeldDropped,
+        specFramesFlushed,
+        specChunksDiscarded,
+        specHeld: pendingSpec ? pendingSpec.held.length : 0,
+        ledgerRefused,
+        turnEndsDebounced,
+        ledger: [...ledger.values()].map((e) => ({
+          utt: e.utt,
+          answered: e.answered,
+          generations: e.generations,
+          revokedBy: e.revokedBy,
+          refused: e.refused,
+        })),
+        wireCodec,
+        ttsRate,
         classicOwned,
         turnActive: !!turn,
         turnSpeculative: !!turn?.speculative,
@@ -1712,6 +2586,10 @@ export function createCascadeLoop({
     outcomeReason = outcomeReason || reason || 'stopped';
     for (const timer of [paceTimer]) if (timer) clearInterval(timer);
     paceTimer = null;
+    // Rows whose audio never made it to the wire (a hang-up mid-sentence, a
+    // tool-only turn) are still logged — a waterfall that is never printed is
+    // a measurement nobody can argue with, in the wrong sense.
+    for (const t of [...openWaterfalls]) finalizeWaterfall(t);
     for (const timer of [emergencyTimer, hangupTimer, eotTimer, fillerTimer]) if (timer) clearTimeout(timer);
     emergencyTimer = null;
     hangupTimer = null;
@@ -1722,17 +2600,15 @@ export function createCascadeLoop({
     // A synthesis or an LLM stream outliving the call is a socket nobody will
     // read and audio nobody will hear.
     speakGen += 1;
-    try {
-      turn?.abort?.abort(new Error('call ended'));
-    } catch {
-      /* already settled */
-    }
+    abortQuietly(turn?.abort, 'call ended');
+    if (turn) dropHeld(turn);
     turn = null;
-    try {
-      synthAbort?.abort(new Error('call ended'));
-    } catch {
-      /* same */
+    if (pendingSpec) {
+      abortQuietly(pendingSpec.abort, 'call ended');
+      dropHeld(pendingSpec);
+      pendingSpec = null;
     }
+    abortQuietly(synthAbort, 'call ended');
     synthAbort = null;
     try {
       stt?.close();

@@ -31,7 +31,7 @@
 // bigger slice than this one, and it is noted rather than half-built.
 import { createAzureTts } from './azure.js';
 import { createElevenLabsTts } from './elevenlabs.js';
-import { createFishAudioTts } from './fishAudio.js';
+import { createFishAudioTts, FISH_SAMPLE_RATE, FISH_WIDEBAND_RATE } from './fishAudio.js';
 import { BRAIN_OUT_RATE } from '../codec.js';
 import { TtsError, isTtsError, TTS_TIMEOUT_MS } from './wire.js';
 import {
@@ -44,7 +44,7 @@ import { noteTtsChars, ttsCharsThisMonth } from './budget.js';
 export { TtsError, isTtsError, TTS_TIMEOUT_MS };
 export { createAzureTts } from './azure.js';
 export { createElevenLabsTts } from './elevenlabs.js';
-export { createFishAudioTts } from './fishAudio.js';
+export { createFishAudioTts, FISH_SAMPLE_RATE, FISH_WIDEBAND_RATE } from './fishAudio.js';
 export {
   noteTtsFailure,
   noteTtsOk,
@@ -140,14 +140,34 @@ function voiceConfig(clinic) {
  *   True (what brain-cascade/ passes): there IS no native voice — the cascade's
  *   brain is a text model, so a native result is a call it cannot take. Only
  *   then is the doctrine fallback order walked.
+ * @param {'opus'|'pcma'} [p.wireCodec] THE NEGOTIATED LEG (V7-P2.1). Fish is
+ *   asked to synthesize at the rate the wire can carry: 8 kHz for PCMA (no
+ *   resampling at all) and 24 kHz for Opus (no band loss, exact 1:2 upsample).
+ *   Absent ⇒ 8 kHz, which is what every pre-V7-P2.1 caller got.
  * @returns {{mode:'native'|'tts', provider:string, voice:string|null,
  *   sampleRate:number, synthesize:Function|null, meter:Function,
  *   normalizeSpoken:Function, markDegraded:Function, describe:Function}}
  */
-export function createTtsChain({ config = {}, clinic, logger, fetchImpl, now, requireMouth = false } = {}) {
+export function createTtsChain({
+  config = {},
+  clinic,
+  logger,
+  fetchImpl,
+  now,
+  requireMouth = false,
+  wireCodec = null,
+} = {}) {
   const log = typeof logger === 'function' ? logger : () => {};
   const clock = typeof now === 'function' ? now : () => Date.now();
   const tenantVoice = voiceConfig(clinic);
+  /**
+   * 8 kHz is right for G.711 and WRONG for Opus — the founder's first live
+   * cascade call was synthesized at telephone band and then upsampled onto a
+   * 48 kHz wire. Only a leg we KNOW is Opus is widened; an unknown leg keeps
+   * the incumbent's rate, because guessing wide on a G.711 call would add a
+   * resample stage this provider was chosen to delete.
+   */
+  const fishRate = wireCodec === 'opus' ? FISH_WIDEBAND_RATE : FISH_SAMPLE_RATE;
 
   const requested = String(tenantVoice.provider || config.voiceTtsProvider || 'gemini')
     .trim()
@@ -272,6 +292,7 @@ export function createTtsChain({ config = {}, clinic, logger, fetchImpl, now, re
         return createFishAudioTts({
           apiKey,
           referenceId: tenantVoice.fishVoiceId || generic || '',
+          sampleRate: fishRate,
           fetchImpl,
           logger: log,
         });
@@ -335,9 +356,10 @@ export function createTtsChain({ config = {}, clinic, logger, fetchImpl, now, re
 
     /**
      * The rate the fitted mouth actually produces. 24 kHz for Gemini native,
-     * Azure and ElevenLabs; 8 kHz for Fish Audio, which is G.711-ready and so
-     * skips the resample stage entirely on a PCMA leg. Consumers pass this to
-     * codec.encodeOut — playing 8 kHz samples as 24 kHz is a third-speed voice.
+     * Azure and ElevenLabs; for Fish Audio it is whatever the WIRE wants —
+     * 8 kHz on a PCMA leg (G.711-ready, no resample at all) and 24 kHz on an
+     * Opus leg. Consumers pass this to codec.encodeOut — playing 8 kHz samples
+     * as 24 kHz is a third-speed voice.
      */
     get sampleRate() {
       return impl && Number(impl.sampleRate) > 0 ? Number(impl.sampleRate) : BRAIN_OUT_RATE;

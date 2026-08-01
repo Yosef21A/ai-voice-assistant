@@ -44,10 +44,28 @@ export const FISH_TTS_URL = 'https://api.fish.audio/v1/tts';
 export const FISH_MODEL = 's2.1-pro-free';
 
 /**
- * 8 kHz: G.711-ready, so a PCMA leg never resamples. On an Opus leg the codec
- * bridge upsamples 8k→48k with the same integer path it already uses.
+ * 8 kHz: G.711-ready, so a PCMA leg never resamples. It is the DEFAULT because
+ * that is what the incumbent measured and shipped.
+ *
+ * IT IS THE WRONG ANSWER ON AN OPUS LEG, and the first live cascade call proved
+ * it: synthesizing at 8 kHz onto a 48 kHz Opus wire throws away every frequency
+ * above 4 kHz and then upsamples the corpse — the caller hears a landline
+ * ("voice quality is low", founder, 2026-08-01). Opus legs therefore ask for
+ * FISH_WIDEBAND_RATE, which is the brain's own rate and an exact 1:2 integer
+ * upsample to 48 kHz. See createTtsChain({ wireCodec }).
  */
 export const FISH_SAMPLE_RATE = 8000;
+
+/** What an Opus leg asks for: no band loss, and an exact integer resample. */
+export const FISH_WIDEBAND_RATE = 24000;
+
+/**
+ * The rates Fish accepts AND that brain/codec.js converts to a wire rate
+ * exactly (48000 % r === 0 for Opus, r === 8000 for PCMA). A rate outside this
+ * set would fall into the linear resampler on the RTP hot path, which is the
+ * one place this product does not accept "probably fine".
+ */
+export const FISH_SAMPLE_RATES = Object.freeze([8000, 16000, 24000, 48000]);
 
 /** 'balanced' | 'normal'. Balanced is what the P0 numbers were measured on. */
 export const FISH_LATENCY_MODE = 'balanced';
@@ -66,6 +84,9 @@ export const FISH_REFERENCE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
  * @param {string} [p.referenceId]  a PRE-CREATED voice model id. Optional: the
  *   stock Arabic voice is used without one, which is the zero-config path.
  * @param {string} [p.model]        override the model header (ops escape hatch)
+ * @param {number} [p.sampleRate]   the rate to SYNTHESIZE at — 8000 for a G.711
+ *   leg, 24000 for an Opus leg. Defaults to 8000, so every pre-V7-P2.1 caller
+ *   behaves byte-identically.
  * @param {Function} [p.fetchImpl]
  * @param {Function} [p.logger]
  * @param {number} [p.timeoutMs]
@@ -76,6 +97,7 @@ export function createFishAudioTts({
   apiKey,
   referenceId,
   model = FISH_MODEL,
+  sampleRate = FISH_SAMPLE_RATE,
   fetchImpl,
   logger,
   timeoutMs = TTS_TIMEOUT_MS,
@@ -83,6 +105,13 @@ export function createFishAudioTts({
   const log = typeof logger === 'function' ? logger : () => {};
   const key = String(apiKey || '');
   const ref = String(referenceId || '').trim();
+  const rate = Number(sampleRate);
+  if (!FISH_SAMPLE_RATES.includes(rate)) {
+    throw new TtsError(
+      `fish sample rate ${JSON.stringify(sampleRate)} is not one of ${FISH_SAMPLE_RATES.join(', ')}`,
+      { provider: 'fish', kind: 'config' }
+    );
+  }
   if (!key) {
     throw new TtsError('fish TTS needs FISH_AUDIO_API', { provider: 'fish', kind: 'config' });
   }
@@ -101,7 +130,7 @@ export function createFishAudioTts({
   }
 
   log(
-    `[voice-brain] fish audio armed (${modelHeader}, pcm@${FISH_SAMPLE_RATE}` +
+    `[voice-brain] fish audio armed (${modelHeader}, pcm@${rate}` +
       `${ref ? `, voice model ${ref}` : ', stock voice'})`
   );
 
@@ -110,7 +139,7 @@ export function createFishAudioTts({
     /** The per-tenant clone, when there is one. Null ⇒ the stock Arabic voice. */
     voice: ref || null,
     /** Declared, not assumed: brain/codec.js converts from here to the wire. */
-    sampleRate: FISH_SAMPLE_RATE,
+    sampleRate: rate,
     url: FISH_TTS_URL,
 
     /**
@@ -118,7 +147,7 @@ export function createFishAudioTts({
      * @param {object} [opts] { lang, signal } — `lang` is unused: the model is
      *   multilingual and the dialect comes from the CLONE, so a language hint
      *   would be the thing that made it sound wrong.
-     * @yields {Int16Array} PCM16 mono @ FISH_SAMPLE_RATE
+     * @yields {Int16Array} PCM16 mono @ the constructed `sampleRate`
      */
     async *synthesize(text, { signal } = {}) {
       const said = String(text || '').trim();
@@ -141,7 +170,7 @@ export function createFishAudioTts({
           body: JSON.stringify({
             text: said,
             format: 'pcm',
-            sample_rate: FISH_SAMPLE_RATE,
+            sample_rate: rate,
             latency: FISH_LATENCY_MODE,
             ...(ref ? { reference_id: ref } : {}),
           }),

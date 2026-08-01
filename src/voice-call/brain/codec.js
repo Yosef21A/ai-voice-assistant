@@ -92,6 +92,45 @@ export function parseAudioCodecs(sdp) {
 }
 
 /**
+ * WHICH SIDE OF THE SDP DECIDES. The ANSWER is authoritative WHOLESALE, not
+ * field by field. Merging the two (`fromAnswer.opus || fromOffer.opus`) looks
+ * harmless and is not: an offer that advertised Opus would then override an
+ * answer that settled on PCMA, and we would put A-law bytes inside an Opus
+ * packet — a call that is noise in one direction and impossible to diagnose
+ * from a log. We consult the offer only when the answer named no audio codec at
+ * all (a stub SDP).
+ *
+ * DTMF is additive rather than exclusive — either side may carry the rtpmap.
+ */
+function pickNegotiated(sdpAnswer, sdpOffer) {
+  const fromAnswer = parseAudioCodecs(sdpAnswer);
+  const fromOffer = parseAudioCodecs(sdpOffer);
+  const negotiated = fromAnswer.opus || fromAnswer.pcma ? fromAnswer : fromOffer;
+  return { negotiated, dtmf: fromAnswer.dtmf || fromOffer.dtmf };
+}
+
+/**
+ * The codec this call will actually run on, WITHOUT building a bridge.
+ *
+ * Exported at V7-P2.1 because the mouth now has to know: Fish Audio is asked
+ * for 8 kHz on a G.711 leg (no resampling at all) and for its native 24 kHz on
+ * an Opus leg — where the old fixed 8 kHz request meant the caller heard
+ * telephone-band audio upsampled to 48 kHz, i.e. "the voice quality is low"
+ * (founder, first live cascade call). The TTS chain is built before the bridge
+ * exists, so the decision rule is factored out here rather than duplicated —
+ * two rules for one negotiation is how a leg ends up encoding for the wrong wire.
+ *
+ * @param {object} p
+ * @param {string} [p.sdpAnswer]
+ * @param {string} [p.sdpOffer]
+ * @returns {'opus'|'pcma'}
+ */
+export function negotiatedCodecName({ sdpAnswer, sdpOffer } = {}) {
+  const { negotiated } = pickNegotiated(sdpAnswer, sdpOffer);
+  return !negotiated.opus && negotiated.pcma ? 'pcma' : 'opus';
+}
+
+/**
  * Build the codec bridge for ONE call.
  *
  * @param {object} p
@@ -105,19 +144,9 @@ export function parseAudioCodecs(sdp) {
  */
 export function createCodecBridge({ sdpAnswer, sdpOffer, logger } = {}) {
   const log = typeof logger === 'function' ? logger : () => {};
-  const fromAnswer = parseAudioCodecs(sdpAnswer);
-  const fromOffer = parseAudioCodecs(sdpOffer);
-  // The ANSWER is authoritative WHOLESALE, not field by field. Merging the two
-  // (`fromAnswer.opus || fromOffer.opus`) looks harmless and is not: an offer
-  // that advertised Opus would then override an answer that settled on PCMA,
-  // and we would put A-law bytes inside an Opus packet — a call that is noise
-  // in one direction and impossible to diagnose from a log. We consult the
-  // offer only when the answer named no audio codec at all (a stub SDP).
-  const negotiated = fromAnswer.opus || fromAnswer.pcma ? fromAnswer : fromOffer;
+  const { negotiated, dtmf } = pickNegotiated(sdpAnswer, sdpOffer);
   const opus = negotiated.opus;
   const pcma = negotiated.pcma;
-  // DTMF is additive rather than exclusive — either side may carry the rtpmap.
-  const dtmf = fromAnswer.dtmf || fromOffer.dtmf;
 
   // Opus wins whenever it is on the table (it is what media.js pins). PCMA is
   // the explicit G.711 leg. With neither in evidence we still choose Opus: the

@@ -25,6 +25,8 @@ import {
   sharedPrefixLength,
   levenshtein,
 } from '../src/voice-call/brain-cascade/orchestrator.js';
+import { createSttChain } from '../src/voice-call/brain-cascade/stt/index.js';
+import { createCodecBridge } from '../src/voice-call/brain/codec.js';
 import { clearGreetingCache, greetingCacheStats } from '../src/voice-call/brain/greetingCache.js';
 import { normalizeSpoken } from '../src/voice-call/brain/tts/index.js';
 import { buildGreetingText, buildFillerText, NOISE_POLICY } from '../src/voice-call/brain-cascade/prompt.js';
@@ -121,7 +123,7 @@ const says = (...parts) =>
     yield { type: 'done', usage: { tokensIn: 40, tokensOut: 12 }, provider: 'gemini-flash-lite-latest' };
   };
 
-function fakeTts({ provider = 'fish', voice = null, chunkMs = 120, failAt = 0, holdAt = 0 } = {}) {
+function fakeTts({ provider = 'fish', voice = null, chunkMs = 120, failAt = 0, holdAt = 0, slowMs = 0 } = {}) {
   let n = 0;
   const chain = {
     mode: 'tts',
@@ -155,10 +157,57 @@ function fakeTts({ provider = 'fish', voice = null, chunkMs = 120, failAt = 0, h
         });
         return;
       }
+      // A SLOW MOUTH. Real TTS time-to-first-byte is 170–570 ms measured (P0),
+      // which is exactly the window in which a speculative turn is still
+      // synthesizing when the caller's final arrives.
+      if (slowMs) {
+        await new Promise((res, rej) => {
+          const timer = setTimeout(res, slowMs);
+          const bail = () => {
+            clearTimeout(timer);
+            rej(signal?.reason || new Error('aborted'));
+          };
+          if (signal?.aborted) return bail();
+          signal?.addEventListener('abort', bail, { once: true });
+        });
+      }
       yield tone24k(chunkMs);
     },
   };
   return chain;
+}
+
+/**
+ * A Gemini Live client the test drives — the same shape the chain tests use.
+ * Here it is wired into the ORCHESTRATOR, because "the ears have no mouth" is a
+ * property of the whole loop, not of the adapter (V7-P2.1, suspect #3).
+ */
+function fakeLiveClient() {
+  const handlers = new Map();
+  const api = {
+    opts: null,
+    audioChunks: [],
+    closed: 0,
+    on(ev, cb) {
+      if (!handlers.has(ev)) handlers.set(ev, []);
+      handlers.get(ev).push(cb);
+      return () => {};
+    },
+    emit(ev, payload) {
+      for (const cb of handlers.get(ev) || []) cb(payload);
+    },
+    sendAudioChunk(pcm) {
+      api.audioChunks.push(pcm);
+    },
+    sendText: () => true,
+    sendToolResponse: () => true,
+    close() {
+      api.closed += 1;
+    },
+    stats: () => ({ fake: true }),
+  };
+  api.ready = Promise.resolve(true);
+  return api;
 }
 
 function fakeMedia({ sdpAnswer = OPUS_SDP } = {}) {
@@ -181,6 +230,7 @@ async function setup({
   llm,
   tts,
   stt,
+  sttFactory,
   config = {},
   ended = [],
   clearCache = true,
@@ -210,7 +260,9 @@ async function setup({
     lang: 'ar',
     patientWaId: waId,
     sdpOffer: OPUS_SDP,
-    sttFactory: () => sttChain,
+    // The REAL chain, when a test wants the ears themselves under test
+    // (liveEars is the leg that hears our own voice come back).
+    sttFactory: sttFactory || (() => sttChain),
     llmFactory: () => llmChain,
     ttsChain,
     now: NOW,
@@ -976,4 +1028,407 @@ test('V6.2 two-strike: unclear once asks warmly, twice offers the chat thread', 
   assert.match(said[0], /سامحني/, 'once, warmly, in their dialect');
   assert.match(said[1], /الواتساب/, 'twice ⇒ change the medium instead of asking a third time');
   assert.equal(s.llm.turns.length, 0, 'noise never becomes a turn');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 9. V7-P2.1 — THE DOUBLE REPLY
+//
+// The founder's live test: "two replies — the first finishes, then a second
+// dictates another reply". The instrumented call named both writers:
+//
+//   [rtp-out] src=spec utt=4 frames=24 (480ms)          ← a GUESS on the wire
+//   [rtp-out] killed 50 queued frames (barge_in): {"spec":50}
+//
+// …and then the final's turn answered the same utterance a second time. Plus a
+// second, quieter writer with no model behind it at all: Deepgram's UtteranceEnd
+// flush frame arriving after speech_final, finding the utterance already
+// consumed, and speaking the "sorry, it is noisy" line over a good answer.
+//
+// The laws below are what stop both, and every one of them is a number in
+// stats() so the next field call is arguable rather than remembered.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Everything queued has reached the fake media, and nothing is in flight. */
+async function drain(s) {
+  await s.loop.settled();
+  await waitFor(() => s.loop.stats().outQueue === 0, 'the wire to drain');
+  await sleep(25);
+  await s.loop.settled();
+}
+
+/** One reply from `fakeTts({chunkMs:120})` is 120 ms of audio = 6 RTP frames. */
+const FRAMES_PER_REPLY = 6;
+
+/**
+ * A mouth that SPEAKS and then waits — and rejects with the abort reason when
+ * it is killed. That is exactly what a real provider does through
+ * brain/tts/wire.js, and it is the shape the process died on: frames already on
+ * the wire, a synthesis still open, and a barge-in arriving from the RTP thread.
+ */
+function stallingTts({ chunkMs = 400, stallCall = 2 } = {}) {
+  const chain = fakeTts({ chunkMs });
+  const plain = chain.synthesize;
+  let n = 0;
+  chain.synthesize = async function* stalling(text, opts = {}) {
+    n += 1;
+    if (n !== stallCall) {
+      yield* plain(text, opts);
+      return;
+    }
+    chain.calls.push({ text, lang: opts.lang, n });
+    chain.chars += String(text || '').length;
+    yield tone24k(chunkMs);
+    await new Promise((_res, rej) => {
+      const bail = () => rej(opts.signal?.reason || new Error('aborted'));
+      if (opts.signal?.aborted) return bail();
+      opts.signal?.addEventListener('abort', bail, { once: true });
+    });
+  };
+  return chain;
+}
+
+/**
+ * `n` frames of LOUD caller audio pushed through the real inbound codec path —
+ * the only way to exercise noteEnergy(), which is deliberately reachable from
+ * nowhere but onRtp. One frame is 20 ms, so 12 frames is the 240 ms sustain.
+ */
+function feedLoud(s, frames = 14) {
+  const bridge = createCodecBridge({ sdpAnswer: OPUS_SDP, sdpOffer: OPUS_SDP, logger: () => {} });
+  const payloads = bridge.encodeOut(tone24k(frames * 20), 24000);
+  for (const payload of payloads) s.loop.onRtp({ header: { payloadType: 111 }, payload });
+  bridge.close();
+  return payloads.length;
+}
+
+test('GOLDEN (V7-P2.1): a guess and the final that confirms it are ONE reply on the wire', async (t) => {
+  // The exact shape of the founder's bug: interim-stable starts the brain, the
+  // mouth is slow enough to still be synthesizing when the final lands, and the
+  // final agrees with the guess.
+  const s = await setup({
+    config: { voiceCascadeEotMs: 20 },
+    llm: fakeLlm([says('باهي، نشوفلك وقت.')]),
+    tts: fakeTts({ chunkMs: 120, slowMs: 40 }),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+  const before = { ...s.loop.stats().outBySrc };
+  assert.equal(before.greeting, FRAMES_PER_REPLY, 'the greeting is tagged, and it is all that has played');
+
+  s.stt.interim('نحب نحجز موعد');
+  s.stt.interim('نحب نحجز موعد عند');
+  assert.equal(s.llm.turns.length, 1, 'the brain started early — that is the whole point of speculation');
+  assert.equal(s.loop.stats().turnSpeculative, true);
+
+  // PREPARE-ONLY. The model is writing and the mouth is synthesizing, and NOT
+  // ONE FRAME may reach the wire while the sentence is still a guess.
+  await sleep(60);
+  await s.loop.settled();
+  assert.equal(s.loop.stats().outQueue, 0, 'a guess does not queue audio');
+  assert.equal(s.loop.stats().outBySrc.spec, 0, "no frame is ever tagged 'spec' again — that tag is the bug");
+  assert.ok(s.loop.stats().specHeld > 0 || s.tts.calls.length > 1, 'it DID pre-warm — held, not discarded');
+
+  s.stt.final('نحب نحجز موعد عند طبيب', true);
+  await drain(s);
+
+  const st = s.loop.stats();
+  assert.equal(s.llm.turns.length, 1, 'the guess IS the answer — the final never starts a second generation');
+  assert.equal(st.outBySrc.spec, 0);
+  assert.equal(
+    st.outBySrc.turn - (before.turn || 0),
+    FRAMES_PER_REPLY,
+    'EXACTLY ONE reply reached the media — the held guess, flushed on promotion'
+  );
+  assert.ok(st.specFramesFlushed >= FRAMES_PER_REPLY, 'and those frames came out of the held buffer');
+  assert.equal(st.staleFramesDropped, 0, 'nothing raced the writer on the happy path');
+  assert.deepEqual(st.ledger, [{ utt: 1, answered: true, generations: 1, revokedBy: null, refused: 0 }]);
+  assert.deepEqual(s.tts.calls.slice(1).map((c) => c.text), ['باهي، نشوفلك وقت.']);
+  // The transcript is what the clinic can prove it SAID: one agent line, once.
+  const agentLines = s.loop.transcript().filter((e) => e.who === 'agent');
+  assert.equal(agentLines.filter((e) => e.text.includes('نشوفلك')).length, 1);
+});
+
+test('GOLDEN variant: the final DRIFTS — the answer is un-said and ONE new reply replaces it', async (t) => {
+  const s = await setup({
+    config: { voiceCascadeEotMs: 20 },
+    llm: fakeLlm([says('عندي بلاصة نهار الخميس.'), says('الكشفية من خمسين دينار.')]),
+    tts: fakeTts({ chunkMs: 600 }), // long enough that there is really audio to kill
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+
+  s.stt.interim('نحب نحجز موعد');
+  s.stt.interim('نحب نحجز موعد عند');
+  // A first final CONFIRMS the guess: it is promoted and its audio hits the wire.
+  s.stt.final('نحب نحجز موعد عند طبيب', false);
+  await waitFor(() => s.loop.stats().outQueue > 0, 'the promoted guess to reach the queue');
+  assert.equal(s.loop.stats().ledger[0].answered, true, 'this utterance now has its one reply');
+
+  // …and then the caller corrects themselves. Not an edge case on a phone line.
+  s.stt.final('لا سامحني، نحب نعرف الأسعار متاع الكشفية', true);
+  assert.equal(s.loop.stats().outQueue, 0, 'the revoked answer dies under the SAME generation bump');
+  await drain(s);
+
+  const st = s.loop.stats();
+  assert.equal(s.llm.turns.length, 2, 'the drift restart is the ONE legitimate second generation');
+  assert.deepEqual(st.ledger, [{ utt: 1, answered: true, generations: 2, revokedBy: 'drift', refused: 0 }]);
+  assert.equal(st.outBySrc.spec, 0);
+  assert.deepEqual(
+    s.tts.calls.slice(1).map((c) => c.text),
+    ['عندي بلاصة نهار الخميس.', 'الكشفية من خمسين دينار.'],
+    'two sentences were synthesized, but only ever one of them was the answer'
+  );
+});
+
+test('A GUESS THAT MISSES IS NEVER HEARD: zero frames, no transcript row, no assistant history', async (t) => {
+  const s = await setup({
+    config: { voiceCascadeEotMs: 20 },
+    // A fast guess that finishes before the caller does — then the caller says
+    // something else entirely.
+    llm: fakeLlm([says('عندي بلاصة نهار الخميس.'), says('العيادة مسكرة نهار الأحد.')]),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+  const before = { ...s.loop.stats().outBySrc };
+
+  s.stt.interim('نحب نحجز موعد');
+  s.stt.interim('نحب نحجز موعد عند');
+  await s.loop.settled();
+  assert.equal(s.loop.stats().specHeld > 0, true, 'the whole guessed reply is held, unspoken');
+  assert.equal(s.loop.stats().outQueue, 0);
+
+  s.stt.final('نحب نعرف إذا العيادة تخدم نهار الأحد ولا لا', true);
+  await drain(s);
+
+  const st = s.loop.stats();
+  assert.equal(s.llm.turns.length, 2);
+  assert.ok(st.specChunksDiscarded > 0, 'the wrong answer was thrown away unheard — it cost the caller 0 ms');
+  assert.equal(st.outBySrc.spec, 0);
+  assert.equal(st.outBySrc.turn - (before.turn || 0), FRAMES_PER_REPLY, 'ONE reply, and it is the right one');
+  // Nothing that was never said may appear anywhere the clinic could quote it.
+  const script = s.loop.transcript();
+  assert.equal(script.some((e) => e.text.includes('الخميس')), false, 'a guess that missed is not in the transcript');
+  assert.equal(
+    s.llm.turns[1].messages.some((m) => m.role === 'assistant' && m.text.includes('الخميس')),
+    false,
+    'nor in the context window, where it would teach the model it had already answered'
+  );
+});
+
+test('THE LEDGER: an utterance that has been answered can never be answered again', async (t) => {
+  const s = await setup({ config: { voiceCascadeEotMs: 30 }, llm: fakeLlm([says('باهي، نشوفلك وقت.')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+
+  s.stt.interim('نحب نحجز موعد');
+  s.stt.interim('نحب نحجز موعد عند');
+  s.stt.final('نحب نحجز موعد عند طبيب', false); // promotes: the reply is on the wire
+  await s.loop.settled();
+  assert.equal(s.loop.stats().ledger[0].answered, true);
+
+  // The caller keeps talking, the ears keep sending interims for the SAME
+  // utterance, and the stable-prefix test is satisfied all over again. Without
+  // the ledger this starts a second generation for a sentence we have already
+  // answered — which is precisely the double reply.
+  s.stt.interim('نحب نحجز موعد عند طبيب القلب');
+  s.stt.interim('نحب نحجز موعد عند طبيب القلب من فضلك');
+  await s.loop.settled();
+
+  const st = s.loop.stats();
+  assert.equal(st.ledgerRefused, 1, 'the ledger refused it, out loud and counted');
+  assert.equal(st.ledger[0].refused, 1);
+  assert.equal(s.llm.turns.length, 1, 'one utterance, one generation, one reply');
+  assert.deepEqual(s.tts.calls.slice(1).map((c) => c.text), ['باهي، نشوفلك وقت.']);
+});
+
+test('ONE TURN-END: the UtteranceEnd flush that lands after speech_final never speaks', async (t) => {
+  // The second writer, and the one with no model behind it: Deepgram sends
+  // `speech_final` with the words and `UtteranceEnd` on a LATER frame. The
+  // second one used to find the utterance consumed and answer the caller with
+  // "sorry, it is noisy" — on top of a perfectly good reply.
+  const s = await setup({ llm: fakeLlm([says('العيادة تحل من التاسعة.')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+  const afterGreeting = s.tts.calls.length;
+
+  s.stt.final('وقتاش تحلو العيادة؟', true);
+  await s.loop.settled();
+  s.stt.final('', true); // the flush frame, milliseconds later
+  await s.loop.settled();
+
+  assert.deepEqual(
+    s.tts.calls.slice(afterGreeting).map((c) => c.text),
+    ['العيادة تحل من التاسعة.'],
+    'ONE reply — the flush frame is the same turn-end, not a second one'
+  );
+  assert.equal(s.loop.stats().turnEndsDebounced, 1);
+  assert.equal(s.loop.stats().unclearStrikes, 0, 'and the caller was never accused of mumbling');
+});
+
+test('the turn-end debounce never eats a REAL second turn', async (t) => {
+  const s = await setup({ llm: fakeLlm([says('من التاسعة.'), says('نهار السبت من التاسعة للوسط.')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+  const afterGreeting = s.tts.calls.length;
+
+  // Two real sentences, back to back inside the debounce window. New words are
+  // a new turn-end however fast they arrive; only an empty repeat is a duplicate.
+  s.stt.final('وقتاش تحلو؟', true);
+  await s.loop.settled();
+  s.stt.final('و نهار السبت؟', true);
+  await s.loop.settled();
+
+  assert.equal(s.llm.turns.length, 2);
+  assert.equal(s.loop.stats().turnEndsDebounced, 0);
+  assert.deepEqual(s.tts.calls.slice(afterGreeting).map((c) => c.text), [
+    'من التاسعة.',
+    'نهار السبت من التاسعة للوسط.',
+  ]);
+});
+
+test('CRASH REGRESSION: an energy barge-in mid-synthesis leaves ZERO unhandled rejections', async (t) => {
+  // The founder's instrumented call did not just double-answer, it DIED:
+  //   Error: barge_in  at killSpeech ← noteEnergy ← onRtp ← werift
+  //   → uncaughtException (fromPromise)
+  // Nothing may throw out of the RTP path, and an unhandled rejection is a
+  // throw with a delay. The assertion is on the process, not on the loop.
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const s = await setup({
+    llm: fakeLlm([says('عندنا مواعيد برشة هالأسبوع.'), says('باهي.')]),
+    // Call 1 is the greeting; call 2 is the reply that gets interrupted.
+    tts: stallingTts({ chunkMs: 400, stallCall: 2 }),
+  });
+  t.after(() => {
+    process.off('unhandledRejection', onUnhandled);
+    s.unsub();
+    s.loop.stop('test');
+  });
+
+  await s.loop.start();
+  await drain(s);
+  s.stt.final('شنوة المواعيد؟', true);
+  await waitFor(() => s.loop.stats().outQueue > 3, 'our own speech on the wire');
+
+  feedLoud(s, 14); // 280 ms of the caller talking over us
+  assert.equal(s.loop.stats().energyBargeIns, 1, 'the energy trigger fired');
+  assert.equal(s.loop.stats().outQueue, 0, 'and the wire went quiet');
+
+  await s.loop.settled();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(unhandled.map((e) => e?.message || String(e)), [], 'a barge-in must never end the process');
+  assert.equal(s.loop.stats().energyBargeSilent, 0, 'and it did not fire into silence');
+
+  // The call is still alive and still answers — the point of not crashing.
+  s.stt.final('طيب، شكرا.', true);
+  await s.loop.settled();
+  assert.equal(s.llm.turns.length, 2);
+});
+
+test('THE ENERGY GATE: a loud caller while the wire is SILENT is not an interruption', async (t) => {
+  const s = await setup({ llm: fakeLlm([says('باهي.')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s); // nothing of ours is queued, taped or being synthesized
+
+  feedLoud(s, 40); // 800 ms of the caller simply talking
+  const st = s.loop.stats();
+  assert.equal(st.energyBargeIns, 0, 'killing silence is noise in the one counter that matters');
+  assert.equal(st.bargeIns, 0);
+  assert.equal(st.energyBargeSilent, 0, 'and it is not even counted as a suppressed one — it never fired');
+});
+
+test('EARS ONLY: a liveEars session that answers cannot put one frame on the wire', async (t) => {
+  // Suspect #3 from the double-reply hunt. The Live session the cascade uses as
+  // ears is asked to stay silent, and a system instruction is a request: the
+  // server answers anyway. The guarantee has to be structural.
+  const live = fakeLiveClient();
+  const s = await setup({
+    config: { geminiApiKey: 'g', geminiLiveModel: 'm' },
+    llm: fakeLlm([says('أهلا بيك.')]),
+    stt: null,
+    sttFactory: (opts) => createSttChain({ ...opts, liveFactory: () => live }),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  await drain(s);
+  const before = { ...s.loop.stats().outBySrc };
+
+  // The model talks. A lot. In both modalities.
+  for (let i = 0; i < 25; i += 1) {
+    live.emit('audio', new Int16Array(320));
+    live.emit('text', 'أهلا، نجم نعاونك؟');
+  }
+  await s.loop.settled();
+  await sleep(30);
+
+  const st = s.loop.stats();
+  assert.deepEqual(st.outBySrc, before, 'not one frame, from any source, is attributable to the ears');
+  assert.equal(st.outQueue, 0);
+  assert.equal(s.llm.turns.length, 0, 'and it never became a turn either');
+  assert.equal(st.stt.leg.swallowed, 50, 'every model output was counted and dropped');
+  assert.equal(st.stt.leg.finals, 0);
+});
+
+test('EARS ONLY: the ears lend the orchestrator BOTH echo predicates, and use them', async (t) => {
+  // The echo drop itself is asserted at the adapter, where the two predicates
+  // the orchestrator lends can be held still (voicecall.cascade.chains.test.js).
+  // What matters HERE is that the orchestrator really lends them: an ears leg
+  // built without them cannot tell the agent's voice from a caller's.
+  const live = fakeLiveClient();
+  let lent = null;
+  const s = await setup({
+    config: { geminiApiKey: 'g', geminiLiveModel: 'm' },
+    llm: fakeLlm([says('العيادة تحل من التاسعة للسادسة.')]),
+    stt: null,
+    sttFactory: (opts) => {
+      lent = opts;
+      return createSttChain({ ...opts, liveFactory: () => live });
+    },
+    tts: fakeTts({ chunkMs: 600 }),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  assert.equal(typeof lent.agentSpeaking, 'function', 'only the orchestrator knows if we are talking');
+  assert.equal(typeof lent.agentSaid, 'function', 'only the orchestrator knows what we said');
+
+  live.emit('inputTranscription', 'وقتاش تحلو؟');
+  live.emit('turnComplete', true);
+  await waitFor(() => s.loop.stats().outQueue > 0, 'our own answer on the wire');
+  assert.equal(lent.agentSpeaking(), true);
+  assert.match(lent.agentSaid(), /العيادة تحل/, 'the exact sentence a speakerphone could bleed back');
 });

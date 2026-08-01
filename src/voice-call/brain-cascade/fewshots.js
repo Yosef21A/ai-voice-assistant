@@ -31,8 +31,33 @@
 // Tunisian voice, in production since V1) and from docs/P0-DERJA-SHEET.md — the
 // replies the founder graded, with the invented prices stripped out.
 
-/** How many exchanges reach a prompt. More is not better: they cost TTFT. */
-export const MAX_FEWSHOTS = 12;
+/**
+ * How many exchanges reach a prompt. More is not better: they cost TTFT and
+ * they cost tokens on EVERY turn.
+ *
+ * V7-P2.1 cut this from 12 to 6 after the first live call metered ~3.8 k input
+ * tokens per turn. Six is not a round number picked for tidiness: it is the
+ * smallest set that still SHOWS every behaviour the block exists to teach —
+ * the rhythm of a booking, the read-back recap, the "from" price, the refusal
+ * to diagnose, the warm ask-again in noise, and the one-line goodbye.
+ */
+export const MAX_FEWSHOTS = 6;
+
+/**
+ * The six Tunisian exchanges that survive the diet, by index into FEWSHOTS_TN.
+ * One rhythm exemplar, one recap, and the four that DEMONSTRATE a guardrail —
+ * because a rule the model has only been told is a rule it negotiates with.
+ */
+const TN_CORE = Object.freeze([0, 4, 6, 7, 8, 11]);
+
+/**
+ * What a LIBYAN call keeps from the Tunisian pack once its own register is in:
+ * the price guardrail and the no-diagnosis guardrail. The register rotates; the
+ * guardrails never do.
+ */
+const TN_GUARDRAILS = Object.freeze([6, 7]);
+
+const pick = (list, indexes) => indexes.map((i) => list[i]).filter(Boolean);
 
 /**
  * Tunisian register. `caller` → `agent`, in the order a real call goes.
@@ -171,9 +196,12 @@ export function pickFewshots({ lang = 'ar', clinic, patientWaId } = {}) {
   if (lang === 'fr') return [...FEWSHOTS_FR];
   if (lang === 'en') return [...FEWSHOTS_EN];
   const libyan = isLibyanRegister({ clinic, patientWaId });
-  // Libyan callers get their own register FIRST, then the Tunisian exchanges
-  // that carry the behaviours (filler, recap, guardrails) they do not repeat.
-  const list = libyan ? [...FEWSHOTS_LY, ...FEWSHOTS_TN] : [...FEWSHOTS_TN, ...FEWSHOTS_LY.slice(0, 1)];
+  // THE ROTATION IS PER REGISTER, NOT PER TURN. A Libyan caller hears the
+  // Libyan four plus the two Tunisian exchanges that carry a guardrail; a
+  // Tunisian caller hears the Tunisian core. Rotating the pack turn by turn
+  // would change the agent's voice mid-call, which is precisely the tell this
+  // pack exists to remove.
+  const list = libyan ? [...FEWSHOTS_LY, ...pick(FEWSHOTS_TN, TN_GUARDRAILS)] : pick(FEWSHOTS_TN, TN_CORE);
   return list.slice(0, MAX_FEWSHOTS);
 }
 
@@ -182,18 +210,20 @@ export function pickFewshots({ lang = 'ar', clinic, patientWaId } = {}) {
  * placeholder warning a model will happily read "[السعر المذكور…]" out loud, or
  * worse, replace it with a number it made up.
  *
+ * THE `note` FIELDS ARE FOR HUMANS, NOT FOR THE MODEL (V7-P2.1). They explain
+ * to a reader of this file WHY each exemplar is shaped the way it is; shipping
+ * them re-stated the prompt's own rules a second time, in English, on every
+ * single turn. The exemplar already demonstrates the behaviour — that is the
+ * entire premise of a few-shot pack.
+ *
  * @param {object} p  same shape as pickFewshots
  * @returns {string} '' when there is nothing to show
  */
 export function buildFewshotBlock({ lang = 'ar', clinic, patientWaId } = {}) {
   const list = pickFewshots({ lang, clinic, patientWaId });
   if (!list.length) return '';
-  const lines = list.map((ex) => {
-    const note = ex.note ? `\n  (why: ${ex.note})` : '';
-    return `CALLER: ${ex.caller}\nYOU: ${ex.agent}${note}`;
-  });
-  return `HOW YOU SOUND — copy the RHYTHM of these, never their content:
-Anything in [square brackets] is a PLACEHOLDER. Never say a bracket out loud, and never invent what goes in one: every price, time, date and reference comes from the clinic facts above or from a tool result. If you do not have the real value, say you will check.
+  const lines = list.map((ex) => `CALLER: ${ex.caller}\nYOU: ${ex.agent}`);
+  return `HOW YOU SOUND — copy the RHYTHM, never the content. [brackets] are PLACEHOLDERS: never say one out loud, never invent what goes in it — every price, time, date and reference comes from the facts above or from a tool result.
 
 ${lines.join('\n\n')}`;
 }

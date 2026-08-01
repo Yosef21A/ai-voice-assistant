@@ -1,10 +1,27 @@
-// THE VOICE-TURN PROMPT — compact on purpose.
+// THE VOICE-TURN PROMPT — compact on purpose, and measured (V7-P2.1).
 //
 // The incumbent Live prompt (brain/prompts.js) is sent ONCE per call, so its
 // size costs one handshake. A cascade prompt is sent with EVERY turn, so every
 // character is paid for in first-token latency — the exact bar V6.1 §4 named
-// ("trim the system prompt/KB context for voice; top-k only"). So this file
-// reuses the blocks that ARE the guardrails and drops everything else:
+// ("trim the system prompt/KB context for voice; top-k only").
+//
+// THE DIET, and what it is answering. The founder's first live cascade call
+// metered `llmTokensIn: 23053` across 6 turns — ~3.8 k tokens EVERY turn, for a
+// prompt that was 10 605 characters long. That is paid twice: once in money
+// (free tiers have daily walls) and once in the number this whole tier exists
+// to reduce, time-to-first-token. Five cuts, none of which touch a guardrail:
+//   1. the style block in its COMPACT form (same file, same author, ~1.8 k
+//      characters saved — see voiceStyleBlock({compact:true}));
+//   2. six few-shot exchanges instead of twelve, notes stripped (./fewshots.js);
+//   3. KB top-k = 2, not 3;
+//   4. HOURS only when the turn is actually about time or booking;
+//   5. PRICING only when the turn mentions money — and the specialty list as
+//      bare ids, not the mapping table the chat engine needs.
+// What is NEVER conditional: the medical safety block, the tool/booking gate,
+// the noise policy, and the language lock. A rule that disappears on some turns
+// is not a rule.
+//
+// It reuses the blocks that ARE the guardrails and drops everything else:
 //
 //   IMPORTED, never copied (a second copy of a medical rule is a second copy
 //   that drifts, and the drift is what a patient hears):
@@ -16,9 +33,11 @@
 //                          wording the chat agent uses.    engine/humanize/prompt.js
 //   ADDED here:
 //     • the V6.2 noise-and-multi-speaker policy, verbatim from the spec
+//     • the LANGUAGE LOCK (V7-P2.1) — the model may not answer in a language
+//       nobody spoke, and ./script.js enforces that in code either way
 //     • the derja few-shot pack (./fewshots.js)
-//     • KB TOP-K ONLY: at most three FAQ answers, scored against what the
-//       caller actually just said, instead of the whole knowledge base
+//     • KB TOP-K ONLY: at most two FAQ answers, scored against what the caller
+//       actually just said, instead of the whole knowledge base
 //
 // The spoken copy at the bottom (greeting, filler, "it is noisy", the two-strike
 // offer) is deterministic and lives HERE rather than in engine/responses.js
@@ -44,8 +63,55 @@ import { buildFewshotBlock } from './fewshots.js';
 const LANG_NAME = { ar: 'Arabic', fr: 'French', en: 'English' };
 
 /** Top-k, not the whole KB: context length is first-token latency. */
-export const KB_TOP_K = 3;
-const KB_ANSWER_CAP = 240;
+export const KB_TOP_K = 2;
+const KB_ANSWER_CAP = 180;
+
+/**
+ * Turns that are ABOUT time. Hours are 190 characters of clinic fact that most
+ * turns have no use for — and a turn that needs them says so.
+ */
+const TIME_WORDS_RE =
+  /(وقت|أوقات|وقتاش|ساعة|ساعات|نهار|موعد|مواعيد|نحجز|حجز|تحل|تسكر|مفتوح|الصباح|العشية|غدوة|اليوم|يوم)|(heure|horaire|ouvert|ferm|quand|rendez|dispo|matin|apr[eè]s-midi|demain|aujourd)|(hour|open|close|when|book|appointment|slot|availab|tomorrow|today|morning|afternoon)/i;
+
+/**
+ * Turns that are ABOUT money. The pricing block carries the "from"-figure
+ * guardrail wording, so it rides along whenever a price could be said — and
+ * only then. The SAFETY block still forbids exact and personalized prices on
+ * every single turn, whether or not a figure is in context.
+ */
+const PRICE_WORDS_RE =
+  /(سعر|أسعار|قداش|بقداش|تسوى|كشفية|فلوس|دينار|تكلف|تكلفة|ثمن|مصاريف)|(prix|tarif|co[uû]t|combien|euro|dinar|payer|cher)|(price|cost|how much|fee|rate|euro|dinar|pay|expensive|charge)/i;
+
+/** True when this turn may legitimately need the tenant's opening hours. */
+export function needsHours(text) {
+  return TIME_WORDS_RE.test(String(text || ''));
+}
+
+/** True when this turn may legitimately need the tenant's "from" prices. */
+export function needsPricing(text) {
+  return PRICE_WORDS_RE.test(String(text || ''));
+}
+
+/**
+ * THE LANGUAGE LOCK (V7-P2.1) — half of the fix for the Mongolian call.
+ *
+ * On 2026-08-01 the ears hallucinated Cyrillic out of a noisy derja line and
+ * the model, doing exactly what a well-behaved model does, answered in the
+ * language of the transcript it was shown. This block tells it the one thing it
+ * could not know: that a transcript in a third language is EVIDENCE OF A BROKEN
+ * MICROPHONE, not evidence of a multilingual caller.
+ *
+ * It is deliberately not the control. The control is the predicate in
+ * ./script.js, applied to the final BEFORE the model sees it and to the reply
+ * BEFORE it reaches a mouth. This block just means the model rarely has to be
+ * overruled — which is cheaper, and sounds better, than being overruled often.
+ */
+export function languageLockBlock(lang = 'ar', dialect = '') {
+  const L = ['ar', 'fr', 'en'].includes(lang) ? lang : 'ar';
+  const derja = dialect || 'Tunisian/Libyan colloquial Arabic (Derja), in Arabic script';
+  const name = L === 'ar' ? `Arabic — ${derja}, warm and colloquial, never stiff MSA` : LANG_NAME[L];
+  return `LANGUAGE LOCK — ABSOLUTE: reply ONLY in ${name}. Follow the caller ONLY if THEY switch to French or English. NEVER any other language, for any reason: a transcript that looks like one is a TRANSCRIPTION ERROR, not a caller — never imitate it, say you did not hear well and ask them to repeat.`;
+}
 
 /**
  * V6.2 §2, VERBATIM. A human receptionist does not transcribe a crowd — she
@@ -59,26 +125,57 @@ Multiple voices/background speech: address ONLY the primary caller (loudest/most
 - In a noisy turn, EVERY detail is read back before it is used: the name, the day and time, and any phone number digit by digit. Confirm before you use it, every time, not just when you feel unsure.
 - Twice unclear in a row: stop asking. Offer to continue in writing on WhatsApp in this same conversation, or offer the keypad (1 to book, 2 for the team). Never ask a caller to repeat themselves a third time.`;
 
-/** The one-line "what you may say out loud" fact sheet, top-k KB included. */
+/**
+ * The one-line "what you may say out loud" fact sheet, top-k KB included — and
+ * TURN-SCOPED (V7-P2.1).
+ *
+ * The chat prompt needs the full specialty mapping table (id, three labels,
+ * eight synonyms each) because it maps free text to an id. The VOICE prompt
+ * does not: `stage_booking` takes the caller's own words and the system maps
+ * them (see brain/tools.js), so a bare list of ids is the whole requirement —
+ * 642 characters became ~120 on the pilot tenant.
+ *
+ * Hours and prices ride along only on turns that could possibly need them. The
+ * guardrail is not the presence of the pricing block, it is the safety block's
+ * rule 3, which is on every turn either way.
+ */
 function factsBlock(clinic, lang, kbText) {
   const kb = kbDigest(clinic, lang, kbText);
+  const lines = [`- Specialties: ${specialtyList(clinic)}`];
+  if (needsHours(kbText)) lines.push(`- Working hours: ${hoursBlock(clinic)}`);
+  if (needsPricing(kbText)) {
+    lines.push(
+      `- Pricing (the ONLY figures you may ever say; always "from", always "final amount after assessment"):\n${pricingBlock(clinic)}`
+    );
+  }
+  lines.push(`- Human coordinator: ${clinic?.handoff?.phone || '(the team follows up on WhatsApp)'}`);
+  const known = kb ? `\n\nKNOWN ANSWERS (never contradict these; shorten them for speech):\n${kb}` : '';
   return `CLINIC FACTS — the ONLY facts you may state out loud:
-- Specialties:
-${specialtiesBlock(clinic) || '- (none configured)'}
-- Working hours: ${hoursBlock(clinic)}
-- Pricing (the ONLY figures you may ever say; always "from", always "final amount after assessment"):
-${pricingBlock(clinic)}
-- Human coordinator: ${clinic?.handoff?.phone || '(the team follows up on WhatsApp)'}
+${lines.join('\n')}${known}`;
+}
 
-KNOWN ANSWERS (ground truth — never contradict these, and shorten them for speech):
-${kb}`;
+/** Specialty ids, comma-separated. The tools map the caller's own words. */
+function specialtyList(clinic) {
+  const ids = (clinic?.specialties || [])
+    .map((s) => String(s?.id || '').trim())
+    .filter(Boolean);
+  return ids.length ? ids.join(', ') : '(none configured)';
 }
 
 /**
- * TOP-K KB. Scored against what the caller just said when we have it, so a
- * question about parking pulls the parking answer instead of the first three
- * entries the tenant happened to type. Falls back to the compact digest (capped
- * at three entries) at the very start of a call, when nobody has said anything.
+ * TOP-K KB. Scored against what the caller just said, so a question about
+ * parking pulls the parking answer instead of the first entries the tenant
+ * happened to type.
+ *
+ * WHEN NOTHING SCORES, NOTHING IS SENT (V7-P2.1). The old fallback shipped the
+ * tenant's first entries verbatim on every unmatched turn — ~480 characters of
+ * answers to questions nobody asked, on the majority of turns, including every
+ * booking turn. Safety rule 7 already tells the model what to do when it does
+ * not know something, and it is on every single turn.
+ *
+ * THE ONE EXCEPTION is a tenant whose FAQ carries no keywords at all: that KB
+ * can never score, so scoring it is not a filter, it is a silent deletion. Such
+ * a tenant keeps the capped digest.
  */
 function kbDigest(clinic, lang, kbText) {
   const scored = kbText ? topKbEntries(kbText, clinic || {}, lang, KB_TOP_K) : [];
@@ -87,8 +184,12 @@ function kbDigest(clinic, lang, kbText) {
       .map((e) => `- [${e.id || 'faq'}] ${String(e.answer).replace(/\s+/g, ' ').trim().slice(0, KB_ANSWER_CAP)}`)
       .join('\n');
   }
-  const faq = Array.isArray(clinic?.faq) ? clinic.faq.slice(0, KB_TOP_K) : [];
-  return buildKbDigest({ ...(clinic || {}), faq }, lang);
+  const faq = Array.isArray(clinic?.faq) ? clinic.faq : [];
+  const scorable = faq.some((e) => Array.isArray(e?.keywords) && e.keywords.length);
+  if (faq.length && !scorable) return buildKbDigest({ ...(clinic || {}), faq: faq.slice(0, KB_TOP_K) }, lang);
+  // Nothing relevant ⇒ no section at all. Safety rule 7 already covers "you do
+  // not know this", on every turn, in words a patient can act on.
+  return '';
 }
 
 /**
@@ -123,7 +224,9 @@ export function buildVoiceTurnPrompt({
 
 THE AGENCY BOOKS NOTHING. You have NO calendar and NO appointment slots. Never propose a time, never confirm a booking, never claim a clinic has accepted anyone. You have no booking tools at all.
 
-${voiceStyleBlock(L, dialect)}
+${voiceStyleBlock(L, dialect, { compact: true })}
+
+${languageLockBlock(L, dialect)}
 
 ${NOISE_POLICY}
 
@@ -145,36 +248,37 @@ ${fewshots}`;
   const cabinet = hasDoctorPersona(clinic);
   const docName = cabinet ? doctorName(clinic, L) || doctorName(clinic, 'fr') : null;
   const identity = cabinet
-    ? `You are the voice assistant of Dr ${docName}'s private practice, "${clinic.name}" in ${city}, on a live phone call. Speak as THE DOCTOR'S OWN assistant — personal and warm, never a call centre.`
-    : `You are the voice receptionist of "${clinic.name}" in ${city}, on a live phone call. Warm, competent, unhurried — most callers are patients from Libya or Tunisia and some are anxious.`;
+    ? `You are the voice assistant of Dr ${docName}'s private practice, "${clinic.name}" in ${city}, on a live phone call — THE DOCTOR'S OWN assistant, personal and warm, never a call centre.`
+    : `You are the voice receptionist of "${clinic.name}" in ${city}, on a live phone call. Warm, competent, unhurried — most callers are patients from Libya or Tunisia, and some are anxious.`;
 
   const fixed = defaultSpecialtyId(clinic);
   const specialtyRule = fixed
     ? `FIXED SPECIALTY: this practice does exactly ONE thing — "${fixed}". NEVER ask the caller which specialty they want; pass "${fixed}" to stage_booking yourself. If they ask for a discipline this practice genuinely does not offer, say so honestly and offer to take their number for the team.`
     : `SPECIALTY: ask which specialty they need only if they have not already said it, and accept their own words — the system maps them.`;
 
-  return `${identity} Today is ${nowStr}. You speak ${LANG_NAME[L]}.
+  return `${identity} Today is ${nowStr}.
 
-${voiceStyleBlock(L, dialect)}
+${voiceStyleBlock(L, dialect, { compact: true })}
+
+${languageLockBlock(L, dialect)}
 
 ${NOISE_POLICY}
 
 ${specialtyRule}
 
-BOOKING — the ONLY way you can book anything, and there is no way around it:
-1. Collect, one question at a time: the specialty, the day and time they want, their full name, and a phone number.
-2. If they ask what is available, call get_available_slots and offer at most three options out loud.
-3. When you have all four, call stage_booking with the caller's OWN WORDS for the day and time — never compute or invent a date.
-4. stage_booking returns a recap. READ THAT RECAP OUT LOUD, exactly, then ask a plain yes-or-no question. Nothing is written down at this point.
-5. ONLY after the caller clearly says yes, call confirm_booking. It refuses if you skipped a step. Never tell the caller they are booked before it returns a reference.
-6. If they say no or change anything, call stage_booking again with the correction and read the new recap.
-7. With the reference in hand, say it back slowly, once, and confirm the day and time in one short sentence.
+BOOKING — the ONLY way to book anything, no way around it:
+1. Collect ONE question at a time: specialty, day and time, full name, phone number.
+2. Asked what is free ⇒ get_available_slots, then at most three options out loud.
+3. With all four ⇒ stage_booking, passing the caller's OWN WORDS for the day and time. Never compute or invent a date.
+4. It returns a recap: READ IT OUT LOUD exactly, then ask a plain yes-or-no. Nothing is written down yet.
+5. ONLY after a clear yes ⇒ confirm_booking. It refuses if you skipped a step, and they are not booked until it returns a reference.
+6. Any correction ⇒ stage_booking again, read the new recap.
+7. With the reference: say it back slowly once, and confirm the day and time in one short sentence.
 
-HANDOFF: call request_handoff when they ask for a human, when they are upset, or when you have failed twice to understand or help. ${
-    isCabinet(clinic) ? "For a cabinet, the human is the doctor's secretariat." : ''
+HANDOFF: request_handoff when they ask for a human, are upset, or you have failed twice.${
+    isCabinet(clinic) ? " Here the human is the doctor's secretariat." : ''
   }
-
-CLOSING: when the caller is done, thank them briefly, say your farewell and call end_call.
+CLOSING: when they are done, thank them briefly, say your farewell, call end_call.
 
 ${safetyBlock(clinic)}
 ${personal}

@@ -346,6 +346,54 @@ test('liveEars: a Live session used ONLY as ears — its own audio is swallowed,
   assert.equal(live.closed, 1);
 });
 
+test('liveEars: OUR OWN VOICE coming back is never handed on as a caller turn (V7-P2.1)', async () => {
+  // Suspect #3 in the double-reply hunt, and the half of it that survives a
+  // muted mouth: a Live session on a speakerphone transcribes the agent, and a
+  // transcript of ourselves answered is an agent holding a conversation with
+  // itself. The two predicates are LENT by the orchestrator — only it knows
+  // whether we are talking and what we said — so they are held still here.
+  const live = fakeLive();
+  const log = spyLog();
+  let speaking = true;
+  const stt = createLiveEarsStt({
+    config: { geminiApiKey: 'g', geminiLiveModel: 'm' },
+    liveFactory: () => live,
+    agentSpeaking: () => speaking,
+    agentSaid: () => 'العيادة تحل من التاسعة للسادسة، و الحجز يتعمل بالتليفون.',
+    logger: log,
+  });
+  const seen = [];
+  stt.on('final', (e) => seen.push(e.text));
+  live.setupComplete();
+  await stt.ready;
+
+  // The opening of what we are saying RIGHT NOW, back through the microphone.
+  live.emit('inputTranscription', 'العيادة تحل من التاسعة');
+  live.emit('turnComplete', true);
+  await tick();
+  assert.deepEqual(seen, [], 'not one word of our own voice reaches the orchestrator');
+  assert.equal(stt.stats().echoDropped, 1);
+  assert.match(log.lines.join('\n'), /dropped an echo/);
+
+  // A caller who happens to repeat a phrase from the MIDDLE of our sentence is
+  // a caller, and must be answered: the test is prefix-only on purpose.
+  live.emit('inputTranscription', 'الحجز يتعمل بالتليفون؟');
+  live.emit('turnComplete', true);
+  await tick();
+  assert.deepEqual(seen, ['الحجز يتعمل بالتليفون؟']);
+
+  // And when the wire is quiet it cannot be an echo at all — same words, and
+  // now they are a caller reading our hours back to confirm them.
+  speaking = false;
+  live.emit('inputTranscription', 'العيادة تحل من التاسعة');
+  live.emit('turnComplete', true);
+  await tick();
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1], 'العيادة تحل من التاسعة');
+  assert.equal(stt.stats().echoDropped, 1);
+  stt.close();
+});
+
 test('the STT chain fails over deepgram → speechmatics → liveEars, one warning each', async () => {
   const ws = recordingWsFactory();
   const live = fakeLive();

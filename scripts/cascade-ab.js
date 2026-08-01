@@ -26,6 +26,27 @@
 // `brain.mode`, and this script shouts if the server answered on a different
 // brain than the one the row claims. A mislabelled A/B is worse than no A/B.
 //
+// ── ONE BRAIN PER CALL — A HARD RULE, NOT AN INTENTION (V7-P2.1) ────────────
+// The double-reply hunt listed "the A/B harness runs two brains on one live
+// call" as a suspect. It cannot, and here is why, so nobody has to re-derive it:
+//
+//   • This script contains NO brain. It imports exactly one thing from the app
+//     (createCodecBridge, to encode a tone) and otherwise speaks HTTP and RTP.
+//     It never constructs a loop, never opens a model socket, never synthesizes
+//     a word. Both brains live behind `startBrain()` in src/voice-call/index.js
+//     and are reachable only from a call session inside the SERVER process.
+//   • The server decides a call's brain ONCE, at pickup (`brainKindFor` caches
+//     `entry.brainKind`), and VOICE_BRAIN is read at boot — so a per-call flip
+//     is impossible without a restart. That is why the A/B is two runs.
+//   • Which means the only way a second brain could ever reach one line is a
+//     SECOND CALL sharing it. So this script refuses to start while the target
+//     app reports an active call, and asserts after every call it places that
+//     the app saw exactly one, on exactly one brain. Both are read from
+//     GET /health → `calls: { active, brains[] }`.
+//
+// A violation aborts the run and is never written to the results table: a
+// latency number measured while two calls were in flight is not a measurement.
+//
 // ── WHAT THIS MEASURES, AND WHAT IT DOES NOT ────────────────────────────────
 // The synthetic caller sends a 440 Hz tone, not Derja. So this measures
 // PLUMBING latency:
@@ -214,6 +235,67 @@ function terminateBody(callId, startedAt) {
       },
     ],
   };
+}
+
+// ── one brain per call, enforced (V7-P2.1) ──────────────────────────────────
+/**
+ * What the app says is on the phone right now.
+ * @returns {Promise<{active:number, brains:string[]}|null>} null ⇒ the app is
+ *   too old to say, which is reported rather than assumed to be fine.
+ */
+async function activeCalls() {
+  try {
+    const r = await fetch(`${APP}/health`);
+    if (!r.ok) return null;
+    const body = await r.json();
+    const c = body?.calls;
+    if (!c || typeof c.active !== 'number') return null;
+    return { active: c.active, brains: Array.isArray(c.brains) ? c.brains : [] };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE GUARD. Called before the run and after every call.
+ *
+ * `waitMs` exists because terminate is asynchronous on the server side: the
+ * webhook is answered before finish() has drained the session, so a check
+ * fired the instant a call ends would accuse the app of being busy with the
+ * call this script just hung up. It polls instead of guessing a sleep.
+ *
+ * @param {string} when  where we are, for the message
+ * @param {object} [p] { allowed, waitMs }
+ * @returns {Promise<string|null>} a violation message, or null when clean
+ */
+async function assertOneBrain(when, { allowed = 0, waitMs = 0 } = {}) {
+  let c = await activeCalls();
+  const until = Date.now() + waitMs;
+  while (c && c.active > allowed && Date.now() < until) {
+    await sleep(100);
+    c = await activeCalls();
+  }
+  if (!c) {
+    // Not fatal: an older app cannot report it. Said out loud, because a guard
+    // that silently does nothing is worse than no guard.
+    console.log(`[ab] note: ${APP}/health does not report active calls — the one-brain guard is blind (${when})`);
+    return null;
+  }
+  if (c.active > allowed) {
+    return (
+      `${c.active} call(s) already in progress on the target app (${when}) — ` +
+      `brains: ${c.brains.join(', ') || 'n/a'}. Two calls on one process is the ONE way an A/B run ` +
+      `could put two brains on a line; hang up and re-run.`
+    );
+  }
+  const distinct = [...new Set(c.brains.filter(Boolean))];
+  if (distinct.length > 1) {
+    return `the app reports ${distinct.length} different brains on ${c.active} active call(s): ${distinct.join(', ')} (${when})`;
+  }
+  if (distinct.length === 1 && distinct[0] !== MODE && distinct[0] !== 'unknown') {
+    return `the live call is on brain '${distinct[0]}' but --mode says '${MODE}' (${when})`;
+  }
+  return null;
 }
 
 async function post(url, body) {
@@ -598,6 +680,15 @@ async function main() {
     process.exit(1);
   }
 
+  // ONE BRAIN PER CALL. Refuse to add a synthetic caller to a process that is
+  // already on the phone — see the header. This runs BEFORE werift loads, so a
+  // founder mid-demo-call loses nothing but a second.
+  const busy = await assertOneBrain('before the run');
+  if (busy) {
+    console.error(`[ab] REFUSING TO RUN: ${busy}`);
+    process.exit(2);
+  }
+
   let werift;
   try {
     werift = await import('werift');
@@ -608,6 +699,7 @@ async function main() {
 
   const server = await startGraph();
   const rows = [];
+  let violation = null;
   try {
     for (let i = 1; i <= CALLS; i += 1) {
       process.stdout.write(`[ab] call ${i}/${CALLS} … `);
@@ -618,6 +710,14 @@ async function main() {
           ? `FAILED — ${row.error}`
           : `connect ${fmt(row.connectMs)} greeting ${fmt(row.greetingMs)} turn ${fmt(row.turnMs)} (${row.rtpIn} rtp in)`
       );
+      // AFTER EVERY CALL: the app must be back off the phone, and whatever it
+      // was on must have been ONE brain. A run that violated this is not a
+      // measurement, so it stops here and writes nothing.
+      violation = await assertOneBrain(`after call ${i}`, { waitMs: 5000 });
+      if (violation) {
+        console.error(`[ab] ONE-BRAIN GUARD TRIPPED: ${violation}`);
+        break;
+      }
       // A setup problem (closed clinic, wrong tenant) is the same on call 10 as
       // it was on call 1 — do not grind through nine more to prove it.
       if (row.fatal) {
@@ -639,10 +739,16 @@ async function main() {
   // the exact table the P3 go/no-go reads. The stdout warning explains why
   // nothing was written (review finding).
   const mislabelled = s.modes.length && !s.modes.includes(MODE);
-  if (WRITE && s.ok && !mislabelled) appendRow(s);
-  else if (WRITE) console.log('[ab] row NOT appended (mislabelled or zero completed calls)');
+  if (WRITE && s.ok && !mislabelled && !violation) appendRow(s);
+  else if (WRITE) {
+    console.log(
+      violation
+        ? '[ab] row NOT appended (the one-brain guard tripped — this is not a measurement)'
+        : '[ab] row NOT appended (mislabelled or zero completed calls)'
+    );
+  }
   // A run where nothing connected is a broken setup, not a slow brain.
-  process.exit(s.ok && !mislabelled ? 0 : 1);
+  process.exit(s.ok && !mislabelled && !violation ? 0 : 1);
 }
 
 main().catch((err) => {

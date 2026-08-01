@@ -27,6 +27,15 @@
 //     re-thrown untouched. Only a genuine provider problem becomes a TtsError,
 //     because a TtsError is what ends the call (see loop.js, 'tts_lost') and a
 //     caller who interrupted the agent must never hang up the phone for them.
+//  4. NOT ONE UNOBSERVED PROMISE — the bug that killed a live call (V7-P2.1).
+//     A barge-in aborts the fetch, which ERRORS the response body stream; the
+//     next `reader.cancel()` therefore returns a promise REJECTED with that
+//     stored error. It was called for its side effect inside a synchronous
+//     try/catch, which cannot catch a rejection, so the abort reason escaped as
+//     an unhandled rejection — and Node turns that into a fatal exception. The
+//     founder's log showed `Error: barge_in` with a stack pointing at
+//     killSpeech() and the server gone mid-call. Every promise this file starts
+//     and does not await is now explicitly observed (see settle()).
 //
 // Nothing here reads config, a clock or a global: `fetchImpl` is injected all
 // the way down, which is how the whole tier is tested without a socket.
@@ -74,6 +83,29 @@ export class TtsError extends Error {
 /** True for anything a provider is allowed to throw at the loop. */
 export function isTtsError(err) {
   return !!(err && (err.isTtsError === true || err instanceof TtsError));
+}
+
+/**
+ * OBSERVE A PROMISE WE ARE NOT GOING TO AWAIT.
+ *
+ * `reader.cancel()` and `res.body.cancel()` are called for their side effect —
+ * "let go of the socket" — and their result is genuinely of no interest. But a
+ * stream that was ERRORED (which is exactly what a barge-in's abort does to a
+ * fetch body) returns a REJECTED promise from cancel(), and a rejected promise
+ * nobody looks at is an unhandled rejection, which Node escalates to a fatal
+ * exception. On the founder's instrumented call that killed the server mid-call
+ * with the barge-in's own abort reason. Not interested is not the same as not
+ * looking.
+ *
+ * @param {*} maybePromise
+ */
+function settle(maybePromise) {
+  if (maybePromise && typeof maybePromise.then === 'function') {
+    maybePromise.then(
+      () => {},
+      () => {}
+    );
+  }
 }
 
 /** Bytes → Int16Array, little-endian, signed. Length MUST be even. */
@@ -320,9 +352,11 @@ export async function* streamTtsPcm({
         }
       } finally {
         // Abandoning the generator (the loop broke out on a barge-in) must not
-        // leave a socket half-read.
+        // leave a socket half-read — and must not leave the promise cancel()
+        // returns unobserved: on an aborted body it is already rejected with
+        // the abort reason, and that rejection used to end the PROCESS.
         try {
-          reader.cancel?.();
+          settle(reader.cancel?.());
         } catch {
           /* best-effort */
         }

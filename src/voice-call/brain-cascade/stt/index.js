@@ -67,6 +67,8 @@ export function createSttChain({
   fetchImpl,
   logger,
   readyTimeoutMs,
+  agentSpeaking,
+  agentSaid,
 } = {}) {
   const log = typeof logger === 'function' ? logger : () => {};
   const handlers = new Map();
@@ -123,7 +125,11 @@ export function createSttChain({
         ...common,
       });
     }
-    return createLiveEarsStt({ config, liveFactory, ...common });
+    // agentSpeaking/agentSaid go ONLY here: liveEars is the leg that listens to
+    // the same session that hears our own voice bleed back (V7-P2.1). A
+    // dedicated STT vendor gets a clean uplink and needs no echo suppression
+    // from us — handing it these would be a rule with no reason.
+    return createLiveEarsStt({ config, liveFactory, agentSpeaking, agentSaid, ...common });
   }
 
   /**

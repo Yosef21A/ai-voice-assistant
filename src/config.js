@@ -266,6 +266,28 @@ export function getConfig(overrides = {}) {
     // The barge-in budget: caller speaks over us ⇒ the wire must be quiet within
     // this. It is asserted in the suite, not merely hoped for.
     voiceCascadeBargeKillMs: Number(process.env.VOICE_CASCADE_BARGE_KILL_MS) || 150,
+    // ── energy barge-in (V7-P2.1) ──────────────────────────────────────────
+    // On the founder's first live cascade call the caller talked over the agent
+    // repeatedly and barge-in fired ZERO times in 101 s: every path to the
+    // kill-chain went through a transcript, and the transcripts were late,
+    // empty or hallucinated. So the interruption test also runs on raw caller
+    // ENERGY. Flagged because a badly tuned threshold on a noisy line would cut
+    // the agent off mid-sentence, and that must be switchable from an env var.
+    voiceCascadeEnergyBarge: process.env.VOICE_CASCADE_ENERGY_BARGE !== 'off',
+    // RMS of a decoded 16 kHz frame (0…32767) that counts as speech. PCM16
+    // silence on a mobile leg sits in the low hundreds; conversation is
+    // thousands.
+    voiceCascadeBargeRms: Number(process.env.VOICE_CASCADE_BARGE_RMS) || 1200,
+    // How long that level must be SUSTAINED before it is an interruption. A
+    // click, a cough or one loud packet does not survive 240 ms; a syllable does.
+    voiceCascadeBargeRmsMs: Number(process.env.VOICE_CASCADE_BARGE_RMS_MS) || 240,
+    // ── the double-reply fix (V7-P2.1) ─────────────────────────────────────
+    // THREE things claim to know the caller stopped: the vendor's own
+    // `speech_final`, its later `UtteranceEnd` flush frame, and our EOT timer.
+    // Two of them landing inside this window are ONE endpoint firing twice —
+    // and the second one used to speak ("sorry, it is noisy") straight over a
+    // perfectly good answer. Collapsed into a single turn-end per utterance.
+    voiceCascadeTurnEndDebounceMs: Number(process.env.VOICE_CASCADE_TURN_END_DEBOUNCE_MS) || 250,
     // ElevenLabs' free tier is 10 000 characters a MONTH (measured live from
     // /v1/user/subscription during P0) — about sixty-five spoken replies. It is
     // the #2 voice in the chain, so a Fish outage could drain the entire month

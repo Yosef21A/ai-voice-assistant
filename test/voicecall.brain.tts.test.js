@@ -499,6 +499,69 @@ test('a caller-side abort is re-thrown untouched — an interruption is not a pr
   );
 });
 
+test('V7-P2.1 CRASH REGRESSION: an aborted body whose cancel() REJECTS never kills the process', async () => {
+  // THE BUG, EXACTLY. A barge-in aborts the fetch, which ERRORS the response
+  // body stream. Per the streams spec, cancel() on an errored stream returns a
+  // promise already REJECTED with the stored error — and wire.js called it for
+  // its side effect inside a synchronous try/catch, which cannot catch a
+  // rejection. Node escalated the unhandled rejection to a fatal exception and
+  // the server died mid-call with the barge-in's own reason:
+  //
+  //   Error: barge_in
+  //     at killSpeech (orchestrator.js:670) ← noteEnergy ← onRtp ← werift
+  //
+  // This body reproduces that shape exactly. The assertion is on the PROCESS,
+  // not on the error: throwing is correct, crashing is not.
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const ac = new AbortController();
+    const abortReason = new Error('barge_in');
+    const fetchImpl = recordingFetch((c) => ({
+      status: 200,
+      body: {
+        getReader: () => ({
+          read() {
+            return new Promise((_res, rej) => {
+              const bail = () => rej(c.signal.reason || abortReason);
+              if (c.signal.aborted) return bail();
+              c.signal.addEventListener('abort', bail, { once: true });
+              // The caller interrupts us the instant we start reading.
+              queueMicrotask(() => ac.abort(abortReason));
+            });
+          },
+          // A REJECTED PROMISE THE CALLER NEVER AWAITS. This is the line.
+          cancel: () => Promise.reject(abortReason),
+        }),
+      },
+    }));
+
+    await assert.rejects(
+      () =>
+        collect(
+          streamTtsPcm({ fetchImpl, url: 'https://example.invalid/tts', provider: 'fish', signal: ac.signal })
+        ),
+      (err) => {
+        assert.equal(isTtsError(err), false, 'a barge-in is still not a provider outage');
+        return true;
+      }
+    );
+
+    // Two macrotask turns: Node fires unhandledRejection at the end of a turn,
+    // so a same-tick assertion would pass even with the bug present.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(
+      unhandled.map((e) => e?.message || String(e)),
+      [],
+      'a cancellation promise nobody observed is a dead process, not a warning'
+    );
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // 3. THE LOOP — TEXT modality end to end
 // ════════════════════════════════════════════════════════════════════════════
