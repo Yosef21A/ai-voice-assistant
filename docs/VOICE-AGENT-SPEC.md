@@ -370,3 +370,30 @@ Signature = TWO TURNS answering ONE caller utterance, sequentially. The RTP-out 
 4. **A/B harness double-running brains on a live call** — A/B must replay recorded turns offline, never run two brains on one live call.
 FIX REQUIREMENTS: (a) single-writer invariant — one speakGen owns RTP-out; any enqueue not holding the current gen is dropped and logged; (b) utterance ledger — turn-end debounced, one reply per utterance-id, asserted in tests; (c) waterfall log tags every audio-out chunk with source (cascade|speculative|live|greeting) so the next field test is attributable; (d) golden test reproducing the double-reply (fake STT emitting interim-stable + final for the same utterance; fake slow TTS) proving exactly one reply plays.
 ACCEPTANCE: 10-turn live call — exactly one reply per caller utterance, zero self-triggering, confirmed from the tagged waterfall.
+
+## V8 — MONDAY DEMO WAR PLAN (founder sells in person Monday; this is the ONLY active voice work order until then)
+Verdict from war-room code audit + leader research (Sesame/GPT-Live/ElevenLabs/Vapi/Retell playbooks, sourced in war-room log): pipeline bones are correct (deterministic gate, guaranteed filler, language lock = leader consensus) but the turn system is antique and one open bug is demo-fatal. Real measured turns: VAD 702–1442ms + LLM ~850ms + TTS ~570ms ≈ 2.2–2.5s felt with high jitter. Target for Monday: ≤1.3s felt, ZERO double-replies, interruption-proof. Execute in THIS order — stop gold-plating anything else:
+
+### D1 — THE BLOCKER (do first, nothing else until green): implement V7-P2.1
+Single-writer speakGen on RTP-out · utterance ledger (ONE reply per utterance-id, turn-end debounced across STT-final vs endpointer) · liveEars muzzled ears-only with assertion · A/B harness can NEVER run two brains on a live call. Golden test reproduces the double reply and proves one plays. This bug alone loses Monday.
+
+### D2 — LATENCY: cut the wait, kill the jitter
+1. Endpointing: default end-of-speech ~400ms (from measured 700-1400) — EXCEPT data-capture states (phone/name/date collection) which switch to PATIENT mode ~900ms (callers pause mid-digit; leaders all do state-dependent eagerness). State comes from the booking gate — we know when we're capturing.
+2. Jitter: log and clamp — if TTFT variance persists, pin provider order (skip cold providers), pre-warm connections per call (open Fish WS + LLM keepalive at call accept, not first turn).
+3. Filler threshold 700ms stays; ADD guaranteed request-start lines on EVERY tool/executor call ("ثانية نشوفلك الرندي فو…") — silence during lookups is the #1 robot tell (leader consensus).
+
+### D3 — INTERRUPTION-PROOF (the Tunisian caller reality)
+1. Barge-in word-gate: RMS trigger alone is banned — require ~2+ words of real speech (STT interim confirms) before yielding; EXCEPT emergency keywords = instant yield (numWords 0).
+2. Backchannel ignore-list: أيوا · تمام · باهي · مم · هاو · oui · ok · mm-hmm — these NEVER stop the agent mid-sentence.
+3. Never end a turn on a fragment; on caller silence 10-15s → ONE warm check-in → polite goodbye + WhatsApp follow-up (existing degrade path).
+
+### D4 — HUMAN POLISH (prompt-level, 2h, from the leader playbook)
+Acknowledge→answer→ONE question per turn (end every turn with the question) · anti-repetition rule (never same phrasing twice in a call) · restrained disfluency vocabulary for clinical warmth ("نشوف…", "ثانية برك", "أممم" sparingly — 1-2 per turn max, never on emergency/confirmation turns) · spoken-forms rule (digits read as words, dates spoken naturally) · read-backs ONLY for exact data · pace: slightly slower TTS rate for elderly-sounding callers if provider supports rate.
+
+### D5 — DEMO-DAY PROTOCOL (docs/DEMO-DAY.md — write it)
+1. Pre-visit ritual (30 min before EVERY visit): fresh token if >20h old, tunnel up, webhook re-pointed, subscribed_apps re-POSTed, ONE test call + one test chat message. Scripted checklist, single command where possible (`npm run demo:preflight` — build it: checks token validity, tunnel health, subscription, prints GO/NO-GO).
+2. Demo runbook: chat demo FIRST (bulletproof: voice note → booking → owner alert on the doctor's own eyes), THEN the voice call as the closer — founder places the call on speaker, follows the rehearsed 90-second flow (greeting → book cardiology Thursday morning → spell-back → confirmed + WhatsApp summary appears live). NEVER hand the phone to the doctor for a free-form first call.
+3. Fallback chain: voice fails → "let me show you the recording" (founder records tonight's best call as backup video) → chat demo carries the meeting. The pitch is the SYSTEM (chat+voice+dashboard), not one channel.
+4. Rehearse: founder runs the full demo flow 5× before Monday; every failure feeds a fix.
+
+### Acceptance (Sunday night): 10 rehearsal calls — zero double-replies, felt latency ≤1.3s median with no turn >2s, agent survives أيوا/تمام backchannels without stopping, booking lands with correct spell-back, preflight script prints GO. Then STOP CODING and sleep.
