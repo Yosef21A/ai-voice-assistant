@@ -73,6 +73,35 @@ export function availableLlm(config = {}) {
   return LLM_ORDER.filter((n) => out.includes(n));
 }
 
+/** Longest slice of a vendor's own error body we put in a rotation log line. */
+const MAX_LOGGED_DETAIL = 200;
+
+/**
+ * THE VENDOR'S OWN WORDS, safe to log.
+ *
+ * A rotation line that says only `returned HTTP 400` is the difference between
+ * "the model rejected our request payload, here is the field" and a night of
+ * guessing — and it cost exactly that on a rehearsal call, where both Gemini
+ * links 400'd, `classic` took the call sticky, and the caller was answered with
+ * «ما فهمتش قصدك» for the rest of the booking. http.js already captures the
+ * body onto the error; this only prints it.
+ *
+ * `key=` is redacted because the Gemini key rides in the URL (geminiText.js) and
+ * a vendor is entitled to echo the request back inside its error.
+ *
+ * @param {*} err
+ * @returns {string} '' or ': <detail>'
+ */
+export function describeLlmDetail(err) {
+  const raw = err?.detail;
+  if (!raw) return '';
+  const flat = String(raw)
+    .replace(/key=[^&"'\s]+/gi, 'key=REDACTED')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return flat ? `: ${flat.slice(0, MAX_LOGGED_DETAIL)}` : '';
+}
+
 /**
  * @param {object} p
  * @param {object} p.config
@@ -342,8 +371,15 @@ export function createLlmChain({
         hadRealFailure = true;
         if (!isLlmError(res.err) || isRotatable(res.err) || i < links.length - 1) {
           counts.rotations += 1;
+          // THE VENDOR'S OWN WORDS, not just the status. `HTTP 400` alone is
+          // undiagnosable in the field: it was already the whole log line when a
+          // live rehearsal call rotated both Gemini links onto `classic` and
+          // answered the rest of the booking with «ما فهمتش قصدك». The detail is
+          // captured on the LlmError by http.js and was simply never printed.
+          // `key=` is redacted because the Gemini key rides in the URL and a
+          // vendor is free to echo the request back at us.
           log(
-            `[voice-cascade] LLM ${name} failed (${res.err?.message || res.err}) — rotating to ` +
+            `[voice-cascade] LLM ${name} failed (${res.err?.message || res.err}${describeLlmDetail(res.err)}) — rotating to ` +
               `${links[i + 1] || 'nothing left'}`
           );
           continue;

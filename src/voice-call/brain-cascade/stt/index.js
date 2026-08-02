@@ -95,7 +95,12 @@ export function createSttChain({
   /** Caller audio captured before any leg was ready. */
   let preReady = [];
   let preReadyCount = 0;
-  const counts = { interims: 0, finals: 0, failovers: 0, samplesIn: 0 };
+  const counts = { interims: 0, finals: 0, failovers: 0, relights: 0, samplesIn: 0 };
+  /**
+   * Adapters that have already been given their ONE second chance (see next()).
+   * Per chain, so per call: a vendor that dies twice on one call is out.
+   */
+  const relit = new Set();
   let resolveReady;
   const readyPromise = new Promise((res) => {
     resolveReady = res;
@@ -156,6 +161,10 @@ export function createSttChain({
     // Drop the dead leg BEFORE building the next one: a socket mid-death can
     // still emit, and two legs transcribing one caller is two answers.
     const dying = current;
+    // Captured before it is cleared: a leg that REACHED ready and then died is a
+    // different event from one that never connected, and only the first earns a
+    // relight below.
+    const dyingWasReady = legReady;
     current = null;
     // The replacement has a handshake to finish. Until it does, caller audio is
     // held rather than thrown at a socket that is not listening yet.
@@ -167,28 +176,57 @@ export function createSttChain({
     }
 
     index += 1;
+    /** True ⇒ we are rebuilding the SAME adapter, not moving down the order. */
+    let relighting = false;
     if (index >= order.length) {
-      provider = null;
-      log(
-        `[voice-cascade] STT chain exhausted after ${order.join(' → ') || '(no adapters configured)'}` +
-          `${why ? ` — last failure: ${why}` : ''}. The call degrades to the WhatsApp thread.`
-      );
-      if (!ready) {
-        ready = true;
-        resolveReady(null);
+      // ONE RELIGHT OF A LEG THAT WAS ACTUALLY WORKING (V8 self-test, 2026-08-02).
+      //
+      // The last rung has nowhere to fail over TO, so its death used to end the
+      // call: the caller is hung up on and apologised to on WhatsApp. On the
+      // founder's stack the last rung is liveEars — the ONLY rung, since there is
+      // no Deepgram key — and it died 20 s into a rehearsal booking with a
+      // vendor-side `1011 Internal error encountered`, i.e. a blip, on a session
+      // that had been transcribing perfectly. Losing a demo call to somebody
+      // else's transient 500 is not a policy, it is a missing retry.
+      //
+      // Bounded three ways, because a reconnect loop against a vendor that is
+      // genuinely down would be worse than the bug: only a leg that reached
+      // `ready` (a connect failure still just rotates), only ONCE per adapter,
+      // and only per call. A second death exhausts the chain exactly as before.
+      const last = order[order.length - 1];
+      if (last && dyingWasReady && !relit.has(last)) {
+        relit.add(last);
+        counts.relights += 1;
+        relighting = true;
+        index = order.length - 1;
+      } else {
+        provider = null;
+        log(
+          `[voice-cascade] STT chain exhausted after ${order.join(' → ') || '(no adapters configured)'}` +
+            `${why ? ` — last failure: ${why}` : ''}. The call degrades to the WhatsApp thread.`
+        );
+        if (!ready) {
+          ready = true;
+          resolveReady(null);
+        }
+        // Asynchronously: when the chain is empty from the start this runs inside
+        // the constructor, and a subscriber that has not been attached yet cannot
+        // hear an event. The orchestrator is covered either way (it also awaits
+        // `ready`), but an emitter that fires before anyone can listen is a trap.
+        const err = new Error(why || 'no STT adapter available');
+        const t = setTimeout(() => emit('lost', err), 0);
+        t.unref?.();
+        return;
       }
-      // Asynchronously: when the chain is empty from the start this runs inside
-      // the constructor, and a subscriber that has not been attached yet cannot
-      // hear an event. The orchestrator is covered either way (it also awaits
-      // `ready`), but an emitter that fires before anyone can listen is a trap.
-      const err = new Error(why || 'no STT adapter available');
-      const t = setTimeout(() => emit('lost', err), 0);
-      t.unref?.();
-      return;
     }
 
     const name = order[index];
-    if (why) {
+    if (relighting) {
+      log(
+        `[voice-cascade] STT ${name} died mid-call (${why || 'no reason given'}) — relighting it ONCE ` +
+          `rather than losing the call; caller audio is held until it is back`
+      );
+    } else if (why) {
       counts.failovers += 1;
       log(`[voice-cascade] STT ${order[index - 1]} failed (${why}) — failing over to ${name}`);
     }
@@ -218,9 +256,19 @@ export function createSttChain({
       if (closed || current !== leg || !ready) return;
       next(err?.message || 'socket error');
     });
-    leg.on('close', () => {
+    leg.on('close', (info) => {
       if (closed || current !== leg) return;
-      next('socket closed');
+      // WITH THE CODE, ALWAYS. A bare 'socket closed' is what a mid-call ears
+      // death looked like in the log, and it is not a diagnosis: 1008 (policy /
+      // quota), 1011 (server error) and a clean 1000 are three different
+      // incidents with three different fixes, and this line is the only place
+      // the difference is ever visible. Seen on a V8 rehearsal call, where
+      // liveEars died 20 s in and the whole call degraded to WhatsApp.
+      const code = info?.code ?? null;
+      const reason = String(info?.reason || '').trim();
+      next(
+        `socket closed${code != null ? ` (code ${code}${reason ? `: ${reason.slice(0, 120)}` : ''})` : ''}`
+      );
     });
 
     Promise.resolve(leg.ready).then(

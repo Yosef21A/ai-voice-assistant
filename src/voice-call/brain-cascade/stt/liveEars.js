@@ -112,7 +112,7 @@ export function createLiveEarsStt({
   const saidByUs = typeof agentSaid === 'function' ? agentSaid : () => '';
   const capturing = typeof dataCapture === 'function' ? dataCapture : () => false;
   const handlers = new Map();
-  const counts = { interims: 0, finals: 0, swallowed: 0, echoDropped: 0, dupSuppressed: 0, patientIdles: 0 };
+  const counts = { interims: 0, finals: 0, swallowed: 0, echoDropped: 0, dupSuppressed: 0, patientIdles: 0, vendorEndsOverruled: 0 };
   let buffer = '';
   let idleTimer = null;
   let closed = false;
@@ -127,6 +127,12 @@ export function createLiveEarsStt({
    * is one final; anything else answers the caller twice.
    */
   let utteranceOpen = false;
+  /**
+   * Has this utterance already been held open through one vendor turn-end?
+   * Declared here rather than beside vendorTurnEnd() so it can never be in the
+   * temporal dead zone for a handler that fires while the session is being built.
+   */
+  let overruledThisUtterance = false;
 
   function emit(event, payload) {
     for (const cb of [...(handlers.get(event) || [])]) {
@@ -159,6 +165,8 @@ export function createLiveEarsStt({
       return;
     }
     utteranceOpen = false;
+    // The next utterance gets its own single hold (see vendorTurnEnd).
+    overruledThisUtterance = false;
     // OUR OWN VOICE, COMING BACK. Gemini transcribes whatever it hears, and on
     // a speakerphone that includes the agent. A final that is the opening of
     // what we are saying right now is echo, not a caller, and answering it
@@ -211,14 +219,42 @@ export function createLiveEarsStt({
     emit('interim', { text: buffer });
     armIdle();
   });
-  // The server started answering ⇒ its VAD decided the caller stopped. That is
-  // the closest thing this transport has to `speech_final`, and it is free.
-  live.on('turnComplete', () => {
-    if (!closed) flushFinal(true);
-  });
-  live.on('generationComplete', () => {
-    if (!closed) flushFinal(true);
-  });
+  /**
+   * The server started answering ⇒ its VAD decided the caller stopped. That is
+   * the closest thing this transport has to `speech_final`, and it is free.
+   *
+   * AND IN A DATA-CAPTURE STATE IT IS OVERRULED — the half of V8-D2 §1 that was
+   * missing here. The spec's rule for the Deepgram leg is that the vendor is the
+   * FLOOR signal and our own state-dependent timer decides, so `speech_final` is
+   * deliberately ignored while a phone number, a name or a date is being
+   * collected. liveEars was lent the same state (armIdle() below uses
+   * `patientIdleMs`) but this handler bypassed it completely: Gemini Live's VAD
+   * ended the turn and the patient timer never got a vote.
+   *
+   * Measured cost of that gap, V8 self-test 2026-08-02: «واحد وعشرين تسعة
+   * وعشرين» + a human-sized pause + «أربعة تسعة ستة سبعة» arrived as TWO
+   * utterances — «21 29» and «49 6 7» — so `stage_booking` saw half a number,
+   * refused for `missing_contact`, and the booking could not land. On the
+   * founder's stack liveEars is the ONLY ears, so this is every booking call.
+   *
+   * Bounded to ONE hold per utterance: the pause in the middle of a number is
+   * one pause, and a caller who trickles must not be able to hold a turn open
+   * indefinitely. A held final is never a LOST final — armIdle() always ends in
+   * flushFinal(true), so the worst case is `patientIdleMs` of extra patience.
+   */
+  function vendorTurnEnd() {
+    if (closed) return;
+    if (utteranceOpen && capturing() && !overruledThisUtterance) {
+      overruledThisUtterance = true;
+      counts.vendorEndsOverruled += 1;
+      log('[voice-cascade] liveEars: holding the turn open through the vendor VAD — the caller is mid-answer');
+      armIdle();
+      return;
+    }
+    flushFinal(true);
+  }
+  live.on('turnComplete', vendorTurnEnd);
+  live.on('generationComplete', vendorTurnEnd);
   // SWALLOWED. Counted so "it is speaking over us" is a number in stats()
   // rather than an argument, but never forwarded anywhere.
   live.on('audio', () => {

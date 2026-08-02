@@ -321,7 +321,8 @@ BOOKING — the only way to book:
 HANDOFF: request_handoff for a human, an upset caller, or two failed tries.${
     isCabinet(clinic) ? ' Here that is the secretariat.' : ''
   }
-CLOSING: when done, thank them, say your farewell, call end_call.
+CLOSING: thank them, ONE farewell, then ALWAYS call end_call.
+NAME: say «${clinic.name}» EXACTLY.
 
 ${safetyBlock(clinic)}
 ${personal}

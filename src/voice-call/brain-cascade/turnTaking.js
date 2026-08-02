@@ -64,6 +64,10 @@ export function countWords(text) {
  * «نعم» and «صح» are in here and they are ALSO how a caller says yes to a
  * booking recap. That contradiction is resolved by the caller of this function,
  * not by the list: see the staged/data-capture exception in the orchestrator.
+ *
+ * The list is matched against a TRANSCRIPT, so it carries every spelling a
+ * transcriber actually produces for one word — including the Latin ones, which
+ * liveEars emits for derja and which used to walk straight past this set.
  */
 export const BACKCHANNELS = Object.freeze(
   new Set([
@@ -87,6 +91,29 @@ export const BACKCHANNELS = Object.freeze(
     'اها',
     'اوكي',
     'اوك',
+    // ── derja, WRITTEN IN LATIN — and this is not a nicety ──────────────────
+    // liveEars (a Gemini Live session used as ears) transcribes derja into
+    // whichever script it feels like: on a V8 rehearsal call «باهي» came back as
+    // "Bahi", missed the ignore-list entirely, and became a full LLM turn — the
+    // exact interruption D3 §2 exists to prevent. The Arabic spellings above
+    // were never enough on their own, because the ignore-list is matched against
+    // a TRANSCRIPT, not against what the caller's mouth did. These are the Latin
+    // forms of entries that are already on this list and nothing else: no new
+    // word becomes a backchannel here, only a second spelling of an old one.
+    'bahi',
+    'behi',
+    'baheh',
+    'tayeb',
+    'taib',
+    'tamem',
+    'tamam',
+    'aywa',
+    'ayweh',
+    'aywah',
+    'naam',
+    'nam',
+    'sahh',
+    'haw',
     // ── French ──
     'oui',
     'ouais',

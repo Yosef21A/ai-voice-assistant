@@ -95,7 +95,22 @@ export function toGeminiContents(messages = []) {
     const parts = [];
     if (m.text) parts.push({ text: String(m.text) });
     for (const call of m.toolCalls || []) {
-      parts.push({ functionCall: { name: call.name, args: call.args || {} } });
+      const part = { functionCall: { name: call.name, args: call.args || {} } };
+      // THE SECOND API TRAP, and it only fires on a TOOL round — which is to say
+      // on every booking. Gemini 3.x hands back an opaque `thoughtSignature`
+      // alongside each functionCall part and REQUIRES it echoed in the follow-up
+      // request that carries the functionResponse:
+      //
+      //   HTTP 400 — "Function call is missing a thought_signature in
+      //               functionCall parts. This is required for tools to work"
+      //
+      // Rebuilding the part from name+args alone (what this did) therefore 400'd
+      // the round-2 request of the first tool-calling turn of every call, both
+      // Gemini links in a row, and `classic` then took the call sticky and
+      // answered the rest of the booking with «ما فهمتش قصدك». Caught by the V8
+      // self-test on a real rehearsal call, 2026-08-02.
+      if (call.thoughtSignature) part.thoughtSignature = call.thoughtSignature;
+      parts.push(part);
     }
     if (!parts.length) continue;
     out.push({ role: m.role === 'assistant' ? 'model' : 'user', parts });
@@ -230,7 +245,17 @@ export function createGeminiTextLlm({
           if (fc?.name) {
             yield {
               type: 'toolCall',
-              call: { id: fc.id || `${fc.name}-${Date.now()}`, name: fc.name, args: fc.args || {} },
+              call: {
+                id: fc.id || `${fc.name}-${Date.now()}`,
+                name: fc.name,
+                args: fc.args || {},
+                // Opaque, and it MUST come back on the next request — see the
+                // trap documented in toGeminiContents(). It rides on the neutral
+                // call object, which the orchestrator pushes into history
+                // unchanged; the other links simply ignore a field they do not
+                // read.
+                thoughtSignature: part.thoughtSignature || null,
+              },
             };
           }
         }
