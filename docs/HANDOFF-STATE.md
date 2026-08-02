@@ -76,9 +76,11 @@ equivalent green). TWO agent session-limit deaths recovered by hand-finishing
 (Speechmatics tests, V8 regressions — always audit the tree before assuming
 loss). LIVE: line on V8 HEAD, cascade mode, fresh token (~1h class!), tunnel
 `https://incident-toward-amp-remain.trycloudflare.com/webhook` console-set by
-founder. scripts/call-selftest.js (speech-driven rehearsal robot, Fish-
-synthesized derja caller vs isolated app) building/running — results land in
-docs/V8-SELFTEST.md. clinics.json carries UNCOMMITTED 24/7 weekend test hours
+founder. scripts/call-selftest.js (rehearsal robot) RAN: 9 real bugs found+fixed incl.
+the Gemini 3.x thoughtSignature demo-killer; deterministic confirm-on-consent
+and farewell hang-up backstop shipped (844a6e2). 5/6 bars PASS, booking AMBER
+— every remaining miss is liveEars STT. DEEPGRAM ar-TN VERIFIED available on
+nova-3: the key is a drop-in, no code change. Suites 359 cascade+brain pass. clinics.json carries UNCOMMITTED 24/7 weekend test hours
 (the 6 dirty-suite fails) — revert before production. Founder actions open:
 live ear-test + 10 rehearsal calls, Deepgram/Cerebras/Groq signups, derja
 sheet grading, System-User permanent token before Monday.

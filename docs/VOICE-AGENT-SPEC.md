@@ -526,3 +526,26 @@ Acknowledge→answer→ONE question per turn (end every turn with the question) 
 4. Rehearse: founder runs the full demo flow 5× before Monday; every failure feeds a fix.
 
 ### Acceptance (Sunday night): 10 rehearsal calls — zero double-replies, felt latency ≤1.3s median with no turn >2s, agent survives أيوا/تمام backchannels without stopping, booking lands with correct spell-back, preflight script prints GO. Then STOP CODING and sleep.
+
+### V8 STATUS — SHIPPED (2026-08-02), self-tested with REAL calls
+D1 `6e1a2c9` · D2+D3 `1642dfe` · D4 `6e038e9` · D5 `691394e` · self-test + 6 bugs `7b75903`
+· confirm-after-yes `72e64b7` · fragment/farewell fixes `8038081` · deterministic confirm `844a6e2`.
+
+**The rehearsal robot** (`scripts/call-selftest.js`) drives an isolated app with a Fish-synthesized
+derja caller over real werift RTP and scores from the tagged waterfall. It found what no fake-provider
+test could, including the demo-killer: Gemini 3.x requires the opaque `thoughtSignature` echoed back
+with tool results — without it EVERY booking call 400'd on its first tool call and silently fell to the
+scripted voice. Nine real bugs total, each with a regression.
+
+**Acceptance (real calls):** zero double-replies ✅ · felt median 955–1122 ms ✅ · backchannel-proof ✅
+· correction interrupts ✅ · silence ladder ✅ · hang-up ≤10 s ✅ (8.9 s, backstop) · **booking AMBER**
+— the deterministic path lands it (`callConfirmed` speaks the ref), the remaining misses are liveEars
+STT: digits split across finals, the caller's goodbye sometimes never transcribed, «القلب»→«الحشيشة».
+
+**The gate got STRONGER, not looser.** `confirm_booking` now fires from code on three machine-checked
+conditions — staged (deterministic extractors validated it) + the recap's last RTP frame reached the
+socket + `detectYesNo()==='yes'`. Old evidence for "the caller heard it" was a prompt instruction; new
+evidence is a frame on the wire. Model compliance is off the critical path; `tools.js` refusals untouched.
+
+**Blocked on one signup:** Deepgram `nova-3` + `ar-TN` (VERIFIED 2026-08-02 in Deepgram's language docs
+— the adapter already requests exactly that). Every open booking failure traces to the borrowed ears.
