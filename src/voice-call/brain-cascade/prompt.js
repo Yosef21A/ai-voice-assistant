@@ -21,6 +21,22 @@
 // the noise policy, and the language lock. A rule that disappears on some turns
 // is not a rule.
 //
+// THE HONEST CEILING (V8-D4 review). "Under 6000 chars" is the diet's target
+// for the COMMON case — a plain booking turn, where hours/pricing/KB are not
+// triggered. It is NOT the ceiling for every turn: a caller who asks about
+// hours AND price AND something the tenant's FAQ actually answers pulls all
+// three conditional blocks at once, and on a tenant with several specialties
+// (data/clinics.json: el-amen-sousse, five specialties + a five-entry FAQ)
+// that measures ~6.9 k characters. Every byte of that delta is either tenant
+// DATA (hours table, price table, FAQ text — not this file's prose to cut) or
+// the pricing wrapper's own guardrail wording ("the ONLY figures you may ever
+// say" — imported, never copied, see above). Trimming founder-authored prose
+// further would not close a ~1 k-character gap and would cost the D4 rules
+// this tier exists to add. So the diet target and the true worst case are
+// both asserted, honestly, in test/voicecall.cascade.prompt.test.js — a plain
+// booking turn stays under 6000, and the worst realistic turn is bounded
+// (documented, not silently exceeded) rather than pretended away.
+//
 // It reuses the blocks that ARE the guardrails and drops everything else:
 //
 //   IMPORTED, never copied (a second copy of a medical rule is a second copy
@@ -124,6 +140,29 @@ export const NOISE_POLICY = `NOISE AND MULTIPLE VOICES — behave like a person,
 Multiple voices/background speech: address ONLY the primary caller (loudest/most consistent voice, the one conversing with you). NEVER answer background conversations. If overlap makes the request unclear, say so warmly and ask the caller to repeat — in their dialect ('سامحني، فما حس برشة — تنجم تعاود آخر حاجة؟').
 - In a noisy turn, EVERY detail is read back before it is used: the name, the day and time, and any phone number digit by digit. Confirm before you use it, every time, not just when you feel unsure.
 - Twice unclear in a row: stop asking. Offer to continue in writing on WhatsApp in this same conversation, or offer the keypad (1 to book, 2 for the team). Never ask a caller to repeat themselves a third time.`;
+
+/**
+ * V8-D4, founder law — human polish, sent on EVERY turn (never conditional,
+ * same doctrine as NOISE_POLICY above). Five rules the imported voiceStyleBlock
+ * (compact form) does not already cover on its own:
+ *   1. turn SHAPE, not just a question count — acknowledge, answer, end on it;
+ *   2. anti-repetition — a phrase said twice in one call is the fastest "robot"
+ *      tell, worse than a wrong word;
+ *   3. disfluency has a DOSE and an EXCEPTION — the emergency script and a
+ *      yes/no confirmation are read straight, never seasoned;
+ *   4. read-backs are for facts that must be exactly right, not for opinions
+ *      or general statements — over-confirming is its own tell;
+ *   5. pace — no rate control exists yet (V5-T2), so this is prompt-only.
+ * (Spoken-form numbers are already law in voiceStyleBlock — "say numbers,
+ * dates and times the way a person says them out loud" — so it is not
+ * repeated here; a rule stated twice is a rule that can drift.)
+ */
+export const HUMAN_POLISH_POLICY = `HUMAN POLISH — every turn:
+- Acknowledge, answer, END on exactly ONE question — never a flat statement.
+- NEVER reuse a sentence, backchannel or filler twice in one call — vary it.
+- Disfluency («نشوف…» / «ثانية برك» / «أممم»): 1-2 per turn max, NEVER in the emergency script or a confirmation turn — those are said straight.
+- Read back ONLY exact data (name, date, phone) — never a general statement.
+- Elderly-sounding caller: slow down, keep it simple.`;
 
 /**
  * The one-line "what you may say out loud" fact sheet, top-k KB included — and
@@ -230,6 +269,8 @@ ${languageLockBlock(L, dialect)}
 
 ${NOISE_POLICY}
 
+${HUMAN_POLISH_POLICY}
+
 YOUR GOAL IS QUALIFICATION, and it ends in ONE tool call. Conversationally, never as an interrogation, find out: (1) the treatment they want, (2) where they are travelling from, (3) roughly when they can travel. The number they are calling from is already on file.
 
 THE ONE THING YOU MUST NOT SKIP: as soon as you have the treatment, the origin and a rough travel window, CALL capture_lead. Only AFTER it returns may you promise that the team finds the right clinic and comes back with an offer today. Promising before capturing means nobody on the team ever hears about this call.
@@ -248,13 +289,13 @@ ${fewshots}`;
   const cabinet = hasDoctorPersona(clinic);
   const docName = cabinet ? doctorName(clinic, L) || doctorName(clinic, 'fr') : null;
   const identity = cabinet
-    ? `You are the voice assistant of Dr ${docName}'s private practice, "${clinic.name}" in ${city}, on a live phone call — THE DOCTOR'S OWN assistant, personal and warm, never a call centre.`
-    : `You are the voice receptionist of "${clinic.name}" in ${city}, on a live phone call. Warm, competent, unhurried — most callers are patients from Libya or Tunisia, and some are anxious.`;
+    ? `You are Dr ${docName}'s own voice assistant at "${clinic.name}" in ${city} — personal and warm, never a call centre.`
+    : `You are the voice receptionist of "${clinic.name}" in ${city}, on a live phone call — warm and unhurried; most callers are Libyan or Tunisian patients, some anxious.`;
 
   const fixed = defaultSpecialtyId(clinic);
   const specialtyRule = fixed
-    ? `FIXED SPECIALTY: this practice does exactly ONE thing — "${fixed}". NEVER ask the caller which specialty they want; pass "${fixed}" to stage_booking yourself. If they ask for a discipline this practice genuinely does not offer, say so honestly and offer to take their number for the team.`
-    : `SPECIALTY: ask which specialty they need only if they have not already said it, and accept their own words — the system maps them.`;
+    ? `FIXED SPECIALTY: this practice does exactly ONE thing — "${fixed}". NEVER ask which specialty; pass "${fixed}" to stage_booking yourself. If they want a different discipline, say so and offer to take their number.`
+    : `SPECIALTY: ask only if they have not already said it; accept their own words — the system maps them.`;
 
   return `${identity} Today is ${nowStr}.
 
@@ -264,21 +305,23 @@ ${languageLockBlock(L, dialect)}
 
 ${NOISE_POLICY}
 
+${HUMAN_POLISH_POLICY}
+
 ${specialtyRule}
 
-BOOKING — the ONLY way to book anything, no way around it:
-1. Collect ONE question at a time: specialty, day and time, full name, phone number.
-2. Asked what is free ⇒ get_available_slots, then at most three options out loud.
-3. With all four ⇒ stage_booking, passing the caller's OWN WORDS for the day and time. Never compute or invent a date.
-4. It returns a recap: READ IT OUT LOUD exactly, then ask a plain yes-or-no. Nothing is written down yet.
-5. ONLY after a clear yes ⇒ confirm_booking. It refuses if you skipped a step, and they are not booked until it returns a reference.
+BOOKING — the only way to book:
+1. One question at a time: specialty, day/time, full name, phone.
+2. What's free ⇒ get_available_slots, at most three options aloud.
+3. All four collected ⇒ stage_booking with the caller's OWN WORDS for day/time — never invent a date.
+4. Returns a recap: READ IT OUT LOUD, then ask yes-or-no. Nothing saved yet.
+5. Clear yes ONLY ⇒ confirm_booking; refuses a skipped step; not booked until it returns a reference.
 6. Any correction ⇒ stage_booking again, read the new recap.
-7. With the reference: say it back slowly once, and confirm the day and time in one short sentence.
+7. With the reference: say it back slowly once, confirm day/time in one short sentence.
 
-HANDOFF: request_handoff when they ask for a human, are upset, or you have failed twice.${
-    isCabinet(clinic) ? " Here the human is the doctor's secretariat." : ''
+HANDOFF: request_handoff for a human, an upset caller, or two failed tries.${
+    isCabinet(clinic) ? ' Here that is the secretariat.' : ''
   }
-CLOSING: when they are done, thank them briefly, say your farewell, call end_call.
+CLOSING: when done, thank them, say your farewell, call end_call.
 
 ${safetyBlock(clinic)}
 ${personal}
@@ -361,6 +404,66 @@ export function buildTwoStrikeText(lang = 'ar') {
   if (lang === 'fr') return "La ligne est difficile. Je vous écris sur WhatsApp et on continue par message ?";
   if (lang === 'en') return "The line is rough. Shall I message you on WhatsApp and we continue in writing?";
   return 'الخط ماشي صعيب. نبعثلك رسالة في الواتساب ونكملو كتابة؟';
+}
+
+/**
+ * THE REQUEST-START LINE (V8-D2 §4). Spoken BEFORE every tool the agent runs,
+ * not only when the brain is late.
+ *
+ * The 700 ms filler covers a slow MODEL. It does not cover a slow LOOKUP: by
+ * the time the model has decided to call `get_available_slots` it has usually
+ * already produced its first token, the filler timer is cleared, and the caller
+ * then hears nothing at all while the executor works. Silence during a lookup
+ * is the #1 robot tell in every leader's playbook, and it is the one gap this
+ * pipeline had left.
+ *
+ * THREE PHRASINGS, ROTATED (V8-D4's anti-repetition rule, applied where it is
+ * cheapest to obey): a receptionist does not say the same four words every time
+ * she opens the diary. Deterministic — a model never writes this line, because
+ * a line that covers model latency cannot be generated by the model.
+ */
+export const TOOL_START_VARIANTS = Object.freeze({
+  ar: ['ثانية نشوفلك…', 'لحظة، نتثبت…', 'ثواني برك، نشوف معاك…'],
+  fr: ['Une seconde, je regarde…', 'Je vérifie ça tout de suite…', "Un instant, je consulte l'agenda…"],
+  en: ['One second, let me check…', "I'm looking that up now…", 'Just a moment, checking…'],
+});
+
+/**
+ * @param {string} [lang]
+ * @param {number} [variant] rotated by the caller; any integer is safe
+ * @returns {string}
+ */
+export function buildToolStartText(lang = 'ar', variant = 0) {
+  const list = TOOL_START_VARIANTS[lang] || TOOL_START_VARIANTS.ar;
+  const i = Number.isFinite(Number(variant)) ? Math.abs(Math.trunc(Number(variant))) : 0;
+  return list[i % list.length];
+}
+
+/**
+ * THE SILENCE CHECK-IN (V8-D3 §3). Ten seconds of nothing after our own turn is
+ * a caller who put the phone down, walked away, or lost the line — and a human
+ * receptionist asks once before she hangs up. ONE line, warm, then the goodbye
+ * below. Never a third.
+ */
+export function buildSilenceCheckText(lang = 'ar') {
+  if (lang === 'fr') return 'Vous êtes toujours là ?';
+  if (lang === 'en') return 'Are you still there?';
+  return 'مازلت معايا؟';
+}
+
+/**
+ * …and the polite ending. It hands the patient to the thread they are already
+ * on, which is the same degrade this product uses for every other way a call
+ * can stop working (the WhatsApp follow-up goes out with it).
+ */
+export function buildSilenceByeText(lang = 'ar') {
+  if (lang === 'fr') {
+    return "Je ne vous entends plus. Je vous écris sur WhatsApp et on continue par message. Bonne journée !";
+  }
+  if (lang === 'en') {
+    return "I can't hear you. I'll message you on WhatsApp and we'll continue in writing. Goodbye!";
+  }
+  return 'يظهرلي ما نسمعكش. باش نبعثلك رسالة في الواتساب ونكملو غادي. بالسلامة!';
 }
 
 export default buildVoiceTurnPrompt;

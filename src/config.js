@@ -254,7 +254,15 @@ export function getConfig(overrides = {}) {
     // the caller finished. The single biggest latency line item per Vapi/Pipecat
     // data; 250–400 ms is the band, and the STT's own `speech_final` short-cuts
     // it whenever the vendor is confident.
-    voiceCascadeEotMs: Number(process.env.VOICE_CASCADE_EOT_MS) || 300,
+    //
+    // V8-D2: 400 ms is the founder's measured call (VAD 702–1442 ms felt), and
+    // it is the DEFAULT — not the only value. See voiceCascadeEotPatientMs.
+    voiceCascadeEotMs: Number(process.env.VOICE_CASCADE_EOT_MS) || 400,
+    // …EXCEPT while the agent is collecting data (a phone number, a name, a day
+    // and time). Callers pause mid-digit, and cutting them off there does not
+    // just sound rude — it books the wrong number. Every leader (Vapi, Retell,
+    // ElevenLabs) ships state-dependent eagerness for exactly this turn.
+    voiceCascadeEotPatientMs: Number(process.env.VOICE_CASCADE_EOT_PATIENT_MS) || 900,
     // Two consecutive interims sharing this many normalized characters of prefix
     // are stable enough to start the LLM on. Lower = more speculation (and more
     // wasted tokens); higher = more of the caller's pause spent silent.
@@ -266,6 +274,53 @@ export function getConfig(overrides = {}) {
     // The barge-in budget: caller speaks over us ⇒ the wire must be quiet within
     // this. It is asserted in the suite, not merely hoped for.
     voiceCascadeBargeKillMs: Number(process.env.VOICE_CASCADE_BARGE_KILL_MS) || 150,
+    // ── V8-D2: the pre-warm, and the jitter clamp ──────────────────────────
+    // At ACCEPT time (not on the first turn) the call opens the primary LLM's
+    // TLS/H2 connection and synthesizes the tenant's filler clip if the tape is
+    // cold. Both are cheap and both are paid once instead of inside the first
+    // turn the caller actually waits for. VOICE_CASCADE_PREWARM=off disables it
+    // — the escape hatch if a free tier ever starts billing metadata reads.
+    voiceCascadePrewarm: process.env.VOICE_CASCADE_PREWARM !== 'off',
+    // A provider whose rolling median time-to-first-token passes this is COLD,
+    // not broken: it is skipped for new turns (and probed occasionally) rather
+    // than benched by the breaker. Jitter is what makes an agent feel unusable
+    // even when the median looks fine. A deliberate 0 (or VOICE_CASCADE_TTFT_
+    // CLAMP_MS=off) DISABLES the clamp — honoured rather than swallowed by a
+    // `|| default`, so a mis-tuned threshold can be turned off from an env var.
+    voiceCascadeTtftClampMs:
+      process.env.VOICE_CASCADE_TTFT_CLAMP_MS != null
+        ? Number(process.env.VOICE_CASCADE_TTFT_CLAMP_MS) || 0
+        : 2000,
+    // ── V8-D3: interruption-proofing (the Tunisian caller reality) ─────────
+    // Words of real speech an interim must carry before it may stop the agent
+    // mid-sentence. RMS energy alone NEVER yields any more — it is evidence,
+    // and the ears are the confirmation. Emergency keywords bypass this
+    // entirely (numWords 0). Set to 1 to restore the pre-V8 behaviour.
+    voiceCascadeBargeMinWords: Number(process.env.VOICE_CASCADE_BARGE_MIN_WORDS) || 2,
+    // …and the same floor for STARTING a turn: a one-word non-backchannel
+    // final outside a data-capture state is a transcription fragment far more
+    // often than it is a question. In a data-capture state it is real data (a
+    // digit, a day) and the floor does not apply.
+    voiceCascadeMinTurnWords: Number(process.env.VOICE_CASCADE_MIN_TURN_WORDS) || 2,
+    // A bare «أيوا»/«تمام»/«ok» while the wire is QUIET is an acknowledgment,
+    // not a question: it is recorded and answered with silence rather than
+    // costing an LLM turn. Off ⇒ it becomes an ordinary turn (pre-V8).
+    // While the agent is SPEAKING a backchannel is always immune, whatever this
+    // says — that half is not a preference.
+    voiceCascadeBackchannelAck: process.env.VOICE_CASCADE_BACKCHANNEL_ACK !== 'off',
+    // Caller silence after our own turn: ONE warm check-in at this point, then
+    // a polite goodbye + the WhatsApp follow-up after the second window. A line
+    // held open on a caller who walked away bills for nothing and ends nowhere.
+    // A deliberate 0 disables the ladder (a caller who goes quiet is left on the
+    // line) — honoured rather than swallowed by a `|| default`.
+    voiceCascadeSilenceCheckMs:
+      process.env.VOICE_CASCADE_SILENCE_CHECK_MS != null
+        ? Number(process.env.VOICE_CASCADE_SILENCE_CHECK_MS) || 0
+        : 10000,
+    voiceCascadeSilenceByeMs:
+      process.env.VOICE_CASCADE_SILENCE_BYE_MS != null
+        ? Number(process.env.VOICE_CASCADE_SILENCE_BYE_MS) || 0
+        : 8000,
     // ── energy barge-in (V7-P2.1) ──────────────────────────────────────────
     // On the founder's first live cascade call the caller talked over the agent
     // repeatedly and barge-in fired ZERO times in 101 s: every path to the

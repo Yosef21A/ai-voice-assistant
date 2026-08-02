@@ -30,19 +30,28 @@ import {
   isLlmBreakerOpen,
   noteLlmFailure,
   noteLlmOk,
+  noteLlmTtft,
+  llmTtftClamp,
   DEFAULT_LLM_BREAKER_THRESHOLD,
   DEFAULT_LLM_BREAKER_COOLDOWN_MS,
+  DEFAULT_TTFT_CLAMP_MS,
 } from './breaker.js';
 
 export { LlmError, isLlmError, isRotatable } from './http.js';
 export {
   noteLlmFailure,
   noteLlmOk,
+  noteLlmTtft,
+  llmTtftClamp,
+  llmTtftStats,
   isLlmBreakerOpen,
   resetLlmBreakers,
   llmBreakerStats,
   DEFAULT_LLM_BREAKER_THRESHOLD,
   DEFAULT_LLM_BREAKER_COOLDOWN_MS,
+  DEFAULT_TTFT_CLAMP_MS,
+  TTFT_WINDOW,
+  TTFT_PROBE_EVERY,
 } from './breaker.js';
 export { createGeminiTextLlm } from './geminiText.js';
 export { createOpenAiCompatLlm } from './openaiCompat.js';
@@ -106,10 +115,18 @@ export function createLlmChain({
     threshold: Number(config.voiceLlmBreakerThreshold) || DEFAULT_LLM_BREAKER_THRESHOLD,
     cooldownMs: Number(config.voiceLlmBreakerCooldownMs) || DEFAULT_LLM_BREAKER_COOLDOWN_MS,
   };
+  /**
+   * V8-D2 §2 — the soft clamp on a provider that is up but slow. A deliberate 0
+   * (or 'off') means NEVER clamp and must survive: `|| DEFAULT` would turn it
+   * back on (review minor 6). llmTtftClamp treats any non-positive value as off.
+   */
+  const clampMs = Number.isFinite(Number(config.voiceCascadeTtftClampMs))
+    ? Number(config.voiceCascadeTtftClampMs)
+    : DEFAULT_TTFT_CLAMP_MS;
 
   /** Built lazily: a link nobody reaches costs nothing, not even a constructor. */
   const built = new Map();
-  const counts = { turns: 0, rotations: 0, byProvider: {} };
+  const counts = { turns: 0, rotations: 0, byProvider: {}, clamped: 0, prewarmed: 0 };
   let answering = order[0] || 'classic';
   /**
    * STICKY CLASSIC (review decision). Once the scripted engine has answered a
@@ -192,33 +209,36 @@ export function createLlmChain({
       const at = clock().getTime ? clock().getTime() : Date.now();
       let lastErr = null;
       // Once classic owns the call it answers every turn — no rotation back to
-      // a recovered vendor mid-conversation (see `sticky`).
-      const links = sticky ? ['classic'] : order;
+      // a recovered vendor mid-conversation (see `sticky`). A COPY, because the
+      // forced-probe path (below) splices into it and `order` is per-call state
+      // shared across turns.
+      const links = sticky ? ['classic'] : [...order];
+      // Vendors skipped THIS turn purely for being slow, and whether anything
+      // actually FAILED. The distinction is the whole of review major 5: reaching
+      // classic because everyone is merely cooling is not an outage, and must not
+      // stick the call to the scripted engine for the rest of the call.
+      const clampSkips = [];
+      let hadRealFailure = false;
 
-      for (let i = 0; i < links.length; i += 1) {
-        const name = links[i];
+      /**
+       * Run ONE link to completion. Yields its events; RETURNS a small verdict
+       * the loop reads via `yield*`. Extracted so the forced cooling-probe can
+       * reuse the exact same attempt (TTFT measurement, empty-stream rule,
+       * mid-answer degrade) rather than a second, drifting copy of it.
+       * @returns {{done?:boolean, skipped?:boolean, err?:Error}}
+       */
+      async function* attempt(name) {
         const impl = link(name);
-        if (!impl) continue;
-        // The breaker never benches the last link: something has to answer.
-        if (name !== 'classic' && isLlmBreakerOpen(name, { ...breakerOpts, at })) {
-          log(`[voice-cascade] LLM breaker OPEN for ${name} — skipping it this turn`);
-          continue;
-        }
-
+        if (!impl) return { skipped: true };
         answering = impl.provider || name;
         let spoke = false;
+        // TTFT IS MEASURED HERE, not in the orchestrator: this is the only place
+        // that knows when the request left and which link answered it.
+        const startedAt = Date.now();
+        let ttftNoted = false;
         try {
-          /**
-           * A 200 THAT SAYS NOTHING IS A FAILURE, not a turn.
-           *
-           * Found in review: a provider that streamed a well-formed response
-           * with no text and no tool call — a safety refusal, a finishReason
-           * with an empty candidate, a truncated generation — was booked as a
-           * success. The caller heard silence, the chain never rotated, and the
-           * breaker never counted it. So `done` is HELD until we know something
-           * was produced, and a mute stream falls into the rotation path below
-           * exactly like a 429 would.
-           */
+          // A 200 THAT SAYS NOTHING IS A FAILURE, not a turn: `done` is HELD
+          // until something is produced, so a mute stream rotates like a 429.
           let doneEv = null;
           for await (const ev of impl.stream({ system, messages, signal })) {
             if (ev?.type === 'done') {
@@ -227,6 +247,10 @@ export function createLlmChain({
             }
             if (ev?.type === 'text' && ev.delta) spoke = true;
             if (ev?.type === 'toolCall') spoke = true;
+            if (spoke && !ttftNoted) {
+              ttftNoted = true;
+              noteLlmTtft(name, Date.now() - startedAt);
+            }
             yield ev;
           }
           if (!spoke) {
@@ -234,44 +258,134 @@ export function createLlmChain({
           }
           counts.byProvider[answering] = (counts.byProvider[answering] || 0) + 1;
           noteLlmOk(name);
+          // STICKY ONLY WHEN CLASSIC IS A GENUINE FALLBACK (review major 5).
+          // Classic is reachable now only after a real failure (the forced probe
+          // guards the pure-clamp path), so this no longer demotes a call for a
+          // transient slow window.
           if (name === 'classic') sticky = true;
-          yield {
-            ...(doneEv || { type: 'done', usage: { tokensIn: 0, tokensOut: 0 } }),
-            provider: answering,
-          };
-          return;
+          yield { ...(doneEv || { type: 'done', usage: { tokensIn: 0, tokensOut: 0 } }), provider: answering };
+          return { done: true };
         } catch (err) {
           // A caller abort is OUR cancellation, not a vendor failure. Re-thrown
           // untouched so a barge-in never benches a healthy model.
           if (signal?.aborted) throw err;
-          lastErr = err;
           const b = noteLlmFailure(name, { threshold: breakerOpts.threshold, at });
-          if (b.justOpened) {
-            log(`[voice-cascade] LLM BREAKER OPEN for ${name} after ${b.failures} failures`);
-          }
+          if (b.justOpened) log(`[voice-cascade] LLM BREAKER OPEN for ${name} after ${b.failures} failures`);
           if (spoke) {
             // Half a sentence is already in the caller's ear. Ending the turn
             // short beats answering it twice in two different voices.
             log(`[voice-cascade] ${name} died mid-answer (${err?.message || err}) — ending this turn early`);
             yield { type: 'done', usage: { tokensIn: 0, tokensOut: 0 }, provider: answering, degraded: true };
-            return;
+            return { done: true };
           }
-          if (!isLlmError(err) || isRotatable(err) || i < links.length - 1) {
-            counts.rotations += 1;
-            log(
-              `[voice-cascade] LLM ${name} failed (${err?.message || err}) — rotating to ` +
-                `${links[i + 1] || 'nothing left'}`
-            );
+          return { err };
+        }
+      }
+
+      for (let i = 0; i < links.length; i += 1) {
+        let name = links[i];
+        let forced = false;
+
+        // REACHING CLASSIC ONLY BECAUSE EVERYONE IS COOLING IS NOT AN OUTAGE
+        // (review major 5). Force the fastest cooling vendor through as the
+        // probe; classic stays right behind it as the genuine fallback if the
+        // probe truly fails. Without this, one slow window sticks the whole call
+        // to classic and the recovered vendors are never tried again.
+        if (name === 'classic' && !sticky && !hadRealFailure && clampSkips.length) {
+          const fastest = clampSkips.slice().sort((a, b) => a.median - b.median)[0].name;
+          log(
+            `[voice-cascade] every LLM vendor is merely cooling — forcing the fastest (${fastest}) ` +
+              `as a probe rather than sticking the call on classic`
+          );
+          clampSkips.length = 0;
+          links.splice(i, 0, fastest); // classic is now at i+1
+          name = fastest;
+          forced = true;
+        }
+
+        const impl = link(name);
+        if (!impl) continue;
+
+        // The breaker never benches the last link: something has to answer. A
+        // forced probe skips both gates on purpose — it IS the retry.
+        if (!forced && name !== 'classic' && isLlmBreakerOpen(name, { ...breakerOpts, at })) {
+          log(`[voice-cascade] LLM breaker OPEN for ${name} — skipping it this turn`);
+          hadRealFailure = true; // a benched vendor is a real outage: classic is legit
+          continue;
+        }
+
+        // THE JITTER CLAMP (V8-D2 §2). Not a failure and not a breaker: this
+        // provider is answering, just too slowly. Skipped for NEW turns, said
+        // ONCE, probed every Nth turn, and reported on the waterfall.
+        if (!forced && name !== 'classic') {
+          const cool = llmTtftClamp(name, { clampMs });
+          if (cool.cooling) {
+            counts.clamped += 1;
+            if (cool.justCooled) {
+              log(
+                `[voice-cascade] LLM ${name} CLAMPED: rolling TTFT median ${Math.round(cool.median)}ms ` +
+                  `> ${clampMs}ms — skipping it for new turns until it cools`
+              );
+            }
+            clampSkips.push({ name, median: cool.median });
+            yield { type: 'clamped', provider: name, medianMs: cool.median };
             continue;
           }
-          throw err;
         }
+
+        const res = yield* attempt(name);
+        if (res.skipped) continue;
+        if (res.done) return;
+        // A vendor failed before speaking. This is a real failure ⇒ classic, if
+        // reached from here, is a legitimate fallback.
+        lastErr = res.err;
+        hadRealFailure = true;
+        if (!isLlmError(res.err) || isRotatable(res.err) || i < links.length - 1) {
+          counts.rotations += 1;
+          log(
+            `[voice-cascade] LLM ${name} failed (${res.err?.message || res.err}) — rotating to ` +
+              `${links[i + 1] || 'nothing left'}`
+          );
+          continue;
+        }
+        throw res.err;
       }
 
       // Nothing answered. This is only reachable if even `classic` threw, which
       // it is written never to do — so it is a bug, and it is reported as one
       // rather than swallowed into silence on a live call.
       throw lastErr || new Error('no LLM provider answered this turn');
+    },
+
+    /**
+     * PRE-WARM (V8-D2 §2). Open the primary link's connection at ACCEPT time,
+     * so the first turn of the call does not pay for TLS + HTTP/2 setup on top
+     * of everything else it already pays for.
+     *
+     * ONLY the first usable link, and only if it implements warmUp(): the point
+     * is the connection pool, and a link nobody is going to reach costs quota
+     * for nothing. Never throws, never rejects, decides nothing — a warm-up
+     * that fails leaves the call exactly where it was.
+     *
+     * @returns {Promise<string|null>} the provider that was warmed, if any
+     */
+    async warmUp() {
+      for (const name of order) {
+        if (name === 'classic') return null; // nothing to warm: no socket, no key
+        const impl = link(name);
+        if (!impl || typeof impl.warmUp !== 'function') continue;
+        if (isLlmBreakerOpen(name, { ...breakerOpts, at: Date.now() })) continue;
+        try {
+          const ok = await impl.warmUp();
+          if (ok) counts.prewarmed += 1;
+          return ok ? name : null;
+        } catch {
+          // A warm-up is an optimization. It never reports, never rotates and
+          // never counts against a provider — the first real turn does that.
+          return null;
+        }
+      }
+      return null;
     },
 
     /** Ops hook: a turn's outcome, from the orchestrator's point of view. */

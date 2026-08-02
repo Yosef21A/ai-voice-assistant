@@ -42,6 +42,18 @@ export const EARS_INSTRUCTION =
 /** No fragment for this long ⇒ the utterance is over, even if the server never says so. */
 export const EARS_IDLE_MS = 700;
 
+/**
+ * …EXCEPT while the agent is collecting data (V8-D2 §1). A caller reading a
+ * phone number off a card pauses between groups of digits, and this timer is
+ * the ONLY endpointer this transport has — there is no `speech_final` here. Cut
+ * them off at 700 ms and the booking gets half a number.
+ *
+ * The orchestrator lends the predicate (`dataCapture`), because only it knows
+ * what the agent just asked for; the two timings live here because only this
+ * adapter knows what its own baseline is.
+ */
+export const EARS_PATIENT_IDLE_MS = 1200;
+
 /** Below this, a final is too short for an echo comparison to mean anything. */
 const MIN_ECHO_CHARS = 4;
 
@@ -77,8 +89,11 @@ export function isEchoOfAgent(text, agentText) {
  * @param {Function} [p.liveFactory] default createLiveClient — tests inject
  * @param {Function} [p.logger]
  * @param {number} [p.idleMs]
+ * @param {number} [p.patientIdleMs]   used while `dataCapture()` is true
  * @param {Function} [p.agentSpeaking] () => boolean — is OUR audio on the wire?
  * @param {Function} [p.agentSaid]     () => string  — the last thing we said
+ * @param {Function} [p.dataCapture]   () => boolean — are we collecting a
+ *   number/name/date right now? Lent by the orchestrator (V8-D2 §1).
  */
 export function createLiveEarsStt({
   config = {},
@@ -86,15 +101,18 @@ export function createLiveEarsStt({
   liveFactory,
   logger,
   idleMs = EARS_IDLE_MS,
+  patientIdleMs = EARS_PATIENT_IDLE_MS,
   agentSpeaking,
   agentSaid,
+  dataCapture,
 } = {}) {
   const log = typeof logger === 'function' ? logger : () => {};
   const makeLive = typeof liveFactory === 'function' ? liveFactory : createLiveClient;
   const speaking = typeof agentSpeaking === 'function' ? agentSpeaking : () => false;
   const saidByUs = typeof agentSaid === 'function' ? agentSaid : () => '';
+  const capturing = typeof dataCapture === 'function' ? dataCapture : () => false;
   const handlers = new Map();
-  const counts = { interims: 0, finals: 0, swallowed: 0, echoDropped: 0, dupSuppressed: 0 };
+  const counts = { interims: 0, finals: 0, swallowed: 0, echoDropped: 0, dupSuppressed: 0, patientIdles: 0 };
   let buffer = '';
   let idleTimer = null;
   let closed = false;
@@ -156,7 +174,15 @@ export function createLiveEarsStt({
 
   function armIdle() {
     clearIdle();
-    idleTimer = setTimeout(() => flushFinal(true), idleMs);
+    // STATE-DEPENDENT ENDPOINTING (V8-D2 §1). The predicate is asked at ARMING
+    // time, on every fragment, so a turn that becomes a data-capture turn
+    // half-way through gets the patient timer for the rest of it.
+    let ms = idleMs;
+    if (capturing()) {
+      ms = Math.max(idleMs, Number(patientIdleMs) || idleMs);
+      if (ms !== idleMs) counts.patientIdles += 1;
+    }
+    idleTimer = setTimeout(() => flushFinal(true), ms);
     idleTimer.unref?.();
   }
 

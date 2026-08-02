@@ -49,6 +49,33 @@ export function buildGeminiUrl(model, apiKey) {
 }
 
 /**
+ * THE CHEAPEST REQUEST THAT WARMS THE CONNECTION (V8-D2 §2).
+ *
+ * What is actually bought by a pre-warm is the TLS handshake and the HTTP/2
+ * connection to `generativelanguage.googleapis.com` — undici pools by ORIGIN,
+ * so any request to this host leaves a warm connection behind for the first
+ * real turn. Given that, the request should cost as close to nothing as
+ * possible, and the candidates are not equal:
+ *
+ *   • `:countTokens` — free of TOKEN charges, but it is still a POST with a
+ *     body against the generative endpoint and it consumes request quota on a
+ *     tier whose ceiling is measured in requests per minute (P0: 5 rpm on
+ *     gemini-3-flash-preview). Wrong bucket to spend from.
+ *   • a 1-token `:generateContent` — spends the exact quota the call needs.
+ *   • GET the model's METADATA (this) — no body, no tokens, no generation, and
+ *     the same origin. It is a metadata read, and it is the whole win.
+ *
+ * The key still rides in the URL, so this URL is a SECRET exactly like the
+ * streaming one: never logged, never recorded, never put on an event.
+ */
+export function buildGeminiWarmUrl(model, apiKey) {
+  return `${GEMINI_BASE}/${encodeURIComponent(model)}?key=${encodeURIComponent(String(apiKey || ''))}`;
+}
+
+/** A pre-warm that has not answered in this long has failed to be a shortcut. */
+export const WARM_TIMEOUT_MS = 2500;
+
+/**
  * Neutral history → Gemini `contents`.
  * Roles: 'user' (the caller), 'assistant' (us), 'tool' (an executor result).
  * A functionResponse rides in a `user` content — that is the shape v1beta
@@ -102,9 +129,50 @@ export function createGeminiTextLlm({
   const url = buildGeminiUrl(model, key);
   const toolBlock = toGeminiTools(tools);
 
+  const warmUrl = buildGeminiWarmUrl(model, key);
+
   return {
     provider: model,
     model,
+
+    /**
+     * Open the connection this link will use, before the caller needs it.
+     * NEVER throws: a failed warm-up is a first turn that pays what it always
+     * paid, not a call that goes wrong.
+     * @returns {Promise<boolean>} true ⇒ the origin answered us
+     */
+    async warmUp() {
+      const doFetch = typeof fetchImpl === 'function' ? fetchImpl : globalThis.fetch;
+      if (typeof doFetch !== 'function') return false;
+      const ac = new AbortController();
+      // Unref'd: a warm-up must never be the reason a process stays alive.
+      const timer = setTimeout(() => {
+        try {
+          ac.abort(new Error('warm-up timed out'));
+        } catch {
+          /* an already-aborted controller is fine */
+        }
+      }, WARM_TIMEOUT_MS);
+      timer.unref?.();
+      try {
+        const res = await doFetch(warmUrl, { method: 'GET', signal: ac.signal });
+        // THE BODY MUST BE READ TO THE END. An unconsumed response body keeps
+        // its socket out of undici's pool (or destroys it), which would leave
+        // this doing the opposite of its job. A model metadata document is
+        // about a kilobyte, so reading it is free.
+        try {
+          await res?.text?.();
+        } catch {
+          /* best-effort: the connection is what we came for, not the JSON */
+        }
+        return true;
+      } catch (err) {
+        log(`[voice-cascade] ${model} pre-warm failed (${err?.message || err}) — the first turn pays for the socket`);
+        return false;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
 
     /**
      * @param {object} p

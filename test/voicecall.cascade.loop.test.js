@@ -335,7 +335,9 @@ test('METERING: tokens in/out and TTS characters are counted, and land on a call
   const s = await setup({ llm: fakeLlm([says('باهي برشة.')]) });
   t.after(() => s.unsub());
   await s.loop.start();
-  s.stt.final('عسلامة', true);
+  // TWO WORDS, deliberately: V8-D3 §3 refuses a one-word non-backchannel final
+  // outside a data-capture state as a transcription fragment.
+  s.stt.final('عسلامة، نحب نسأل', true);
   await s.loop.settled();
 
   const greetingChars = normalizeSpoken(buildGreetingText(s.clinic, 'ar')).length;
@@ -580,7 +582,9 @@ test('BARGE-IN: the caller speaks over us and the wire goes quiet inside the 150
   assert.ok(queued >= 5, `expected a full queue, got ${queued}`);
 
   const t0 = Date.now();
-  s.stt.interim('سامحني');
+  // TWO REAL WORDS (V8-D3 §1): RMS alone never yields any more, and neither
+  // does a one-word interim — the ears have to confirm a person.
+  s.stt.interim('سامحني، لحظة');
   const elapsed = Date.now() - t0;
 
   assert.equal(s.loop.stats().outQueue, 0, 'nothing queued survives the interruption');
@@ -669,7 +673,7 @@ test('a fast brain is never talked over by its own filler', async (t) => {
     s.loop.stop('test');
   });
   await s.loop.start();
-  s.stt.final('وقتاش؟', true);
+  s.stt.final('وقتاش تحلو؟', true);
   await s.loop.settled();
   await sleep(60);
   assert.equal(s.loop.stats().fillersPlayed, 0);
@@ -710,6 +714,11 @@ test('THE GATE: stage → recap → the caller says yes → confirm writes exact
   // The steps are per REQUEST, not per caller turn: a turn that calls a tool
   // re-enters the chain with the result appended, exactly as the real one does.
   const s = await setup({
+    // V8-D2 §1: a STAGED booking is a data-capture state, so the vendor's own
+    // end-of-turn is deliberately overruled by the patient endpointer — the
+    // caller answering a recap may still be adding "…but make it ten". Kept
+    // short here so the test measures the gate rather than the clock.
+    config: { voiceCascadeEotPatientMs: 25 },
     llm: fakeLlm([
       // 1. the filler, then the stage
       async function* () {
@@ -755,6 +764,7 @@ test('THE GATE: stage → recap → the caller says yes → confirm writes exact
   assert.ok(!/\d{2}\/\d{2}\/\d{4}/.test(recapSaid), 'no dd/mm/yyyy ever reaches a mouth');
 
   s.stt.final('نعم صحيح', true);
+  await waitFor(() => s.loop.stats().staged === false, 'the patient endpointer to close the recap answer');
   await s.loop.settled();
 
   const rows = await s.app.store.listAppointments({ clinicId: CLINIC });
@@ -905,11 +915,11 @@ test('"wait — one more thing!": a caller who speaks after the goodbye cancels 
     s.loop.stop('test');
   });
   await s.loop.start();
-  s.stt.final('بالسلامة', true);
+  s.stt.final('شكرا، بالسلامة', true);
   await s.loop.settled();
   assert.equal(s.loop.stats().endRequested, true);
 
-  s.stt.interim('استنى');
+  s.stt.interim('استنى شويّة');
   assert.equal(s.loop.stats().endRequested, false, 'a goodbye is a suggestion until the line actually drops');
   assert.equal(s.loop.stats().hangupArmed, false);
   await sleep(80);
@@ -989,7 +999,7 @@ test('stop() is idempotent, fires onEnd once, and leaves no timer behind', async
   const s = await setup({ ended, llm: fakeLlm([says('أهلا.')]) });
   t.after(() => s.unsub());
   await s.loop.start();
-  s.stt.final('عسلامة', true);
+  s.stt.final('عسلامة، ثمة حد؟', true);
   await s.loop.settled();
   assert.equal(s.loop.stats().pacing, true);
 
@@ -1153,7 +1163,9 @@ test('GOLDEN (V7-P2.1): a guess and the final that confirms it are ONE reply on 
 
 test('GOLDEN variant: the final DRIFTS — the answer is un-said and ONE new reply replaces it', async (t) => {
   const s = await setup({
-    config: { voiceCascadeEotMs: 20 },
+    // The first answer names a DAY, so the next caller turn is endpointed
+    // patiently (V8-D2 §1) — kept short here so the test measures the ledger.
+    config: { voiceCascadeEotMs: 20, voiceCascadeEotPatientMs: 25 },
     llm: fakeLlm([says('عندي بلاصة نهار الخميس.'), says('الكشفية من خمسين دينار.')]),
     tts: fakeTts({ chunkMs: 600 }), // long enough that there is really audio to kill
   });
@@ -1309,12 +1321,17 @@ test('the turn-end debounce never eats a REAL second turn', async (t) => {
   ]);
 });
 
-test('CRASH REGRESSION: an energy barge-in mid-synthesis leaves ZERO unhandled rejections', async (t) => {
+test('CRASH REGRESSION: a barge-in mid-synthesis leaves ZERO unhandled rejections (V8: word-gated)', async (t) => {
   // The founder's instrumented call did not just double-answer, it DIED:
   //   Error: barge_in  at killSpeech ← noteEnergy ← onRtp ← werift
   //   → uncaughtException (fromPromise)
   // Nothing may throw out of the RTP path, and an unhandled rejection is a
   // throw with a delay. The assertion is on the process, not on the loop.
+  //
+  // MUTATED AT V8-D3 §1: the loud audio no longer kills anything by itself —
+  // it is EVIDENCE. The kill happens when the ears confirm two real words, and
+  // it has to happen in exactly the same place (mid-synthesis, frames on the
+  // wire) for this regression to still be the regression it was written for.
   const unhandled = [];
   const onUnhandled = (reason) => unhandled.push(reason);
   process.on('unhandledRejection', onUnhandled);
@@ -1335,7 +1352,15 @@ test('CRASH REGRESSION: an energy barge-in mid-synthesis leaves ZERO unhandled r
   await waitFor(() => s.loop.stats().outQueue > 3, 'our own speech on the wire');
 
   feedLoud(s, 14); // 280 ms of the caller talking over us
-  assert.equal(s.loop.stats().energyBargeIns, 1, 'the energy trigger fired');
+  assert.equal(s.loop.stats().energyHits, 1, 'the energy episode was recorded');
+  assert.equal(s.loop.stats().bargeIns, 0, 'RMS ALONE NEVER YIELDS — that is the V8 law');
+  assert.ok(s.loop.stats().outQueue > 0, 'the agent is still speaking, because nobody has said anything yet');
+
+  // …and now the ears confirm it: two real words, while the audio is on the
+  // wire and the mouth is still streaming. Same crash site, new trigger.
+  s.stt.interim('سامحني، لحظة');
+  assert.equal(s.loop.stats().bargeIns, 1);
+  assert.equal(s.loop.stats().energyBargeIns, 1, 'the energy episode corroborated it');
   assert.equal(s.loop.stats().outQueue, 0, 'and the wire went quiet');
 
   await s.loop.settled();

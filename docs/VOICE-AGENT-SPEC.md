@@ -458,6 +458,64 @@ Single-writer speakGen on RTP-out · utterance ledger (ONE reply per utterance-i
 2. Backchannel ignore-list: أيوا · تمام · باهي · مم · هاو · oui · ok · mm-hmm — these NEVER stop the agent mid-sentence.
 3. Never end a turn on a fragment; on caller silence 10-15s → ONE warm check-in → polite goodbye + WhatsApp follow-up (existing degrade path).
 
+#### D2 + D3 — SHIPPED (2026-08-02). What was built, and the four judgement calls in it
+**D2 §1 — state-dependent endpointing.** `voiceCascadeEotMs` 300 → **400** (the founder's number) and
+`voiceCascadeEotPatientMs` **900** while collecting a phone/name/date. THE LAYERING, because it is the
+part that is easy to get wrong: Deepgram's `endpointing=N` is a CONNECTION-TIME parameter and cannot be
+changed mid-call, so the vendor stays at 300 ms as the **floor signal** and the ORCHESTRATOR's own EOT
+timer is the state-dependent one — in a data-capture state the vendor's `speech_final` is deliberately
+**overruled** and the turn is held open (any new interim clears the timer, which is the mechanism).
+liveEars, whose only endpointer is its idle timer, is lent the same state (`dataCapture()`, 700 → 1200 ms).
+The state itself is read off TWO signals, because neither is enough alone: what the agent SAID
+(`turnTaking.detectCaptureAsk` — the model asks for a name conversationally, a whole turn before the
+booking gate hears about it) and what a tool RETURNED (`captureFromTool`: `stage_booking` refusing for a
+missing contact is proof). Over-matching is the cheap direction: a false 'date' costs 500 ms once.
+
+**D2 §2 — pre-warm + jitter clamp.** At `warmUp()` (accept time, not the first turn): the LLM chain opens
+its primary link's connection with the cheapest request that exists — a model-metadata **GET**, no body,
+no tokens, no generation quota (countTokens was rejected: it spends the requests-per-minute bucket the
+free tier is actually walled on) — and, if the tenant's **filler tape is cold, the filler is synthesized
+silently into it**. That does double duty: it warms the TTS vendor's TLS exactly like a HEAD would AND
+the first «ثانية برك…» of the call plays from tape in one pacing tick. It is a SILENT synthesis: frames
+are recorded to the tape and not one is pushed (`speakSentence({silent:true})`, and the codec's partial
+frame is dropped after, or half a filler would be glued to the front of the greeting). The clamp is a
+SOFT breaker in `llm/breaker.js`: rolling median of the last 5 TTFTs per provider; past
+`voiceCascadeTtftClampMs` (2000) the provider is `cooling` — skipped for new turns, logged ONCE, probed
+every 5th turn, and named on the waterfall as `clamped:<provider>`. Median not mean, and a FULL window
+required, so one cold start cannot demote anybody.
+
+**D2 §4 — guaranteed request-start lines.** Every tool call speaks «ثانية نشوفلك…» BEFORE the executor
+runs, rotating three phrasings (one cache slot each, or the signature check would evict them in turn).
+Excluded: `confirm_booking` (the recap owns that beat) and `end_call`. Tagged `src=toolstart` on the wire
+and excluded from the latency marks — cover is not an answer.
+
+**D3 §1 — word-gated barge-in.** RMS alone NEVER yields any more; energy becomes EVIDENCE
+(`stats.energyHits`, corroboration within 2 s). The kill requires an STT interim with ≥
+`voiceCascadeBargeMinWords` (2) real words — EXCEPT an emergency keyword, which yields at zero words
+(the detector runs on the interim for the yield; the full emergency still fires from the preflight).
+
+**D3 §2 — backchannel immunity,** with the exception that makes it safe: «أيوا · تمام · باهي · طيب · مم ·
+هاو · نعم · صح · oui · ok · d'accord · mm-hmm · uh-huh · yeah» never barge and never become a turn while
+the agent is speaking; on a quiet wire they are an acknowledgment (recorded, kept in context, no LLM
+turn — `VOICE_CASCADE_BACKCHANNEL_ACK=off` restores the old behaviour). **DEVIATION, deliberate:** «نعم»
+and «صح» are also how a caller says yes to a booking recap, so while a booking is STAGED or a field is
+being collected a backchannel is an ANSWER and becomes an ordinary turn. Without that exception the
+ignore-list would swallow the confirmation the whole two-phase gate waits for.
+
+**D3 §3 — fragments and silence.** A <2-word non-backchannel final never starts a turn (it gets the V6.2
+two-strike line instead) — exempt in a data-capture state, where one token IS the answer, and for the
+keypad and emergencies. Caller silence 10 s after our own turn ⇒ ONE warm check-in («مازلت معايا؟»),
+8 s more ⇒ polite goodbye + the ordinary `end_call` hang-up + the same `callBrainLost` WhatsApp
+follow-up every other degrade sends. One self-rescheduling unref'd timer, re-checking the world on every
+fire. **Related fix:** with a patient endpointer, an answer the finished sentence contradicts is now
+un-said in `onFinal` rather than at end-of-turn — otherwise the caller hears us keep answering a question
+they withdrew for most of a second.
+
+**Cost of the fragment rule, stated:** four existing tests used one-word caller lines («عسلامة»,
+«وقتاش؟») and were updated to two words. That is the rule working, not a workaround — but on a terse
+derja line it is the change most likely to need a field verdict, and `voiceCascadeMinTurnWords=1`
+disables it without a deploy.
+
 ### D4 — HUMAN POLISH (prompt-level, 2h, from the leader playbook)
 Acknowledge→answer→ONE question per turn (end every turn with the question) · anti-repetition rule (never same phrasing twice in a call) · restrained disfluency vocabulary for clinical warmth ("نشوف…", "ثانية برك", "أممم" sparingly — 1-2 per turn max, never on emergency/confirmation turns) · spoken-forms rule (digits read as words, dates spoken naturally) · read-backs ONLY for exact data · pace: slightly slower TTS rate for elderly-sounding callers if provider supports rate.
 

@@ -69,6 +69,7 @@ export function createSttChain({
   readyTimeoutMs,
   agentSpeaking,
   agentSaid,
+  dataCapture,
 } = {}) {
   const log = typeof logger === 'function' ? logger : () => {};
   const handlers = new Map();
@@ -129,7 +130,13 @@ export function createSttChain({
     // the same session that hears our own voice bleed back (V7-P2.1). A
     // dedicated STT vendor gets a clean uplink and needs no echo suppression
     // from us — handing it these would be a rule with no reason.
-    return createLiveEarsStt({ config, liveFactory, agentSpeaking, agentSaid, ...common });
+    //
+    // `dataCapture` is the V8-D2 endpointing state. It goes here for the
+    // opposite reason: this leg's ONLY endpointer is its own idle timer, so it
+    // is the leg where patience has to be applied by hand. Deepgram and
+    // Speechmatics are endpointed at the vendor (see ./deepgram.js on the
+    // layering) and by the orchestrator's own state-dependent EOT timer.
+    return createLiveEarsStt({ config, liveFactory, agentSpeaking, agentSaid, dataCapture, ...common });
   }
 
   /**

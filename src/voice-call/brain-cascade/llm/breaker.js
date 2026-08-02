@@ -29,17 +29,98 @@ export const DEFAULT_LLM_BREAKER_THRESHOLD = 2;
 /** How long it stays benched. Free-tier windows recover in ~20 s. */
 export const DEFAULT_LLM_BREAKER_COOLDOWN_MS = 60000;
 
-/** provider → { failures, openedAt } */
+// ── THE SOFT VARIANT: 'cooling', not 'open' (V8-D2 §2) ──────────────────────
+// A provider can be UP and still unusable on a phone line. The founder's
+// measured reality was not an outage, it was JITTER: the same model answering
+// in 600 ms and then in 2.4 s, on the same call, with nothing in the logs to
+// distinguish them. A breaker is the wrong instrument for that — nothing
+// failed, so nothing would ever open it, and if it did, a five-failure bench
+// for a model that is merely slow today would push every call onto an
+// unbenchmarked fallback.
+//
+// So: a rolling window of the last few TTFTs per provider. When the MEDIAN of a
+// full window passes the clamp, the provider is 'cooling' — skipped for NEW
+// turns, logged ONCE, and probed every Nth turn so it can come back the moment
+// it is quick again. Median rather than mean because one 8 s stall (the stall
+// timer's own ceiling) would otherwise clamp a healthy provider for a window.
+
+/** TTFT samples kept per provider. Five turns ≈ the last ~40 s of a call. */
+export const TTFT_WINDOW = 5;
+/** Above this rolling median a provider is cold rather than broken. */
+export const DEFAULT_TTFT_CLAMP_MS = 2000;
+/** One turn in this many is a probe: a clamped provider must be able to return. */
+export const TTFT_PROBE_EVERY = 5;
+
+/** provider → { failures, openedAt, ttft:number[], cooling:boolean, skipped:number } */
 const breakers = new Map();
 
 function entryFor(provider) {
   const key = String(provider || 'unknown');
   let e = breakers.get(key);
   if (!e) {
-    e = { failures: 0, openedAt: 0 };
+    e = { failures: 0, openedAt: 0, ttft: [], cooling: false, skipped: 0 };
     breakers.set(key, e);
   }
   return e;
+}
+
+/** The median of a numeric array. Empty ⇒ null. */
+function median(list) {
+  if (!list.length) return null;
+  const sorted = [...list].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * One turn's measured time-to-first-token for this provider.
+ * @param {string} provider
+ * @param {number} ms
+ * @returns {{median:number|null, samples:number}}
+ */
+export function noteLlmTtft(provider, ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return { median: null, samples: 0 };
+  const e = entryFor(provider);
+  e.ttft.push(n);
+  while (e.ttft.length > TTFT_WINDOW) e.ttft.shift();
+  return { median: median(e.ttft), samples: e.ttft.length };
+}
+
+/**
+ * Is this provider too slow to be given a NEW turn?
+ *
+ * Requires a FULL window: clamping on one slow sample would bench a provider
+ * for the first cold-start request of every process, which is the one request
+ * the pre-warm exists to make irrelevant.
+ *
+ * MUTATES on the probe transition, exactly like isLlmBreakerOpen above — the
+ * house pattern, which is why this is a function and not a getter.
+ *
+ * @returns {{cooling:boolean, median:number|null, probe:boolean, justCooled:boolean}}
+ */
+export function llmTtftClamp(provider, { clampMs = DEFAULT_TTFT_CLAMP_MS, probeEvery = TTFT_PROBE_EVERY } = {}) {
+  // 0 / off / a non-positive value ⇒ the clamp is disabled (review minor 6).
+  // Ops has to be able to turn it off at 2 a.m. when a mis-tuned threshold is
+  // benching a healthy provider, and `|| DEFAULT` would swallow a deliberate 0.
+  if (!(Number(clampMs) > 0)) return { cooling: false, median: null, probe: false, justCooled: false };
+  const e = breakers.get(String(provider || 'unknown'));
+  if (!e || e.ttft.length < TTFT_WINDOW) return { cooling: false, median: e ? median(e.ttft) : null, probe: false, justCooled: false };
+  const med = median(e.ttft);
+  if (med == null || med <= clampMs) {
+    e.cooling = false;
+    e.skipped = 0;
+    return { cooling: false, median: med, probe: false, justCooled: false };
+  }
+  const justCooled = !e.cooling;
+  e.cooling = true;
+  // Every Nth turn goes through anyway. A clamped provider that is never tried
+  // again is a permanent demotion decided by five samples.
+  e.skipped += 1;
+  if (probeEvery > 0 && e.skipped % probeEvery === 0) {
+    return { cooling: false, median: med, probe: true, justCooled };
+  }
+  return { cooling: true, median: med, probe: false, justCooled };
 }
 
 /**
@@ -62,6 +143,25 @@ export function noteLlmOk(provider) {
   const e = entryFor(provider);
   e.failures = 0;
   e.openedAt = 0;
+}
+
+/**
+ * Ops visibility on the clamp: what each provider's rolling median actually is.
+ *
+ * A provider that recovered clears itself WITHOUT a special case — every probe
+ * turn pushes a fast sample that evicts an old slow one, so the median walks
+ * back under the line within one window. There is deliberately no "unclamp"
+ * call: a clamp that can be cleared by hand is a clamp that hides a slow model.
+ */
+export function llmTtftStats() {
+  return [...breakers.entries()]
+    .filter(([, e]) => e.ttft.length)
+    .map(([provider, e]) => ({
+      provider,
+      samples: e.ttft.length,
+      medianMs: median(e.ttft),
+      cooling: !!e.cooling,
+    }));
 }
 
 /**

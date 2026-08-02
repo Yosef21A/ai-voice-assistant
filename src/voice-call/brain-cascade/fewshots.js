@@ -1,8 +1,9 @@
 // THE DERJA FEW-SHOT PACK — "the highest-leverage naturalness fix" (V7
-// amendment §2). Prompt rules tell a model what NOT to do; examples tell it how
-// a Tunisian receptionist actually sounds. Every provider in the cascade gets
-// the same pack, so a rotation to Cerebras or Groq mid-call does not change the
-// person the caller is talking to.
+// amendment §2), rebuilt for V8-D4 (founder: "I want him to be more fluent").
+// Prompt rules tell a model what NOT to do; examples tell it how a Tunisian
+// receptionist actually sounds. Every provider in the cascade gets the same
+// pack, so a rotation to Cerebras or Groq mid-call does not change the person
+// the caller is talking to.
 //
 // THREE LAWS THIS FILE OBEYS, and they are not style preferences:
 //
@@ -18,17 +19,44 @@
 //     the prompt is what the model is told; this is what it is shown.
 //  3. **THE GUARDRAILS ARE DEMONSTRATED, not just declared.** There is an
 //     exemplar for a symptom (no diagnosis), for a price (from-figure + "the
-//     doctor decides after the examination"), for noise (ask once, warmly), for
-//     the two-strike degrade to chat, and for the goodbye that ends the call.
+//     doctor decides after the examination"), and — new at V8-D4 — for a
+//     caller who corrects themselves mid-call.
 //
 // REGISTER. Tunisian (`tn`) is the default because the pilot clinics are in
 // Sousse. Libyan (`ly`) is a SEPARATE list, appended when the tenant's dialect
 // config says so or when the caller's number is Libyan — the two registers
 // share vocabulary but not everything ("شنوة" vs "شن هو", "برشة" vs "وايد"),
-// and mixing them is the exact thing a native ear catches instantly.
+// and mixing them is the exact thing a native ear catches instantly. At V8-D4
+// the Libyan list became SELF-SUFFICIENT (its own rhythm, read-back, guardrail
+// and correction exemplars) instead of borrowing two Tunisian guardrail lines —
+// see the note on `pickFewshots` below for why the borrow was retired.
 //
-// SOURCES. The tone is mined from src/engine/responses.js (the chat agent's own
-// Tunisian voice, in production since V1) and from docs/P0-DERJA-SHEET.md — the
+// SOURCES (V8-D4 mining pass). `data/runtime/messages.json` carries the
+// founder's own live test calls (`type:'call'`, `body.call.transcript`) plus
+// real WhatsApp chat threads. Two things came out of reading all of them
+// end to end, cleaned of PII (the founder's own name and number, replaced with
+// the file's existing bracket-placeholder convention — nothing else in this
+// file was ever anything but a placeholder):
+//   • the phrase actually deployed for "it's noisy, say that again" —
+//     `سامحني، فما حس برشة — تنجم تعاود آخر حاجة؟` (this file's own noise
+//     exemplar, word for word, and also `buildUnclearText` in ./prompt.js) —
+//     appeared TWICE, VERBATIM, back to back, in one real call (seq 153,
+//     2026-08-01). That is the anti-repetition bug this tier exists to kill,
+//     caught in the founder's own transcript, not invented for a test.
+//   • a real chat reply's smooth-pivot phrasing — "ولا يهمك سي [الاسم]، جراحة
+//     تجميل الصدر تدخل تحت جراحة التجميل عندنا ✅. باش نشوفلك أقرب موعد متوفر
+//     فوراً، شنوة نهار ووقتاش تحب بالضبط؟" (seq 81) — is the register the two
+//     new correction exemplars below are built from: acknowledge the change
+//     warmly ("ولا يهمك" / "ماكاش مشكلة"), never re-state the wrong slot, go
+//     straight to the new option and end on one question.
+// A third finding shaped the PROMPT, not this file: the same live call also
+// spoke a filler ("ثانية برك") stitched onto the tail of an already-decided
+// handoff sentence — disfluency on what was functionally a closing turn. That
+// is exactly the emergency/confirmation exception V8-D4 adds in ./prompt.js
+// (HUMAN_POLISH_POLICY): fillers are for while you are still deciding, never
+// once the call has landed on an outcome.
+// The rest of the tone is mined from src/engine/responses.js (the chat agent's
+// own Tunisian voice, in production since V1) and docs/P0-DERJA-SHEET.md — the
 // replies the founder graded, with the invented prices stripped out.
 
 /**
@@ -39,23 +67,24 @@
  * tokens per turn. Six is not a round number picked for tidiness: it is the
  * smallest set that still SHOWS every behaviour the block exists to teach —
  * the rhythm of a booking, the read-back recap, the "from" price, the refusal
- * to diagnose, the warm ask-again in noise, and the one-line goodbye.
+ * to diagnose, and (V8-D4) a graceful correction. Two behaviours that used to
+ * hold a seat — the noise ask-again and the goodbye — were retired from the
+ * selection, not deleted: NOISE_POLICY in ./prompt.js already quotes the
+ * ask-again line verbatim, and voiceStyleBlock already lists the sign-off
+ * options, so a dedicated exemplar for either was teaching the model something
+ * it had already been told twice.
  */
 export const MAX_FEWSHOTS = 6;
 
 /**
- * The six Tunisian exchanges that survive the diet, by index into FEWSHOTS_TN.
- * One rhythm exemplar, one recap, and the four that DEMONSTRATE a guardrail —
- * because a rule the model has only been told is a rule it negotiates with.
+ * The six Tunisian exchanges that survive the diet, by index into FEWSHOTS_TN:
+ * the greeting rhythm, the read-back recap, the two guardrails a caller will
+ * actually test (price, diagnosis), and — new at V8-D4 — a time correction and
+ * a specialty correction, each pivoting with a DIFFERENT acknowledgement
+ * phrase on purpose: the exemplars model the anti-repetition rule, not just
+ * the correction-handling one.
  */
-const TN_CORE = Object.freeze([0, 4, 6, 7, 8, 11]);
-
-/**
- * What a LIBYAN call keeps from the Tunisian pack once its own register is in:
- * the price guardrail and the no-diagnosis guardrail. The register rotates; the
- * guardrails never do.
- */
-const TN_GUARDRAILS = Object.freeze([6, 7]);
+const TN_CORE = Object.freeze([0, 1, 2, 3, 4, 5]);
 
 const pick = (list, indexes) => indexes.map((i) => list[i]).filter(Boolean);
 
@@ -68,28 +97,12 @@ export const FEWSHOTS_TN = Object.freeze([
   {
     caller: 'عسلامة، نحب نحجز موعد.',
     agent: 'عسلامة وأهلا بيك. أي نهار يريّحك؟',
-  },
-  {
-    caller: 'نهار الخميس إذا ممكن، في الصباح.',
-    agent: 'باهي، ثانية برك نشوفلك وقت نهار الخميس الصباح.',
-    note: 'the filler is spoken BEFORE the tool call, never after — a silent lookup sounds like a dropped line',
-  },
-  {
-    caller: 'وقتاش تحبني نجي؟',
-    agent: 'عندي [الوقت المتاح] — يمشيك؟',
-  },
-  {
-    caller: 'إي يمشيني.',
-    agent: 'تمام. شنوة اسمك الكامل من فضلك؟',
+    note: 'the rhythm exemplar: acknowledge the greeting, then end on the one question — no filler needed, nothing to look up yet',
   },
   {
     caller: 'محمد الهادي.',
     agent: 'مرسي. الموعد [التاريخ والساعة] باسم محمد الهادي — صحيح؟',
-    note: 'the recap is read back word for word and answered with a plain yes/no before anything is written',
-  },
-  {
-    caller: 'إي صحيح.',
-    agent: 'مثبّت. رقم الموعد [المرجع]، ونستناوك [التاريخ والساعة].',
+    note: 'D4 read-back rule: ONLY the exact data (name + slot) is repeated, word for word, before anything is written',
   },
   {
     caller: 'قداش تسوى الكشفية؟',
@@ -104,30 +117,23 @@ export const FEWSHOTS_TN = Object.freeze([
     note: 'never names a condition, never reassures, never dismisses — it offers the appointment',
   },
   {
-    caller: '… (حس برشة في الخلفية) … نحب … الأربعاء …',
-    agent: 'سامحني، فما حس برشة — تنجم تعاود آخر حاجة؟',
-    note: 'V6.2: address only the primary caller and ask once, warmly',
+    caller: 'لا سامحني، ما نجمش الثلاثاء، تنجملي الأربعاء الصباح؟',
+    agent: 'ولا يهمك، نبدلها. عندي [الوقت المتاح] — يعجبك؟',
+    note: 'V8-D4 correction #1 (mined pivot phrase "ولا يهمك"): no scolding, no re-stating the wrong slot, straight to stage_booking again and a fresh recap',
   },
   {
-    caller: '… (ما زال ما يتسمعش) …',
-    agent: 'ما تقلقش. نبعثلك رسالة هوني في الواتساب ونكملو كتابة؟',
-    note: 'the two-strike rule: after twice unclear, offer the chat thread instead of a third "sorry?"',
-  },
-  {
-    caller: 'نحب نحكي مع واحد من الفريق.',
-    agent: 'أكيد. واحد من الفريق باش يجاوبك هوني في الواتساب. تحب حاجة أخرى؟',
-  },
-  {
-    caller: 'لا شكرا، يعيشك.',
-    agent: 'يعطيك الصحة، بالسلامة.',
-    note: 'a person ends the call: one short farewell, then end_call — no recap, no "anything else today?"',
+    caller: 'لا سامحني، ماهوش عظام، نحب طب الأسنان.',
+    agent: 'ماكاش مشكلة. عندي [الوقت المتاح] لطب الأسنان — يناسبك؟',
+    note: 'V8-D4 correction #2: same graceful pivot, a DIFFERENT acknowledgement phrase than correction #1 on purpose — anti-repetition, demonstrated not just declared',
   },
 ]);
 
 /**
  * Libyan register. Most callers on this corridor are Libyan, and a Tunisian
  * "برشة" where a Libyan says "وايد" is exactly the tell this pack exists to
- * remove. Kept short: register, not a second personality.
+ * remove. Self-sufficient at V8-D4: its own rhythm, read-back, guardrail
+ * (price/travel + the emergency-adjacent case) and both correction exemplars,
+ * in Libyan phrasing throughout — six exemplars, one register, no seams.
  */
 export const FEWSHOTS_LY = Object.freeze([
   {
@@ -135,19 +141,28 @@ export const FEWSHOTS_LY = Object.freeze([
     agent: 'وعليكم السلام، أهلا بيك. شن نهار يناسبك؟',
   },
   {
-    caller: 'شن الأوقات المتوفرة نهار الأحد؟',
-    agent: 'لحظة نتثبت من الأوقات نهار الأحد.',
+    caller: 'اسمي محمد الطرابلسي.',
+    agent: 'تمام. الموعد [التاريخ والساعة] باسم محمد الطرابلسي — صح كذا؟',
+    note: 'D4 read-back rule in Libyan register: "صح كذا؟" not the Tunisian "صحيح؟"',
   },
   {
     caller: 'أنا من طرابلس ونبي نجي لتونس، قداش تكلف؟',
-    agent:
-      'مرحبتين بيك. الأسعار تبدا من [السعر المذكور في معلومات العيادة]، والطبيب يحدد بالضبط بعد ما يشوف حالتك. نحجزولك موعد؟',
+    agent: 'الأسعار تبدا من [السعر المذكور في معلومات العيادة]، والطبيب يحدد بعد الفحص. نحجزولك موعد؟',
   },
   {
     caller: 'ولدي عندو سخانة من الليلة، نستنى الموعد ولا نجي توا؟',
-    agent:
-      'كان الحالة مستعجلة امشي توا لأقرب استعجالي ولا اتصل بالطوارئ. ولا تحب نثبتلك موعد قريب؟',
+    agent: 'كان مستعجلة امشي لأقرب استعجالي ولا اتصل بالطوارئ. نثبتلك موعد قريب؟',
     note: 'emergency-adjacent, not an emergency: never diagnose, never dismiss, point at urgences AND offer the slot',
+  },
+  {
+    caller: 'لا سامحني، مو الثلاثاء، نبي الأربعاء الصبح.',
+    agent: 'ما عليها، نبدلها. عندي [الوقت المتاح] — يوافقك؟',
+    note: 'V8-D4 correction #1, Libyan register ("ما عليها" not the Tunisian "ولا يهمك")',
+  },
+  {
+    caller: 'لا سامحني، مو عظام، نبي طب الأسنان.',
+    agent: 'تمام، نصلحها. عندي [الوقت المتاح] لطب الأسنان — يناسبك؟',
+    note: 'V8-D4 correction #2, a different pivot phrase than correction #1 above',
   },
 ]);
 
@@ -186,6 +201,17 @@ export function isLibyanRegister({ clinic, patientWaId } = {}) {
 
 /**
  * Pick the exemplar list for one call.
+ *
+ * V8-D4 CHANGE: the Libyan branch used to be `[...FEWSHOTS_LY, ...pick(
+ * FEWSHOTS_TN, TN_GUARDRAILS)]` — four Libyan lines plus two borrowed Tunisian
+ * guardrail lines, capped at six. Now that FEWSHOTS_LY carries six exemplars
+ * of its own (including its own price and emergency-adjacent guardrails in
+ * Libyan phrasing), the borrow is not just unneeded, it would have been
+ * silently DROPPED by the six-item cap anyway — `[...6 Libyan, ...2 Tunisian]
+ * .slice(0, 6)` never reaches the Tunisian tail. Retiring the borrow keeps the
+ * behaviour honest: a Libyan caller now hears Libyan phrasing end to end,
+ * never a Tunisian guardrail line mixed in.
+ *
  * @param {object} p
  * @param {string} [p.lang] 'ar' | 'fr' | 'en'
  * @param {object} [p.clinic]
@@ -197,11 +223,10 @@ export function pickFewshots({ lang = 'ar', clinic, patientWaId } = {}) {
   if (lang === 'en') return [...FEWSHOTS_EN];
   const libyan = isLibyanRegister({ clinic, patientWaId });
   // THE ROTATION IS PER REGISTER, NOT PER TURN. A Libyan caller hears the
-  // Libyan four plus the two Tunisian exchanges that carry a guardrail; a
-  // Tunisian caller hears the Tunisian core. Rotating the pack turn by turn
-  // would change the agent's voice mid-call, which is precisely the tell this
-  // pack exists to remove.
-  const list = libyan ? [...FEWSHOTS_LY, ...pick(FEWSHOTS_TN, TN_GUARDRAILS)] : pick(FEWSHOTS_TN, TN_CORE);
+  // Libyan six; a Tunisian caller hears the Tunisian core. Rotating the pack
+  // turn by turn would change the agent's voice mid-call, which is precisely
+  // the tell this pack exists to remove.
+  const list = libyan ? [...FEWSHOTS_LY] : pick(FEWSHOTS_TN, TN_CORE);
   return list.slice(0, MAX_FEWSHOTS);
 }
 

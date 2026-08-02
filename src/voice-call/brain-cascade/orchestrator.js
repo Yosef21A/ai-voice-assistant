@@ -104,13 +104,25 @@ import {
   buildFillerText,
   buildUnclearText,
   buildTwoStrikeText,
+  buildToolStartText,
+  buildSilenceCheckText,
+  buildSilenceByeText,
 } from './prompt.js';
 import { isAlienScript, describeScript } from './script.js';
+import {
+  countWords,
+  isBackchannelOnly,
+  isInterrogativeFragment,
+  detectCaptureAsk,
+  captureFromTool,
+} from './turnTaking.js';
 import { detectEmergency } from '../../notifications/detector.js';
 import { buildEmergencyReply, buildSpokenEmergencyReply } from '../../notifications/pipeline.js';
 import { isFacilitator } from '../../engine/tenantProfile.js';
 import { normalize } from '../../engine/slots.js';
 import { nowString } from '../../engine/humanize/context.js';
+// Aliased: `t` is this file's name for a TURN, in a dozen closures.
+import { t as localized } from '../../engine/responses.js';
 import { sendAs } from '../../api/outbound.js';
 
 const FRAME_MS = 20;
@@ -147,6 +159,42 @@ const DIFF_MAX_CHARS = 200;
  */
 const DEFAULT_BARGE_RMS = 1200;
 const DEFAULT_BARGE_RMS_MS = 240;
+/**
+ * V8-D3 §1 — ENERGY IS EVIDENCE, WORDS ARE THE VERDICT.
+ *
+ * P2.1 made sustained caller energy kill our audio on its own, because the
+ * transcripts were too late and too wrong to fire barge-in even once. It worked,
+ * and then it worked too well: a speakerphone in a waiting room, a TV, a
+ * relative talking in the background and — most often — the caller saying
+ * «أيوا» while listening all reach the same RMS as an interruption, and every
+ * one of them cut the agent off mid-sentence.
+ *
+ * So energy no longer yields ANYTHING by itself. It is recorded (and stays in
+ * stats, because "can callers interrupt this agent" is still a number somebody
+ * has to be able to read), and the kill happens when the EARS confirm at least
+ * `voiceCascadeBargeMinWords` real words. An emergency keyword needs zero.
+ *
+ * This is how long an energy episode still counts as corroboration for a barge
+ * the ears confirm a moment later — one breath, not one call.
+ */
+const ENERGY_EVIDENCE_MS = 2000;
+/** V8-D2 §1 — default end-of-speech, and the patient variant for data capture. */
+const DEFAULT_EOT_MS = 400;
+const DEFAULT_EOT_PATIENT_MS = 900;
+/** V8-D3 §1/§3 — words of real speech required to barge, and to start a turn. */
+const DEFAULT_BARGE_MIN_WORDS = 2;
+const DEFAULT_MIN_TURN_WORDS = 2;
+/** V8-D3 §3 — the two silence windows: one warm check-in, then a goodbye. */
+const DEFAULT_SILENCE_CHECK_MS = 10000;
+const DEFAULT_SILENCE_BYE_MS = 8000;
+/**
+ * V8-D2 §4 — tools that get NO request-start line.
+ *   confirm_booking: the recap flow owns that beat. "One second, let me
+ *     check…" between "is that right?" and "you're booked" is the agent
+ *     talking over the most important sentence of the call.
+ *   end_call: the goodbye has already been said. Nothing is being looked up.
+ */
+const NO_START_LINE = new Set(['confirm_booking', 'end_call']);
 /**
  * ONE TURN-END PER UTTERANCE (V7-P2.1). Deepgram sends `speech_final` and then
  * `UtteranceEnd` on a later frame; our own EOT timer is a third opinion about
@@ -374,9 +422,32 @@ export function createCascadeLoop({
   const facilitator = isFacilitator(clinic);
   const greetingCacheOn = config.voiceGreetingCache !== false;
   const emergencyGraceMs = Number(config.voiceBrainEmergencyGraceMs) || DEFAULT_EMERGENCY_GRACE_MS;
-  const eotMs = Number(config.voiceCascadeEotMs) || 300;
+  const eotMs = Number(config.voiceCascadeEotMs) || DEFAULT_EOT_MS;
+  /**
+   * STATE-DEPENDENT ENDPOINTING (V8-D2 §1). While the agent is collecting a
+   * phone number, a name or a day, the caller pauses INSIDE their answer — a
+   * number read off a card, an older caller in derja, a date checked against a
+   * paper diary. 400 ms cuts them off there and books half a number; 900 ms
+   * costs half a second on exactly the turns where nobody minds waiting.
+   */
+  const eotPatientMs = Number(config.voiceCascadeEotPatientMs) || DEFAULT_EOT_PATIENT_MS;
   const specMinPrefix = Number(config.voiceCascadeSpecMinPrefix) || 12;
   const fillerTtftMs = Number(config.voiceCascadeFillerTtftMs) || 700;
+  /** V8-D2 §2 — warm the LLM connection and the filler tape at ACCEPT time. */
+  const prewarmOn = config.voiceCascadePrewarm !== false && config.voiceCascadePrewarm !== 'off';
+  /** V8-D3 §1 — real words an interim must carry before it may stop us. */
+  const bargeMinWords = Math.max(1, Number(config.voiceCascadeBargeMinWords) || DEFAULT_BARGE_MIN_WORDS);
+  /** V8-D3 §3 — …and the floor for STARTING a turn outside data capture. */
+  const minTurnWords = Math.max(1, Number(config.voiceCascadeMinTurnWords) || DEFAULT_MIN_TURN_WORDS);
+  /** V8-D3 §2 — a bare «أيوا» on a quiet wire is an ack, not a question. */
+  const backchannelAck = config.voiceCascadeBackchannelAck !== false && config.voiceCascadeBackchannelAck !== 'off';
+  /** V8-D3 §3 — caller silence: one check-in, then a polite goodbye. */
+  const silenceCheckMs = Number.isFinite(Number(config.voiceCascadeSilenceCheckMs))
+    ? Math.max(0, Number(config.voiceCascadeSilenceCheckMs))
+    : DEFAULT_SILENCE_CHECK_MS;
+  const silenceByeMs = Number.isFinite(Number(config.voiceCascadeSilenceByeMs))
+    ? Math.max(0, Number(config.voiceCascadeSilenceByeMs))
+    : DEFAULT_SILENCE_BYE_MS;
   /**
    * ENERGY BARGE-IN (V7-P2.1). On the founder's first live call the caller
    * talked over the agent repeatedly and barge-in fired ZERO times in 101
@@ -499,6 +570,43 @@ export function createCascadeLoop({
   let callerHasFloor = false;
   let dtmfActive = null;
   let unclearStrikes = 0;
+  /**
+   * WHAT THE AGENT IS COLLECTING RIGHT NOW (V8-D2 §1): 'name' | 'phone' |
+   * 'date' | 'recap' | null. Read off two independent signals, because neither
+   * is sufficient on its own:
+   *   • what the agent SAID — the model asks for a name conversationally, long
+   *     before the booking gate hears about it (turnTaking.detectCaptureAsk);
+   *   • what a TOOL returned — `stage_booking` refusing for a missing contact
+   *     is proof, whatever phrasing the model chose (turnTaking.captureFromTool).
+   * It drives the EOT timer, the fragment rule and liveEars' idle timer.
+   */
+  let captureState = null;
+  /**
+   * DID THE AGENT'S LAST TURN END ON A QUESTION? (V8-D3 §2, review major 5)
+   *
+   * A bare «نعم»/«أيوا» after «تحب تأكد؟» is an ANSWER, not a nod — but the
+   * question the model asked need not touch a booking field, so `captureState`
+   * cannot see it. This is read off the trailing «؟»/«?» of what the model
+   * actually said, set only by a real model turn (never the greeting, the
+   * check-in or the goodbye), and consumed by the next turn that commits.
+   */
+  let agentQuestionPending = false;
+  /** A capture signal a tool produced mid-turn, applied when the turn commits. */
+  let pendingCapture = null;
+  /** V8-D2 §4 — which request-start phrasing comes next (anti-repetition). */
+  let toolStartIdx = 0;
+  /** V8-D3 §3 — the silence ladder: 0 = quiet so far, 1 = checked in once. */
+  let silenceTimer = null;
+  let silenceStage = 0;
+  let silenceChecks = 0;
+  let silenceEnded = false;
+  /**
+   * The last time EITHER side made a sound, in real milliseconds. Deliberately
+   * NOT the injected clock: that one is frozen in tests and coarse on some
+   * hosts, and this is a stopwatch, not a calendar.
+   */
+  let lastCallerSpeechMs = 0;
+  let lastAgentAudioMs = 0;
   /**
    * The last turn that ran to completion, and the utterance it answered. A
    * speculative turn can FINISH before the caller stops talking — a fast brain
@@ -642,10 +750,28 @@ export function createCascadeLoop({
   let langRejected = 0;
   /** Finals with nothing sayable in them ('.', '…'): never a turn. */
   let emptyFinals = 0;
-  /** Barge-ins triggered by ENERGY rather than by a transcript. */
+  /** Word-confirmed barge-ins the caller's ENERGY had already corroborated. */
   let energyBargeIns = 0;
+  /** Sustained-energy episodes while we were speaking. EVIDENCE, not a verdict. */
+  let energyHits = 0;
   /** Consecutive milliseconds of caller energy over the threshold. */
   let bargeHotMs = 0;
+  /** When the last energy episode fired, in real ms (see ENERGY_EVIDENCE_MS). */
+  let energyHotAt = 0;
+  // ── V8-D3 — the interruption counters ─────────────────────────────────────
+  /** Utterances that were nothing but «أيوا»/«ok». They never stop the agent. */
+  let backchannels = 0;
+  /** Interims too short to be an interruption. Counted, never acted on. */
+  let bargeFragmentsIgnored = 0;
+  /** Finals refused as fragments outside a data-capture state. */
+  let fragmentsRefused = 0;
+  /** V8-D2 §4 — request-start lines spoken to cover an executor call. */
+  let toolStartLines = 0;
+  /** V8-D2 §2 — did the filler tape get primed before the first turn? */
+  let prewarmedFiller = false;
+  let prewarmedLlm = false;
+  /** V8-D2 §2 — providers skipped this call because they were too slow. */
+  const clampedProviders = new Set();
   // ── V7-P2.1 — the double-reply counters ───────────────────────────────────
   /** Frames whose owner did not hold the current speakGen. Never sent. */
   let staleFramesDropped = 0;
@@ -740,8 +866,24 @@ export function createCascadeLoop({
   // The founder heard TWO sequential replies to one utterance. Before any fix,
   // the wire must say WHO spoke: queue entries carry {src, uttId}, the pacer
   // logs one line per contiguous source segment, and stats() counts frames by
-  // source. srcs: greeting | filler | spec | turn | emergency.
-  const outBySrc = { greeting: 0, filler: 0, spec: 0, turn: 0, emergency: 0, unknown: 0 };
+  // source. srcs: greeting | filler | toolstart | silence | spec | turn |
+  // emergency.
+  const outBySrc = {
+    greeting: 0,
+    filler: 0,
+    toolstart: 0,
+    silence: 0,
+    spec: 0,
+    turn: 0,
+    emergency: 0,
+    unknown: 0,
+  };
+  /**
+   * Sources that are NOT the answer: they cover latency, they do not deliver
+   * it. Timing the reply to one of them would report a number the caller never
+   * experienced — and would flatter us by exactly the amount we were late.
+   */
+  const COVER_SRCS = new Set(['filler', 'greeting', 'toolstart', 'silence']);
   let outSeg = null; // { src, uttId, frames } — the segment being played now
 
   function logSegment() {
@@ -753,6 +895,10 @@ export function createCascadeLoop({
   function noteOutFrame(entry, nowMs) {
     const src = entry.src || 'unknown';
     outBySrc[src] = (outBySrc[src] || 0) + 1;
+    // The silence ladder (V8-D3 §3) measures from the moment our audio really
+    // LEFT, not from the moment it was queued: a five-second reply would
+    // otherwise start the caller's ten-second clock five seconds early.
+    lastAgentAudioMs = nowMs;
     if (!outSeg || outSeg.src !== src || outSeg.uttId !== entry.uttId) {
       logSegment();
       outSeg = { src, uttId: entry.uttId, frames: 0, startedAt: nowMs };
@@ -850,8 +996,9 @@ export function createCascadeLoop({
     // AND NEVER FOR A FILLER. «ثانية برك…» is what we say INSTEAD of the
     // answer; timing the reply to it would report a latency that flatters us by
     // exactly the amount the brain was late — turning the metric that exists to
-    // expose slowness into one that hides it.
-    if (awaitingReply && !markTurnFrame && queueWasEmpty && src !== 'filler' && src !== 'greeting') {
+    // expose slowness into one that hides it. Same for the V8 request-start
+    // line and the silence check-in: see COVER_SRCS.
+    if (awaitingReply && !markTurnFrame && queueWasEmpty && !COVER_SRCS.has(src)) {
       markTurnFrame = true;
       audioOwner = owner;
     }
@@ -886,6 +1033,23 @@ export function createCascadeLoop({
       pushFrames(frames, { src: frameSrc, uttId: owner?.uttId ?? null, gen, owner });
     } catch (err) {
       log('[voice-cascade] outbound encode failed:', err?.message || err);
+    }
+  }
+
+  /**
+   * TAPE ONLY, WIRE NEVER (V8-D2 §2). Encode a chunk into the tape being
+   * recorded without queueing a single frame — the pre-warm's whole trick, and
+   * the reason it costs the caller nothing.
+   */
+  function recordTape(pcm, rate) {
+    if (!activeTape) return;
+    try {
+      for (const payload of codec.encodeOut(pcm, rate)) {
+        if (activeTape.frames.length < MAX_GREETING_FRAMES) activeTape.frames.push(payload);
+        else activeTape.overflow = true;
+      }
+    } catch (err) {
+      log('[voice-cascade] pre-warm encode failed:', err?.message || err);
     }
   }
 
@@ -1014,7 +1178,11 @@ export function createCascadeLoop({
    *   the cache (the greeting and the filler); `emergency` marks the one
    *   utterance nothing may cancel.
    */
-  async function speakSentence(text, gen, { emergency = false, tape = null, filler = false, owner = null } = {}) {
+  async function speakSentence(
+    text,
+    gen,
+    { emergency = false, tape = null, filler = false, owner = null, src = null, silent = false } = {}
+  ) {
     if (!hasMouth) return;
     const said = ttsChain.normalizeSpoken ? ttsChain.normalizeSpoken(text, L) : String(text || '').trim();
     // Punctuation-only text is not an utterance, and turning it into an HTTP
@@ -1028,8 +1196,9 @@ export function createCascadeLoop({
     if (!emergency) synthAbort = ac;
     if (tape) activeTape = { frames: [], overflow: false, key: tape.key, text: tape.text };
     // What the ears may hear coming back out of the caller's speaker — a
-    // SPECULATIVE sentence has not been said, so it is not echo material.
-    if (!owner?.speculative) lastAgentUtterance = said;
+    // SPECULATIVE sentence has not been said, and neither has a SILENT one, so
+    // neither is echo material.
+    if (!owner?.speculative && !silent) lastAgentUtterance = said;
     const startedAt = Date.now();
     let firstChunkAt = 0;
     if (filler) emittingFiller = true;
@@ -1048,18 +1217,25 @@ export function createCascadeLoop({
           // A filler's synthesis time is not the REPLY's time-to-first-byte.
           if (!filler && owner && owner.ttsTtfbMs == null) owner.ttsTtfbMs = firstChunkAt - startedAt;
         }
+        // A SILENT SYNTHESIS (V8-D2 §2, the pre-warm). The frames are recorded
+        // to the tape and NOT pushed: nobody is on the other end yet, and the
+        // point of doing this at accept time is that the caller never hears it.
+        if (silent) {
+          recordTape(chunk, ttsRate);
+          continue;
+        }
         emitPcm(
           chunk,
           ttsRate,
           owner,
-          emergency ? 'emergency' : filler ? 'filler' : owner ? 'turn' : 'greeting',
+          src || (emergency ? 'emergency' : filler ? 'filler' : owner ? 'turn' : 'greeting'),
           // THE GENERATION THIS AUDIO BELONGS TO. The emergency writer alone
           // presents none: it outranks the counter, exactly as `cancelled()`
           // above exempts it from being cancelled at all.
           emergency ? null : gen
         );
       }
-      sentencesSpoken += 1;
+      if (!silent) sentencesSpoken += 1;
       commitTape();
     } catch (err) {
       // OUR OWN abort is not a provider failure. Ending the call because the
@@ -1068,6 +1244,10 @@ export function createCascadeLoop({
       onTtsFailure(err);
     } finally {
       if (filler) emittingFiller = false;
+      // A silent synthesis leaves a partial 20 ms frame in the codec's
+      // outbound buffer. Left there it would be glued to the front of the
+      // greeting — half of «ثانية برك» in front of «أهلا بيك». Drop it.
+      if (silent) codec?.resetOut();
       if (synthAbort === ac) synthAbort = null;
       activeTape = null;
     }
@@ -1106,10 +1286,28 @@ export function createCascadeLoop({
    * the same three bugs. The CODEC in that key is load-bearing: Opus payloads
    * replayed on a G.711 leg are pure noise.
    */
-  function speakTaped(text, kind) {
+  /**
+   * @param {string} text
+   * @param {string} kind 'greeting' | 'filler' | 'toolstart' | 'silence'
+   * @param {object} [p]
+   * @param {number} [p.variant] rotating copy (the request-start lines) needs
+   *   ONE CACHE SLOT PER PHRASING: the cache is signature-checked, so three
+   *   variants under one key would evict each other on every call and the tape
+   *   would never be worth having.
+   * @returns {boolean} true ⇒ played from tape, inside one pacing tick
+   */
+  function speakTaped(text, kind, { variant = 0 } = {}) {
     if (!text) return false;
-    const filler = kind === 'filler';
-    const key = filler ? `filler:${voiceKey || 'default'}` : voiceKey;
+    // Everything that is not the greeting is COVER: audio whose whole job is
+    // that the caller does not hear silence while something else happens.
+    const cover = kind === 'filler' || kind === 'toolstart' || kind === 'silence';
+    const src = kind === 'greeting' ? 'greeting' : kind;
+    const key =
+      kind === 'greeting'
+        ? voiceKey
+        : kind === 'filler'
+          ? `filler:${voiceKey || 'default'}`
+          : `${kind}${variant}:${voiceKey || 'default'}`;
     if (greetingCacheOn) {
       const tape = getGreeting({
         tenantId,
@@ -1120,21 +1318,45 @@ export function createCascadeLoop({
         at: Date.now(),
       });
       if (tape) {
-        // Already encoded, so it skips the codec — but NOT the one door: a
-        // replayed tape acquires the current generation like every other
-        // writer, and `tapeable:false` keeps a replay from being re-recorded.
         lastAgentUtterance = text;
+        // ORDER BEFORE INSTANTNESS WHEN A SENTENCE IS IN FLIGHT (V8-D2 §4,
+        // review major 4). A tool-start line pushed straight to the wire while
+        // the model's sentence is still SYNTHESIZING splices «ثانية نشوفلك…»
+        // into the middle of it — the immediate push jumps ahead of the frames
+        // the queued speakSentence has not produced yet. So when anything of
+        // ours is still being made or already queued, the tape replay is put
+        // THROUGH the speech queue under its own gen: it plays after the
+        // sentence, in order, and still skips the codec.
+        if (speechInFlight() || outQueue.length) {
+          enqueueSpeak((gen) => {
+            if (stopped || gen !== speakGen) return;
+            const q = pushFrames(tape.frames, { src, gen, tapeable: false });
+            tapePending += q;
+          });
+          return true;
+        }
+        // The wire is quiet: replay it instantly, inside one pacing tick. NOT
+        // the one door skipped — a replayed tape acquires the current
+        // generation like every other writer, and `tapeable:false` keeps a
+        // replay from being re-recorded.
         const queued = pushFrames(tape.frames, {
-          src: filler ? 'filler' : 'greeting',
+          src,
           gen: speakGen,
           tapeable: false,
         });
         tapePending += queued;
-        return true; // played from cache, inside one pacing tick
+        return true;
       }
     }
     enqueueSpeak((gen) =>
-      speakSentence(text, gen, { filler, tape: greetingCacheOn ? { key, text } : null })
+      speakSentence(text, gen, {
+        // `filler` is the MECHANIC (it suppresses the latency marks and the
+        // TTS-TTFB attribution), and every cover line uses it; `src` is what
+        // the wire log and the frame counters call it.
+        filler: cover,
+        src,
+        tape: greetingCacheOn ? { key, text } : null,
+      })
     );
     return false;
   }
@@ -1191,6 +1413,118 @@ export function createCascadeLoop({
     ensurePacing();
   }
 
+  // ── the silence ladder (V8-D3 §3) ─────────────────────────────────────────
+  /**
+   * A CALLER WHO STOPPED TALKING (V8-D3 §3).
+   *
+   * A phone line held open on somebody who put the handset down, walked away or
+   * lost signal bills for every second and ends in nothing. A human
+   * receptionist asks ONCE, waits, and then says goodbye — so:
+   *
+   *   silence for `voiceCascadeSilenceCheckMs` after our own turn
+   *     → ONE warm check-in («مازلت معايا؟»), deterministic, never a model;
+   *   silence for `voiceCascadeSilenceByeMs` after that
+   *     → a polite goodbye, the existing end_call hang-up flow, and the SAME
+   *       WhatsApp follow-up every other degrade sends, so the patient lands
+   *       back in the chat thread instead of nowhere.
+   *
+   * ONE timer, re-armed by itself, measuring from whichever came last: our
+   * audio leaving the wire, or the caller's last word. Every fire re-checks the
+   * world before acting — the repo's rule for any timer that survives an await.
+   */
+  function scheduleSilence(ms) {
+    clearSilence();
+    if (stopped || !silenceCheckMs || callState.emergency) return;
+    const wait = Math.max(50, Number(ms) || silenceCheckMs);
+    silenceTimer = setTimeout(onSilenceTick, wait);
+    silenceTimer.unref?.();
+  }
+
+  function clearSilence() {
+    if (silenceTimer) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  }
+
+  /**
+   * THE CALLER IS DEMONSTRABLY THERE (V8-D3 §3, review major 2). A nod — even a
+   * bare «نعم» answering the check-in — is proof of a live caller, so it must
+   * reset the silence ladder or the goodbye fires ~150 ms later on somebody who
+   * is plainly still on the line. Every refuseBackchannel branch that swallows
+   * a token calls this first.
+   */
+  function callerStillThere() {
+    lastCallerSpeechMs = Date.now();
+    if (silenceStage) silenceStage = 0;
+    if (!callState.emergency && !callState.endRequested) scheduleSilence(silenceCheckMs);
+  }
+
+  /** True when a spoken line ends on a question the caller is expected to answer. */
+  function endsWithQuestion(text) {
+    return /[؟?]\s*$/.test(String(text || '').trim());
+  }
+
+  function onSilenceTick() {
+    silenceTimer = null;
+    if (stopped || callState.emergency || callState.endRequested) return;
+    // Not silence: it is us. Whatever we are saying restarts the clock when it
+    // lands on the wire (see noteOutFrame).
+    if (agentSpeaking() || turn) {
+      scheduleSilence(silenceCheckMs);
+      return;
+    }
+    const budget = silenceStage === 0 ? silenceCheckMs : silenceByeMs;
+    const quietFor = Date.now() - Math.max(lastCallerSpeechMs, lastAgentAudioMs);
+    if (quietFor < budget) {
+      scheduleSilence(budget - quietFor);
+      return;
+    }
+    if (silenceStage === 0) {
+      silenceStage = 1;
+      silenceChecks += 1;
+      log(`[voice-cascade] ${Math.round(quietFor)}ms of silence — checking the caller is still there`);
+      onAgentTurn();
+      // The check-in ENDS in a «؟», but it is a liveness probe, not a yes/no we
+      // route to the model: a «نعم» answering it must reset the ladder (major
+      // 2), not spawn an LLM turn. So the question flag is explicitly cleared.
+      agentQuestionPending = false;
+      const line = buildSilenceCheckText(L);
+      appendTranscript('agent', line);
+      speakTaped(line, 'silence', { variant: 0 });
+      scheduleSilence(silenceByeMs);
+      return;
+    }
+    // Asked once, no answer. Say goodbye properly and put it in writing.
+    silenceEnded = true;
+    agentQuestionPending = false;
+    log(`[voice-cascade] still silent after the check-in — ending the call and following up on WhatsApp`);
+    onAgentTurn();
+    const bye = buildSilenceByeText(L);
+    appendTranscript('agent', bye);
+    speakTaped(bye, 'silence', { variant: 1 });
+    callState.endRequested = true;
+    armHangup(); // the V5-T2 flow: the line drops once the goodbye has played
+    track(sendSilenceFollowUp());
+  }
+
+  /**
+   * The written half of the silence goodbye. Same string every other degrade
+   * sends (`callBrainLost`), because it says the true thing: we could not
+   * finish the call, here is where to continue. Best-effort by contract — a
+   * failed message must not stop the call from ending.
+   */
+  async function sendSilenceFollowUp() {
+    if (!conversationId || !patientWaId || !sender?.sendText) return;
+    try {
+      await sendAs('bot', conversationId, () =>
+        sender.sendText(clinic, patientWaId, localized(L, 'callBrainLost'))
+      );
+    } catch (err) {
+      log('[voice-cascade] silence follow-up failed:', err?.message || err);
+    }
+  }
+
   function cancelHangup(why) {
     if (!callState.endRequested && !hangupTimer) return;
     callState.endRequested = false;
@@ -1238,18 +1572,24 @@ export function createCascadeLoop({
   }
 
   /**
-   * ENERGY BARGE-IN — the interruption test that does not trust the ears.
+   * CALLER ENERGY — EVIDENCE, NOT A VERDICT (V7-P2.1 → V8-D3 §1).
    *
-   * On the founder's first live cascade call the caller talked over the agent
-   * again and again and `bargeIns` was ZERO for 101 seconds: every path to the
-   * kill-chain went through a transcript, and the transcripts were late, empty
-   * or hallucinated. Meanwhile the ONE thing we always have, on every frame, at
-   * zero cost, is how loud the caller is.
+   * P2.1: on the founder's first live cascade call the caller talked over the
+   * agent again and again and `bargeIns` was ZERO for 101 seconds, because every
+   * path to the kill-chain went through a transcript and the transcripts were
+   * late, empty or hallucinated. So raw loudness became a kill signal.
    *
-   * Two deliberate restrictions:
+   * V8: it stops being one. A waiting room, a television, a relative in the
+   * background and — most of all — a caller saying «أيوا» while they listen all
+   * clear this threshold, and every one of them cut the agent off mid-sentence.
+   * RMS ALONE NEVER YIELDS. What it does now is record that the caller was
+   * audibly talking over us, which is the corroboration `maybeBarge()` looks for
+   * when the ears finally confirm words.
+   *
+   * Two restrictions survive unchanged:
    *   • energy is only accumulated WHILE WE ARE SPEAKING. Otherwise a caller
-   *     who was mid-sentence when the agent started would trip the barge-in on
-   *     the agent's very first frame — cutting off the answer they asked for.
+   *     who was mid-sentence when the agent started would trip on the agent's
+   *     very first frame.
    *   • the sustain window is 240 ms. A click, a cough, a burst of line noise
    *     or one loud packet does not survive it; a human syllable does.
    *
@@ -1268,25 +1608,64 @@ export function createCascadeLoop({
     bargeHotMs += (pcm.length / BRAIN_IN_RATE) * 1000;
     if (bargeHotMs < bargeRmsMs) return;
     bargeHotMs = 0;
-    // THE GATE, CHECKED WHERE IT FIRES (V7-P2.1). On the instrumented call two
-    // of four energy barge-ins killed ZERO queued frames — they fired into
-    // silence, because the sustain window can outlive the sentence it was
-    // measured against. Killing silence is not an interruption, it is noise in
-    // the one counter that says whether callers can interrupt this agent.
-    if (!agentSpeaking()) {
+    // Kept from P2.1: an episode that fires with nothing of ours actually
+    // audible is measuring the tail of a sentence that already ended.
+    const queued = outQueue.length + tapePending;
+    if (!queued) {
       energyBargeSilent += 1;
       return;
     }
-    const queued = outQueue.length + tapePending;
-    if (!queued) energyBargeSilent += 1;
-    energyBargeIns += 1;
+    energyHotAt = Date.now();
+    energyHits += 1;
     log(
-      `[voice-cascade] energy barge-in: ${Math.round(bargeRmsMs)}ms of speech over us ` +
-        `(rms ≥ ${bargeRms}) with no usable transcript — stopping anyway ` +
-        `(${queued} frames queued, ${speakPending} utterances in flight)`
+      `[voice-cascade] caller energy over us: ${Math.round(bargeRmsMs)}ms at rms ≥ ${bargeRms} ` +
+        `(${queued} frames queued) — evidence only; the ears decide whether this is an interruption`
+    );
+  }
+
+  /**
+   * THE WORD GATE (V8-D3 §1) — the ONE place a caller's speech stops the agent.
+   *
+   * Three verdicts, in this order, and the order is the design:
+   *   1. AN EMERGENCY NEEDS NO WORDS. «نموت» is one word and it outranks
+   *      everything in this file. The detector runs on the interim purely to
+   *      decide the YIELD; the full emergency (script, staff page, written
+   *      number, hang-up) still fires from emergencyPreflight, on the window,
+   *      exactly as it did before.
+   *   2. A BACKCHANNEL NEVER YIELDS. «أيوا», «تمام», «باهي», «ok» — a listener
+   *      noise is not a floor grab, and treating it as one is what made the
+   *      agent stutter through every Tunisian call it ever took.
+   *   3. EVERYTHING ELSE NEEDS `bargeMinWords` REAL WORDS. One word out of a
+   *      streaming transcriber is a fragment far more often than it is a
+   *      person, and the cost of being wrong here is a sentence cut in half.
+   *
+   * @param {string} text the interim (or final) the ears just produced
+   * @returns {boolean} true ⇒ the agent has been silenced
+   */
+  function maybeBarge(text) {
+    if (!agentSpeaking()) return false;
+    const emergent = detectEmergency(text, L).hit;
+    if (!emergent) {
+      if (isBackchannelOnly(text)) {
+        backchannels += 1;
+        log(`[voice-cascade] backchannel while speaking (${String(text).slice(0, 24)}) — not an interruption`);
+        return false;
+      }
+      if (countWords(text) < bargeMinWords) {
+        bargeFragmentsIgnored += 1;
+        return false;
+      }
+    }
+    const corroborated = energyHotAt && Date.now() - energyHotAt <= ENERGY_EVIDENCE_MS;
+    if (corroborated) energyBargeIns += 1;
+    energyHotAt = 0;
+    log(
+      `[voice-cascade] barge-in confirmed by the ears (${emergent ? 'EMERGENCY, 0 words needed' : `${countWords(text)} words`}` +
+        `${corroborated ? ', energy corroborated' : ''}) — stopping`
     );
     abortTurn('barge_in');
     killSpeech('barge_in');
+    return true;
   }
 
   async function fireEmergency(hit) {
@@ -1356,7 +1735,12 @@ export function createCascadeLoop({
     callState.lastCallerSpeechAt = toDate(clock()).getTime();
     if (final && callState.staged) callState.speechSinceStage += String(text || '');
     callerStopAt = Date.now();
+    lastCallerSpeechMs = callerStopAt;
     awaitingReply = true;
+    // THE SILENCE LADDER RESETS ON EVERY WORD (V8-D3 §3). A caller who answered
+    // the check-in is not a caller who walked away, and the next silence starts
+    // its count from zero rather than from where the last one left off.
+    if (silenceStage) silenceStage = 0;
     // "بالسلامة" — "wait, one more thing!". They spoke after the goodbye, so
     // there is no goodbye.
     if (!callState.emergency && callState.endRequested) cancelHangup('the caller spoke again');
@@ -1366,19 +1750,24 @@ export function createCascadeLoop({
     if (stopped || callState.emergency) return;
     const text = String(ev?.text || '');
     if (!text.trim()) return;
+    // A BACKCHANNEL IS NOT THE CALLER TAKING THE FLOOR (V8-D3 §2). While we are
+    // speaking it changes nothing at all: no barge, no utterance, no restart of
+    // any timer — it is a nod, and a nod does not interrupt a sentence.
+    if (agentSpeaking() && isBackchannelOnly(text) && !detectEmergency(text, L).hit) {
+      backchannels += 1;
+      return;
+    }
     // The ears delivered something: the next end-of-turn signal is about NEW
     // speech, not a second opinion on the last silence (see claimTurnEnd).
     signalSinceTurnEnd = true;
     noteCallerSpeech(text, { final: false });
     beginUtterance();
 
-    // BARGE-IN. The caller is talking while we are: stop, at every layer, and
-    // keep the context — what we already said stays in history so the next turn
-    // knows the caller heard half a sentence.
-    if (outQueue.length || tapePending > 0 || speechInFlight()) {
-      abortTurn('barge_in');
-      killSpeech('barge_in');
-    }
+    // BARGE-IN, WORD-GATED (V8-D3 §1). The caller is talking while we are:
+    // stop, at every layer — but only once the ears have confirmed real words.
+    // What we already said stays in history, so the next turn knows the caller
+    // heard half a sentence.
+    maybeBarge(text);
 
     // The detector runs on interims too. Waiting for the final would cost a
     // frightened caller several hundred milliseconds for no benefit — and the
@@ -1423,6 +1812,9 @@ export function createCascadeLoop({
       utterance.speculated = true; // do not retry this utterance every interim
       return;
     }
+    // The fragment rule applies to a GUESS too (V8-D3 §3) — silently, because
+    // nothing may be spoken on behalf of a turn that never started.
+    if (countWords(utterance.lastInterim) < minTurnWords && !dataCapture()) return;
     // A GUESS THAT IS ALREADY MADE. One held, un-confirmed reply per utterance
     // is enough; a second would be a second thing to flush. (An utterance that
     // has already been ANSWERED is refused by the ledger inside startTurn,
@@ -1473,6 +1865,81 @@ export function createCascadeLoop({
     return false;
   }
 
+  /**
+   * IS THE AGENT COLLECTING SOMETHING RIGHT NOW? (V8-D2 §1)
+   *
+   * `captureState` covers what the agent ASKED for; `callState.staged` covers
+   * the beat after a recap, where the caller is reading a name, a date and a
+   * phone number back at us and pausing between them. Both are data capture,
+   * and both get the patient endpointer and the fragment exemption.
+   */
+  function dataCapture() {
+    return !!captureState || !!callState.staged;
+  }
+
+  /** The end-of-speech budget for the state the call is in RIGHT NOW. */
+  function currentEotMs() {
+    return dataCapture() ? Math.max(eotMs, eotPatientMs) : eotMs;
+  }
+
+  /**
+   * A NOD IS NOT A TURN (V8-D3 §2), with the four cases three field calls found:
+   *
+   *  0. PART OF AN OPEN UTTERANCE (review major 3). A backchannel arriving while
+   *     real words are still being assembled — «نحب نحجز موعد غدوة» then «باهي»
+   *     50 ms later — is a trailing token of THAT sentence, not a standalone
+   *     ack. The old code ran beginUtterance/resetUtterance/noteAnswered on the
+   *     OPEN utterance: it wiped the booking request, marked it answered, and
+   *     the armed EOT timer fired on nothing and spoke "sorry, it is noisy". So
+   *     when an utterance is open, the token is ignored and its timer kept.
+   *  1. WHILE WE ARE SPEAKING it is immune: no barge (maybeBarge's job), no
+   *     turn. «أيوا» over a sentence means "I'm listening".
+   *  2. …EXCEPT when the caller is ANSWERING. In a data-capture state, or when
+   *     the model's last turn ended on a question (review major 5), «نعم» is a
+   *     real answer and becomes an ordinary turn — a rule that swallowed it
+   *     would stall the booking on the most expensive sentence in the product.
+   *  3. ON A QUIET WIRE, otherwise, it is an acknowledgment: recorded, kept in
+   *     context, given no reply. VOICE_CASCADE_BACKCHANNEL_ACK=off answers it.
+   *
+   * EVERY branch that returns true first proves the caller is alive
+   * (callerStillThere → the silence ladder resets, review major 2).
+   *
+   * @returns {boolean} true ⇒ handled here; this final is not a turn
+   */
+  function refuseBackchannel(text) {
+    if (!isBackchannelOnly(text)) return false;
+    // (0) A trailing token of an utterance that is still open. Ignore it, keep
+    //     the timer, and NEVER touch the utterance — that is the whole fix.
+    if (utterance.startedAt || utterance.finalText.trim() || utterance.lastInterim) {
+      callerStillThere();
+      log(`[voice-cascade] backchannel «${String(text).trim().slice(0, 24)}» trails an open utterance — kept as part of it`);
+      return true;
+    }
+    // (2) The answer we asked for — a staged recap, a collected field, or a
+    //     plain yes/no the model just posed. It becomes a real turn.
+    if (dataCapture()) return false;
+    if (!agentSpeaking() && agentQuestionPending) return false;
+    backchannels += 1;
+    callerStillThere();
+    // (1) A nod over our own sentence never interrupts and never answers.
+    if (agentSpeaking()) {
+      log(`[voice-cascade] backchannel «${String(text).trim().slice(0, 24)}» while speaking — ignored`);
+      return true;
+    }
+    // ACK is off ⇒ answer it like any other turn (pre-V8 behaviour).
+    if (!backchannelAck) return false;
+    // (3) A no-reply-needed utterance: it gets an id and the ledger marks it
+    //     answered, so nothing downstream can decide to answer it after all.
+    beginUtterance();
+    const id = utterance.id;
+    resetUtterance();
+    if (id) noteAnswered(id);
+    appendTranscript('patient', text);
+    history.push({ role: 'user', text: String(text).trim() });
+    log(`[voice-cascade] «${String(text).trim().slice(0, 24)}» is an acknowledgment — no reply needed`);
+    return true;
+  }
+
   function onFinal(ev) {
     if (stopped) return;
     const text = String(ev?.text || '');
@@ -1491,12 +1958,27 @@ export function createCascadeLoop({
       // speaking twice. It used to answer the caller a second time, out of a
       // path that never touches an LLM. claimTurnEnd() collapses it.
       if (!endOfTurn) return;
+      // V8-D2 §1 (review major 1): the same overrule the TEXT speech_final gets.
+      // Deepgram's UtteranceEnd / empty speech_final arrives on its own frame
+      // right after the words (stt/deepgram.js), and it is endpointing the same
+      // premature silence — a pause between two groups of a phone number, not
+      // the end of it. In a data-capture state with real words already held, it
+      // must re-arm the patient timer, not commit the half-number to the brain.
+      // Any new interim clears the timer, exactly as the text path relies on.
+      if (dataCapture() && utterance.finalText.trim()) {
+        clearEot();
+        eotTimer = setTimeout(endOfTurnSignal, currentEotMs());
+        eotTimer.unref?.();
+        return;
+      }
       endOfTurnSignal();
       return;
     }
     // Before ANYTHING else: is this speech at all, and is it in a script a
     // caller on this line could have produced?
     if (refuseFinal(text, endOfTurn)) return;
+    // …and is it a nod rather than a turn? (V8-D3 §2)
+    if (refuseBackchannel(text)) return;
     noteCallerSpeech(text, { final: true });
     beginUtterance(); // a final with no interim before it (Speechmatics, liveEars)
     appendTranscript('patient', text);
@@ -1552,6 +2034,22 @@ export function createCascadeLoop({
         candidate.text = utterance.finalText;
       }
     }
+    // AN ANSWER ALREADY ON THE WIRE THAT THE FINISHED SENTENCE CONTRADICTS.
+    // The restart itself still belongs to end-of-turn (below) — but the KILL
+    // cannot wait for it: with the patient endpointer (V8-D2 §1) end-of-turn
+    // can be most of a second away, and in that second the caller would hear us
+    // keep confidently answering a question they have just withdrawn.
+    if (
+      !candidate &&
+      lastAnswered &&
+      lastAnswered.uttId === utterance.id &&
+      agentSpeaking() &&
+      materialDrift(lastAnswered.answeredText, utterance.finalText)
+    ) {
+      log('[voice-cascade] the caller corrected themselves mid-answer — un-saying it now, not at end-of-turn');
+      revokeAnswer(utterance.id, 'drift');
+      killSpeech('speculation_missed');
+    }
     // A COMPLETED answer for this utterance: we cannot unsay it, but the
     // HISTORY must record what the caller really said, never our guess at it.
     // `answeredText` (what the turn was given) is kept separately, because that
@@ -1562,10 +2060,17 @@ export function createCascadeLoop({
 
     clearEot();
     // `speech_final` is the vendor's own endpointer saying the caller STOPPED.
-    // Trusting it is how the 300 ms timer stops being paid on most turns.
-    if (endOfTurn) endOfTurnSignal();
+    // Trusting it is how the 400 ms timer stops being paid on most turns.
+    //
+    // …AND WHY WE SOMETIMES OVERRULE IT (V8-D2 §1). `endpointing=N` is fixed
+    // when the socket opens (see stt/deepgram.js), so the vendor is answering a
+    // question it cannot know the context of: 300 ms of silence between two
+    // groups of digits is not the end of a phone number. In a data-capture
+    // state the turn is held open for the PATIENT budget instead, and any new
+    // interim clears the timer again — which is the whole mechanism.
+    if (endOfTurn && !dataCapture()) endOfTurnSignal();
     else {
-      eotTimer = setTimeout(endOfTurnSignal, eotMs);
+      eotTimer = setTimeout(endOfTurnSignal, currentEotMs());
       eotTimer.unref?.();
     }
   }
@@ -1601,6 +2106,31 @@ export function createCascadeLoop({
     resetUtterance();
     if (!text) return;
     if (countSpeakable(text) < MIN_MEANINGFUL_CHARS) {
+      noteUnclear();
+      return;
+    }
+    // THE FRAGMENT RULE (V8-D3 §3). A one-word non-backchannel utterance ended
+    // by a pause is, on a streaming transcriber, a piece of a sentence far more
+    // often than it is a question — and answering half a sentence is how the
+    // agent ends up apologizing for something the caller never said.
+    //
+    // THREE EXEMPTIONS, each a real turn the floor would have wrongly eaten:
+    //   • DATA CAPTURE — a single token is exactly what we asked for («الخميس»,
+    //     «محمد», a group of digits).
+    //   • A YES/NO ANSWER — the model's last turn ended on a question, so a
+    //     one-word reply to it is the answer, not a fragment (review major 5).
+    //   • A ONE-WORD QUESTION — «وقتاش؟», «قداش», «وين» carry a trailing «؟» or
+    //     are a closed interrogative word (review minor 7). Two of these in a
+    //     row used to fall through to the WhatsApp degrade unanswered.
+    // A keypad phrase (utterance id 0) and an emergency never reach here.
+    if (
+      countWords(text) < minTurnWords &&
+      !dataCapture() &&
+      !agentQuestionPending &&
+      !isInterrogativeFragment(text)
+    ) {
+      fragmentsRefused += 1;
+      log(`[voice-cascade] «${text.slice(0, 24)}» is a fragment, not a turn — asking rather than guessing`);
       noteUnclear();
       return;
     }
@@ -1800,6 +2330,49 @@ export function createCascadeLoop({
     }
   }
 
+  /**
+   * «ثانية نشوفلك…» — the guaranteed cover for an executor call (V8-D2 §4).
+   *
+   * DETERMINISTIC, and it has to be: the whole point is to speak BEFORE the
+   * thing that is slow, so it can never come from the model that is being
+   * waited on. Rotated through three phrasings, because saying the same four
+   * words before every lookup is its own robot tell (V8-D4's anti-repetition
+   * rule, obeyed where it is free to obey).
+   *
+   * Two tools get nothing: confirm_booking (the recap flow owns that beat — a
+   * "one moment" between "is that right?" and "you're booked" talks over the
+   * most important sentence of the call) and end_call (the goodbye is said; the
+   * line is closing).
+   */
+  function speakToolStart(name) {
+    if (stopped || callState.emergency || !hasMouth) return false;
+    if (NO_START_LINE.has(name)) return false;
+    const text = buildToolStartText(L, toolStartIdx);
+    const variant = toolStartIdx % 3;
+    toolStartIdx += 1;
+    toolStartLines += 1;
+    onAgentTurn();
+    speakTaped(text, 'toolstart', { variant });
+    return true;
+  }
+
+  /**
+   * WHAT THE AGENT IS COLLECTING, RECOMPUTED WHEN THE TURN IS ON THE RECORD
+   * (V8-D2 §1). Two signals, and the tool's is authoritative when it says the
+   * collecting is OVER — a confirmed booking clears the state even if the same
+   * sentence happens to mention a date.
+   */
+  function refreshCapture(t) {
+    const fromTool = pendingCapture;
+    pendingCapture = null;
+    if (fromTool === 'clear') {
+      captureState = null;
+      return;
+    }
+    const asked = detectCaptureAsk(t?.said || '');
+    captureState = asked || fromTool || (callState.staged ? 'recap' : null);
+  }
+
   function startTurn(
     text,
     { speculative = false, vadMs = null, sttFinalMs = null, uttId: id = 0, reuseEntry = null } = {}
@@ -1862,6 +2435,9 @@ export function createCascadeLoop({
       /** The waterfall row this turn owns, once it has one, and whether it is closed. */
       row: null,
       rowLogged: false,
+      /** V8-D2: providers skipped as too slow, and the endpointer in force. */
+      clamped: [],
+      eotMsUsed: currentEotMs(),
       vadMs,
       sttFinalMs,
       said: '',
@@ -1935,6 +2511,13 @@ export function createCascadeLoop({
             t.usage.tokensIn += Number(ev.usage?.tokensIn) || 0;
             t.usage.tokensOut += Number(ev.usage?.tokensOut) || 0;
           }
+          // A provider the chain SKIPPED because it is too slow today (V8-D2
+          // §2). Not a failure and not a rotation: it goes on the waterfall so
+          // a slow call names the reason it was slow.
+          if (ev.type === 'clamped' && ev.provider) {
+            clampedProviders.add(ev.provider);
+            t.clamped = [...new Set([...(t.clamped || []), ev.provider])];
+          }
         }
         if (stopped || turn !== t) return;
 
@@ -1965,12 +2548,23 @@ export function createCascadeLoop({
         messages.push({ role: 'assistant', text: t.said, toolCalls: calls });
         for (const call of calls) {
           toolCalls += 1;
+          // THE REQUEST-START LINE, BEFORE THE WORK (V8-D2 §4). Spoken FIRST,
+          // every time, not only when a timer says the brain was late: by the
+          // time a tool is called the model has usually already produced a
+          // token, so the 700 ms filler has been cleared and the executor's
+          // time is pure silence. Silence during a lookup is the #1 robot tell.
+          speakToolStart(call.name);
           const startedAt = Date.now();
           const result = await executor.exec({ name: call.name, args: call.args });
           const ms = Date.now() - startedAt;
           if (ms >= 600) {
             log(`[voice-cascade] tool ${call.name} took ${ms}ms — the caller heard that as silence unless the filler covered it`);
           }
+          // WHAT THE TOOL SAYS WE ARE COLLECTING (V8-D2 §1): a stage_booking
+          // that refused for a missing contact is proof the next thing the
+          // caller says is a phone number, whatever the model's phrasing was.
+          const signal = captureFromTool(call.name, result);
+          if (signal) pendingCapture = signal;
           messages.push({ role: 'tool', callId: call.id, name: call.name, result });
         }
         if (callState.endRequested) armHangup();
@@ -2036,6 +2630,14 @@ export function createCascadeLoop({
     }
     if (t.said.trim()) history.push({ role: 'assistant', text: t.said.trim() });
     meterTurn(t);
+    // The endpointer's state for the NEXT caller turn is decided by the one we
+    // just finished — what we asked for, and what the tools told us we lack.
+    refreshCapture(t);
+    // …and whether the caller is now expected to answer a yes/no (review major
+    // 5): a bare «نعم» after this turn is an answer only if this turn asked.
+    agentQuestionPending = endsWithQuestion(t.said);
+    // …and the caller's silence clock starts from the end of our own turn.
+    scheduleSilence(silenceCheckMs);
     noteWaterfall(t);
     // Remember WHAT was answered, so the end-of-turn path cannot answer the
     // same utterance a second time (see `lastAnswered`). `answeredText` is the
@@ -2107,6 +2709,10 @@ export function createCascadeLoop({
       stt: sttProvider,
       llm: llmProvider,
       tts: ttsChain?.provider ?? null,
+      /** V8-D2 §2: providers this turn skipped for being too slow, if any. */
+      clamped: t.clamped && t.clamped.length ? t.clamped.join(',') : null,
+      /** V8-D2 §1: the endpointer this turn was answered under. */
+      eot_ms: t.eotMsUsed ?? null,
     };
     t.row = row;
     if (waterfalls.length < MAX_WATERFALLS) waterfalls.push(row);
@@ -2136,7 +2742,9 @@ export function createCascadeLoop({
     log(
       `[voice-cascade] waterfall vad=${row.vad_ms ?? 'n/a'}ms stt=${row.stt_final_ms ?? 'n/a'}ms ` +
         `llm_ttft=${row.llm_ttft_ms ?? 'n/a'}ms tts_ttfb=${row.tts_ttfb_ms ?? 'n/a'}ms ` +
-        `first_audio=${row.first_audio_ms ?? 'n/a'}ms · ${row.stt || 'n/a'} → ${row.llm || 'n/a'} → ${row.tts || 'n/a'}`
+        `first_audio=${row.first_audio_ms ?? 'n/a'}ms eot=${row.eot_ms ?? 'n/a'}ms · ` +
+        `${row.stt || 'n/a'} → ${row.llm || 'n/a'} → ${row.tts || 'n/a'}` +
+        `${row.clamped ? ` · clamped:${row.clamped}` : ''}`
     );
   }
 
@@ -2321,6 +2929,11 @@ export function createCascadeLoop({
         // whether we are still saying it, so it lends both, as functions.
         agentSpeaking,
         agentSaid: () => lastAgentUtterance,
+        // STATE-DEPENDENT ENDPOINTING for the leg whose ONLY endpointer is its
+        // own idle timer (V8-D2 §1). Deepgram and Speechmatics are endpointed
+        // at the vendor and overruled by our EOT timer; liveEars has neither,
+        // so it is lent the state directly.
+        dataCapture,
       });
       sttStartedAt = Date.now();
       stt.on('interim', onInterim);
@@ -2335,6 +2948,79 @@ export function createCascadeLoop({
     })();
     connecting.catch(() => {});
     return connecting;
+  }
+
+  // ── the pre-warm (V8-D2 §2) ───────────────────────────────────────────────
+  /**
+   * PAY THE COLD-START BEFORE THE CALLER IS LISTENING.
+   *
+   * The founder's measured turn was LLM ~850 ms + TTS ~570 ms, and a
+   * meaningful part of the first one of each is not the model at all: it is a
+   * TLS handshake and an HTTP/2 connection to a host this process has never
+   * spoken to. That cost is unavoidable — but it does not have to be paid
+   * inside the first turn, where the caller is sitting in silence waiting for
+   * it. warmUp() runs while pre_accept and the ICE/DTLS handshake are still in
+   * flight, and nothing here can delay any of them.
+   *
+   * TWO WARM-UPS, and the second one is the better idea:
+   *   1. THE BRAIN — the chain opens its primary link's connection with the
+   *      cheapest request that exists (a model metadata GET: no tokens, no
+   *      generation quota — see llm/geminiText.js on why not countTokens).
+   *   2. THE MOUTH — if this tenant's FILLER tape is cold, it is synthesized
+   *      now, in the background. That does double duty: it opens the TTS
+   *      vendor's connection exactly like a HEAD request would, AND it means
+   *      the first «ثانية برك…» of the call plays from tape in one pacing tick
+   *      instead of costing 572 ms at the worst possible moment — the moment we
+   *      already know something is slow.
+   *
+   * Never throws, never rejects, decides nothing: every failure leaves the call
+   * exactly where it was.
+   */
+  function prewarm() {
+    if (!prewarmOn || stopped) return;
+    if (typeof llm?.warmUp === 'function' && !prewarmedLlm) {
+      prewarmedLlm = true;
+      track(
+        Promise.resolve(llm.warmUp()).then(
+          (name) => {
+            if (name) log(`[voice-cascade] pre-warmed the LLM connection (${name})`);
+          },
+          () => {}
+        )
+      );
+    }
+    track(primeFillerTape());
+  }
+
+  /**
+   * Synthesize the filler ONCE, into the tape, without speaking it.
+   *
+   * It goes through the ordinary speech queue on purpose: the codec's outbound
+   * buffer holds a partial frame between calls, so two encoders running at once
+   * would interleave halves of two sentences into one frame. The queue is the
+   * mutex this file already has. `silent:true` is what keeps it off the wire —
+   * every frame is recorded to the tape and NONE is pushed.
+   *
+   * A cache HIT does nothing at all, which is what makes this cost one
+   * synthesis per tenant/lang/codec/voice rather than one per call.
+   */
+  async function primeFillerTape() {
+    if (!prewarmOn || stopped || !hasMouth || !greetingCacheOn || !codec) return false;
+    const text = buildFillerText(L);
+    const key = `filler:${voiceKey || 'default'}`;
+    const cached = getGreeting({
+      tenantId,
+      lang: L,
+      codec: codec.codec,
+      voice: key,
+      signature: text,
+      at: Date.now(),
+    });
+    if (cached) return false;
+    prewarmedFiller = true;
+    log('[voice-cascade] pre-warming the filler tape (and the TTS connection with it)');
+    await enqueueSpeak((gen) => speakSentence(text, gen, { filler: true, silent: true, tape: { key, text } }));
+    return true;
   }
 
   // ── outcome ───────────────────────────────────────────────────────────────
@@ -2412,6 +3098,10 @@ export function createCascadeLoop({
       loadContextOnce();
       try {
         await connectOnce();
+        // V8-D2 §2 — and now that the codec and the chains exist, warm what the
+        // FIRST TURN would otherwise pay for. Tracked, never awaited: the
+        // service is mid-handshake and none of this may delay pre_accept.
+        prewarm();
         return !stopped;
       } catch (err) {
         log('[voice-cascade] warm-up failed:', err?.message || err);
@@ -2471,6 +3161,9 @@ export function createCascadeLoop({
         greetingSource = speakTaped(greeting, 'greeting') ? 'cache' : 'live';
       }
       ensurePacing();
+      // The caller has ten seconds from the end of the greeting to say
+      // something before we check they are still there (V8-D3 §3).
+      scheduleSilence(silenceCheckMs);
     },
 
     /** Wire this into media.onRtp. NEVER throws. */
@@ -2541,6 +3234,20 @@ export function createCascadeLoop({
         emptyFinals,
         energyBargeIns,
         energyBargeSilent,
+        // V8-D2 — latency state. `captureState` is why a turn was patient.
+        captureState,
+        eotMs: currentEotMs(),
+        toolStartLines,
+        prewarmedFiller,
+        prewarmedLlm,
+        clamped: [...clampedProviders],
+        // V8-D3 — what the agent refused to treat as an interruption or a turn.
+        backchannels,
+        bargeFragmentsIgnored,
+        fragmentsRefused,
+        energyHits,
+        silenceChecks,
+        silenceEnded,
         // V7-P2.1 — the double-reply invariants, as numbers a test can assert
         // and a field call can print. `outBySrc.spec` is 0 on every healthy
         // call BY CONSTRUCTION: a speculative frame that reaches the wire has
@@ -2590,11 +3297,14 @@ export function createCascadeLoop({
     // tool-only turn) are still logged — a waterfall that is never printed is
     // a measurement nobody can argue with, in the wrong sense.
     for (const t of [...openWaterfalls]) finalizeWaterfall(t);
-    for (const timer of [emergencyTimer, hangupTimer, eotTimer, fillerTimer]) if (timer) clearTimeout(timer);
+    for (const timer of [emergencyTimer, hangupTimer, eotTimer, fillerTimer, silenceTimer]) {
+      if (timer) clearTimeout(timer);
+    }
     emergencyTimer = null;
     hangupTimer = null;
     eotTimer = null;
     fillerTimer = null;
+    silenceTimer = null;
     outQueue = [];
     activeTape = null;
     // A synthesis or an LLM stream outliving the call is a socket nobody will

@@ -38,7 +38,27 @@ export const DEEPGRAM_MODEL = 'nova-3';
  */
 export const DEEPGRAM_LANGS = Object.freeze({ ar: 'ar-TN', fr: 'fr', en: 'en-US' });
 
-/** The endpointing band the V7 latency budget is built on (ms). */
+/**
+ * The endpointing band the V7 latency budget is built on (ms).
+ *
+ * THE LAYERING, stated once because it is the thing everybody gets wrong
+ * (V8-D2 §1): `endpointing=N` is a CONNECTION-TIME query parameter. The socket
+ * is opened at call setup and lives for the whole call, so this number cannot
+ * be changed when the conversation reaches a phone number and the caller starts
+ * pausing mid-digit. Therefore:
+ *
+ *   • the VENDOR's endpointer stays at 300 ms — the FLOOR signal, the fastest
+ *     honest "they stopped" this transport can produce;
+ *   • the ORCHESTRATOR's own EOT timer is the state-dependent one
+ *     (voiceCascadeEotMs 400 → voiceCascadeEotPatientMs 900 while collecting a
+ *     name/number/date). It is armed on every final and it is what actually
+ *     ends a turn.
+ *
+ * A vendor `speech_final` still short-cuts the timer on ordinary turns, which
+ * is where the 400 ms is bought back. In a data-capture state the orchestrator
+ * holds the turn open past the vendor's opinion, ON PURPOSE — the vendor cannot
+ * know that the silence it just heard is a caller reading the next three digits.
+ */
 export const DEEPGRAM_ENDPOINTING_MS = 300;
 
 /**
