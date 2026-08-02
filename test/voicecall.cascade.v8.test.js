@@ -986,10 +986,17 @@ test('the fragment exemptions: a goodbye and a run of digits are turns, everythi
   assert.equal(isFarewellFragment('بسلام'), true, 'the ears drop the ة — that is the observed final');
   assert.equal(isFarewellFragment('bslama'), true);
   assert.equal(isFarewellFragment('bye'), true);
-  // "au revoir" is TWO words, so the fragment rule never looks at it at all —
-  // only the truncation a streaming transcriber leaves behind needs the set.
+  // V8 — the predicate now also ARMS THE HANG-UP BACKSTOP, so the two languages
+  // in which nobody says a goodbye in one bare word had to be covered: the
+  // politeness that rides along («au», «merci», «thank you») is stripped, and a
+  // real farewell token is still required.
   assert.equal(isFarewellFragment('revoir'), true);
-  assert.equal(isFarewellFragment('au revoir'), false, 'two words is already a turn — nothing to exempt');
+  assert.equal(isFarewellFragment('au revoir'), true, 'the whole of the French goodbye');
+  assert.equal(isFarewellFragment('merci, au revoir'), true);
+  assert.equal(isFarewellFragment('thank you, bye'), true);
+  assert.equal(isFarewellFragment('شكرا بالسلامة'), true);
+  assert.equal(isFarewellFragment('merci'), false, 'a thank-you is not the end of the call');
+  assert.equal(isFarewellFragment('thank you'), false);
   assert.equal(isFarewellFragment('نحب'), false, 'half a word is still half a word');
   assert.equal(isFarewellFragment('نحب نبدل النهار'), false);
   assert.equal(isFarewellFragment(''), false);
@@ -1088,4 +1095,294 @@ test('the caller saying goodbye back does NOT cancel the hang-up', async (t) => 
   await waitFor(() => s2.loop.stats().endRequested === true, 'the second hang-up to arm');
   s2.stt.final('استنى، عندي سؤال آخر', true);
   await waitFor(() => s2.loop.stats().endRequested === false, 'a real "one more thing" to cancel it');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// V8 §1 — DETERMINISTIC CONFIRM-ON-CONSENT
+//
+// The two-phase gate's law is unchanged: nothing is written unless the values
+// survived stage_booking's deterministic validation, the recap was spoken, and
+// the caller said yes AFTER hearing it. What these hold still is that the THIRD
+// condition is now judged in code — because on a scored self-test run
+// (2026-08-02, run 4) the recap was word-perfect, the caller said «نعم صحيح»,
+// and `gemini-flash-lite-latest` answered «ثانية برك نأكدلك الحجز…» and emitted
+// no tool call at all. The consent existed; the booking did not.
+// ════════════════════════════════════════════════════════════════════════════
+
+const STAGE_ARGS = {
+  specialty: 'قلب',
+  datetimeText: 'الخميس 10',
+  name: 'محمد الهادي',
+  contact: '21650123456',
+};
+
+/** Round 1 of the model's turn: it stages. Writes nothing, by construction. */
+const stageStep = async function* () {
+  yield { type: 'toolCall', call: { id: 'c1', name: 'stage_booking', args: STAGE_ARGS } };
+  yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+};
+/** Round 2: it reads the recap the tool returned, word for word. */
+const recapStep = async function* ({ messages }) {
+  yield { type: 'text', delta: `${messages.at(-1).result.recap} ` };
+  yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+};
+
+/** Drive a call to "staged, and the recap has actually left for the wire". */
+async function toRecapRead(t, { llm, config = {} } = {}) {
+  const s = await setup({
+    config: { voiceCascadeEotPatientMs: 25, ...config },
+    llm: llm || fakeLlm([stageStep, recapStep, says('ثانية برك نأكدلك الحجز…')]),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  s.stt.final('نحب نحجز موعد قلب نهار الخميس، اسمي محمد الهادي', true);
+  await s.loop.settled();
+  await waitFor(() => s.loop.stats().outQueue === 0, 'the recap to drain onto the wire');
+  return s;
+}
+
+test('V8 §1: a «نعم صحيح» to a recap the caller HEARD books deterministically — the model gets no vote', async (t) => {
+  const s = await toRecapRead(t);
+  assert.equal(s.loop.stats().staged, true, 'the two-phase gate staged it and wrote nothing');
+  assert.equal(s.loop.stats().recapSpoken, true, 'and the recap really left this process');
+  const turnsBefore = s.llm.turns.length;
+  const saidBefore = s.tts.calls.length;
+
+  s.stt.final('نعم صحيح', true);
+  await waitFor(() => s.loop.stats().deterministicConfirms === 1, 'the loop to fire confirm_booking itself');
+  await s.loop.settled();
+
+  const rows = await s.app.store.listAppointments({ clinicId: CLINIC });
+  assert.equal(rows.length, 1, 'exactly one appointment');
+  assert.equal(rows[0].patientName, 'محمد الهادي');
+  assert.equal(rows[0].contact, '21650123456');
+  assert.equal(s.loop.stats().staged, false, 'the stage is consumed');
+  assert.equal(s.loop.outcome().booked, rows[0].ref);
+  assert.equal(s.llm.turns.length, turnsBefore, 'the yes never reached a model — that is the whole point');
+
+  // The reference is spoken from responses.js carrying the value the STORE
+  // wrote. A reference a model paraphrases is a reference nobody can use.
+  const said = spoken(s, saidBefore).join(' ');
+  assert.ok(said.includes(rows[0].ref), `the reference is read out deterministically (${said})`);
+});
+
+test('V8 §1: the recap still counts when the model SPELLS the number out (self-test 11:22)', async (t) => {
+  // Caught on the rig: a word-perfect recap read «ورقم التلفون واحد وعشرين تسعة
+  // وعشرين…». A matcher that demanded the digits saw nothing, the deterministic
+  // path never armed, and the booking went back to depending on the model.
+  const spellItOut = async function* ({ messages }) {
+    const recap = String(messages.at(-1).result.recap).replace(
+      '21650123456',
+      'واحد وعشرين ستة خمسة صفر واحد اثنين ثلاثة أربعة خمسة ستة'
+    );
+    yield { type: 'text', delta: `${recap} ` };
+    yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+  };
+  const s = await toRecapRead(t, { llm: fakeLlm([stageStep, spellItOut, says('تم.')]) });
+  assert.equal(s.loop.stats().recapSpoken, true, 'the read-back is the read-back in any notation');
+
+  s.stt.final('نعم صحيح', true);
+  await waitFor(() => s.loop.stats().deterministicConfirms === 1, 'the deterministic confirm');
+  await s.loop.settled();
+  const rows = await s.app.store.listAppointments({ clinicId: CLINIC });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].contact, '21650123456', 'the value written is the STAGED one, never a spoken one');
+});
+
+test('V8 §1: half a recap is not a recap — coverage is required, not just the name', async (t) => {
+  const halfStep = async function* () {
+    // The name, and nothing else the caller could have checked.
+    yield { type: 'text', delta: 'باسم محمد الهادي، ثانية برك…' };
+    yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+  };
+  const s = await toRecapRead(t, { llm: fakeLlm([stageStep, halfStep, says('سامحني.')]) });
+  assert.equal(s.loop.stats().recapSpoken, false, 'a name on its own is not a read-back');
+
+  s.stt.final('نعم صحيح', true);
+  await s.loop.settled();
+  assert.equal(s.loop.stats().deterministicConfirms, 0);
+  assert.equal((await s.app.store.listAppointments({ clinicId: CLINIC })).length, 0);
+});
+
+test('V8 §1: it does NOT fire without a stage — a yes on its own books nothing', async (t) => {
+  const s = await setup({ llm: fakeLlm([says('أهلا بيك، شنوة نجم نعمل؟')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.stt.final('نعم صحيح', true);
+  await waitFor(() => s.llm.turns.length === 1, 'the yes to go to the model like any other sentence');
+  await s.loop.settled();
+
+  assert.equal(s.loop.stats().deterministicConfirms, 0);
+  assert.equal((await s.app.store.listAppointments({ clinicId: CLINIC })).length, 0);
+});
+
+test('V8 §1: it does NOT fire on a yes the caller gave BEFORE the recap was read', async (t) => {
+  // The model staged and then said something that is not the recap. Nothing the
+  // caller could have consented to has been read to them.
+  const s = await toRecapRead(t, {
+    llm: fakeLlm([stageStep, says('ثانية برك…'), says('سامحني، نعاودو.')]),
+  });
+  assert.equal(s.loop.stats().staged, true);
+  assert.equal(s.loop.stats().recapSpoken, false, 'no recap on the wire ⇒ no consent to act on');
+
+  s.stt.final('نعم صحيح', true);
+  await waitFor(() => s.llm.turns.length === 3, 'the yes to go to the model instead');
+  await s.loop.settled();
+
+  assert.equal(s.loop.stats().deterministicConfirms, 0);
+  assert.equal((await s.app.store.listAppointments({ clinicId: CLINIC })).length, 0, 'nothing was written');
+  assert.equal(s.loop.stats().staged, true, 'and the stage still stands');
+});
+
+test('V8 §1: it does NOT fire on an ambiguous answer — «يمكن» is not consent', async (t) => {
+  const s = await toRecapRead(t, {
+    llm: fakeLlm([stageStep, recapStep, says('تحب نأكدو ولا نبدلو؟')]),
+  });
+  const turnsBefore = s.llm.turns.length;
+
+  s.stt.final('يمكن', true);
+  await waitFor(() => s.llm.turns.length === turnsBefore + 1, 'the model to handle the ambiguity');
+  await s.loop.settled();
+
+  assert.equal(s.loop.stats().deterministicConfirms, 0);
+  assert.equal((await s.app.store.listAppointments({ clinicId: CLINIC })).length, 0);
+  assert.equal(s.loop.stats().staged, true, 'an ambiguous answer decides nothing, in either direction');
+});
+
+test('V8 §1: an explicit «لا» after the recap clears the stage and books nothing', async (t) => {
+  const s = await toRecapRead(t, {
+    llm: fakeLlm([stageStep, recapStep, says('سامحني، شنوة نبدلو؟')]),
+  });
+  const turnsBefore = s.llm.turns.length;
+
+  s.stt.final('آه لا', true);
+  await waitFor(() => s.loop.stats().staged === false, 'the stage to be dropped deterministically');
+  await waitFor(() => s.llm.turns.length === turnsBefore + 1, 'the model to re-collect');
+  await s.loop.settled();
+
+  assert.equal(s.loop.stats().deterministicConfirms, 0);
+  assert.equal(s.loop.stats().deterministicDeclines, 1);
+  assert.equal((await s.app.store.listAppointments({ clinicId: CLINIC })).length, 0, 'a no writes nothing');
+  assert.equal(s.loop.stats().recapSpoken, false, 'and the recap evidence starts over');
+});
+
+test('V8 §1: IDEMPOTENCE — a model confirm AFTER the deterministic one still leaves ONE appointment', async (t) => {
+  const toolResults = [];
+  const s = await toRecapRead(t, {
+    llm: fakeLlm([
+      stageStep,
+      recapStep,
+      // The caller says something else; the model, catching up, confirms again.
+      async function* () {
+        yield { type: 'toolCall', call: { id: 'c2', name: 'confirm_booking', args: {} } };
+        yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+      },
+      async function* ({ messages }) {
+        toolResults.push(messages.at(-1).result);
+        yield { type: 'text', delta: 'الحجز مثبت.' };
+        yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+      },
+    ]),
+  });
+
+  s.stt.final('نعم صحيح', true);
+  await waitFor(() => s.loop.stats().deterministicConfirms === 1, 'the deterministic confirm');
+  await s.loop.settled();
+  const rows = await s.app.store.listAppointments({ clinicId: CLINIC });
+  assert.equal(rows.length, 1);
+
+  s.stt.final('طيب، شكرا برشة على المساعدة', true);
+  await waitFor(() => toolResults.length === 1, 'the model to confirm a second time');
+  await s.loop.settled();
+
+  assert.equal((await s.app.store.listAppointments({ clinicId: CLINIC })).length, 1, 'still ONE row');
+  assert.equal(toolResults[0].ok, true, 'the gate answers, it does not error at the model');
+  assert.equal(toolResults[0].already, true, 'a no-op');
+  assert.equal(toolResults[0].ref, rows[0].ref, 'the SAME reference, never a second one');
+  assert.equal(
+    s.events.filter((e) => e.type === 'appointment.created').length,
+    1,
+    'and one publish, not two'
+  );
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// V8 §2 — THE HANG-UP BACKSTOP
+// `end_call` lives inside a model turn, and on four scored rehearsal runs in a
+// row the model said its farewell and never called it. The line stayed open.
+// ════════════════════════════════════════════════════════════════════════════
+
+test('V8 §2: the caller says goodbye, the model forgets end_call, and the line is released anyway', async (t) => {
+  const ended = [];
+  const s = await setup({
+    ended,
+    config: { voiceCascadeFarewellHangupMs: 60, voiceCallHangupGraceMs: 3000 },
+    // Exactly what the model did on all four runs: the farewell, no end_call.
+    llm: fakeLlm([says('شكرا و بالسلامة.')]),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.stt.final('بسلامة', true);
+  await waitFor(() => ended.length === 1, 'the line to drop without a single end_call', 8000);
+  assert.equal(s.loop.stats().farewellHangups, 1, 'the backstop, not a model');
+  assert.equal(ended[0].reason, 'completed');
+  assert.equal(s.llm.turns.length, 1, 'the model still got its goodbye turn');
+});
+
+test('V8 §2: «wait, one more thing» inside the grace cancels the release', async (t) => {
+  const ended = [];
+  const s = await setup({
+    ended,
+    config: { voiceCascadeFarewellHangupMs: 400, voiceCallHangupGraceMs: 3000 },
+    llm: fakeLlm([says('بالسلامة.'), says('أيوا، نسمعك.')]),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.stt.final('بسلامة', true);
+  await waitFor(() => s.loop.stats().farewellArmed === true, 'the backstop to arm');
+  s.stt.final('استنى، عندي سؤال آخر', true);
+  await waitFor(() => s.loop.stats().farewellArmed === false, 'the caller to cancel it');
+  await sleep(700);
+  assert.equal(ended.length, 0, 'the line stays open for the caller who is still talking');
+  assert.equal(s.loop.stats().farewellHangups, 0);
+});
+
+test('V8 §2: a staged, unconfirmed booking SUPPRESSES the backstop — never hang up mid-booking', async (t) => {
+  const ended = [];
+  const s = await setup({
+    ended,
+    config: { voiceCascadeFarewellHangupMs: 60, voiceCallHangupGraceMs: 3000, voiceCascadeEotPatientMs: 25 },
+    llm: fakeLlm([stageStep, recapStep, says('بالسلامة.')]),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+  s.stt.final('نحب نحجز موعد قلب نهار الخميس، اسمي محمد الهادي', true);
+  await s.loop.settled();
+  await waitFor(() => s.loop.stats().outQueue === 0, 'the recap to drain');
+  assert.equal(s.loop.stats().staged, true);
+
+  // A goodbye is NOT a booking. The caller is one word away from an appointment.
+  s.stt.final('بسلامة', true);
+  await sleep(600);
+  assert.equal(s.loop.stats().farewellHangups, 0, 'the backstop stood down');
+  assert.equal(s.loop.stats().endRequested, false);
+  assert.equal(ended.length, 0, 'the line is still there for the yes');
 });

@@ -384,6 +384,17 @@ const DICT = {
     en: (v) =>
       `${v.doctor ? `Appointment with Dr ${v.doctor}` : `${v.specialty} appointment`} on ${v.when}, for ${v.name}, phone ${v.contact}. Is that correct?`,
   },
+  // THE SPOKEN CONFIRMATION (V8). Said out loud the instant confirm_booking
+  // returns a reference, by the ORCHESTRATOR rather than by the model — because
+  // a reference the model paraphrases is a reference the caller cannot use, and
+  // on a scored self-test run the model answered a word-perfect «نعم صحيح» with
+  // «ثانية برك نأكدلك الحجز…» and never called the tool at all. The values here
+  // come from the appointment that was just written, never from a generation.
+  callConfirmed: {
+    ar: (v) => `تم الحجز. رقم الحجز متاعك ${v.ref}، نهار ${v.when}. يعطيك الصحة.`,
+    fr: (v) => `C'est confirmé. Votre référence est ${v.ref}, le ${v.when}. Merci à vous.`,
+    en: (v) => `You're booked. Your reference is ${v.ref}, on ${v.when}. Thank you.`,
+  },
   // Spoken twin of adjustedInRecap: same transparency rule (a silently shifted
   // time is a lie), but no emoji and no "reply «no»" — this is read out loud.
   callAdjusted: {

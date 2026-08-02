@@ -343,6 +343,17 @@ export function getConfig(overrides = {}) {
     // and the second one used to speak ("sorry, it is noisy") straight over a
     // perfectly good answer. Collapsed into a single turn-end per utterance.
     voiceCascadeTurnEndDebounceMs: Number(process.env.VOICE_CASCADE_TURN_END_DEBOUNCE_MS) || 250,
+    // ── the hang-up backstop (V8, self-test 2026-08-02) ────────────────────
+    // `end_call` is the ONLY thing that releases a WhatsApp call — and on four
+    // scored rehearsal runs in a row the model said its farewell and never
+    // called it, so the line stayed open until the caller gave up. The caller's
+    // OWN goodbye now arms a deterministic hang-up this long after our reply has
+    // drained, with nothing pending. A model that calls end_call properly still
+    // wins and still fires sooner; a deliberate 0 disables the backstop.
+    voiceCascadeFarewellHangupMs:
+      process.env.VOICE_CASCADE_FAREWELL_HANGUP_MS != null
+        ? Number(process.env.VOICE_CASCADE_FAREWELL_HANGUP_MS) || 0
+        : 3000,
     // ElevenLabs' free tier is 10 000 characters a MONTH (measured live from
     // /v1/user/subscription during P0) — about sixty-five spoken replies. It is
     // the #2 voice in the chain, so a Fish outage could drain the entire month

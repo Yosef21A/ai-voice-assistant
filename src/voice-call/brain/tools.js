@@ -464,6 +464,29 @@ export function createToolExecutor({
 
   async function confirmBooking() {
     const staged = state.staged;
+    // IDEMPOTENCE (V8). Nothing staged, but this call has ALREADY written an
+    // appointment: the model is confirming a second time. That happens for one
+    // good reason — the orchestrator now fires confirm_booking itself the moment
+    // the caller says yes to a recap it heard (brain-cascade/orchestrator.js),
+    // and a model that then emits its own confirm_booking must not produce a
+    // SECOND appointment for one consent. So the second call is a no-op that
+    // returns the SAME reference: nothing is written, nothing is staged, and the
+    // model is told plainly that the work is done.
+    //
+    // This does not soften the gate by one inch. It never books: it can only
+    // report a reference that already exists, and reaching it requires a
+    // completed booking earlier in this same call, which required the full
+    // three-condition gate below.
+    if (!staged && state.booked) {
+      const appt = state.appointment || null;
+      return {
+        ok: true,
+        ref: state.booked,
+        already: true,
+        when: appt?.datetimeISO ? formatWhenSpoken(new Date(appt.datetimeISO), lang) : undefined,
+        note: 'This booking is already written and the caller has already been given the reference. Do NOT repeat it unless they ask. Say goodbye and call end_call.',
+      };
+    }
     // THE GATE, part 1: a model that "just confirms" without staging books nothing.
     if (!staged) {
       return {

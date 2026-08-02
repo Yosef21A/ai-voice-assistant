@@ -277,6 +277,8 @@ export const FAREWELLS = Object.freeze(
     'سلامه',
     'السلامة',
     'السلامه',
+    'بالسلامة',
+    'بالسلامه',
     'سلام',
     // ── derja, WRITTEN IN LATIN — same reason as BACKCHANNELS above ──
     'bslama',
@@ -298,15 +300,59 @@ export const FAREWELLS = Object.freeze(
 );
 
 /**
+ * THE POLITENESS THAT RIDES ALONG WITH A GOODBYE (V8, the hang-up backstop).
+ *
+ * Nobody says «revoir» — they say «au revoir», «merci, au revoir», «thank you,
+ * bye». The two-token all-in-set rule above therefore recognised the ARABIC
+ * goodbye and missed both of the other two languages this line speaks, which
+ * matters now that a caller farewell arms a deterministic hang-up. These tokens
+ * carry no meaning of their own in a closing utterance, so they are stripped
+ * before the test — and stripping them can never turn a non-goodbye into one,
+ * because at least one true FAREWELL token is still required.
+ */
+export const FAREWELL_FILLERS = Object.freeze(
+  new Set([
+    // ── derja / Arabic ──
+    'شكرا',
+    'يعيشك',
+    'برشا',
+    'برشة',
+    'و',
+    'مع',
+    'الله',
+    // ── French ──
+    'au',
+    'a',
+    'merci',
+    'bonne',
+    'journee',
+    'soiree',
+    'bientot',
+    // ── English ──
+    'thank',
+    'thanks',
+    'you',
+    'ok',
+    'okay',
+    'so',
+    'then',
+  ])
+);
+
+/**
  * True when a short final is nothing but a farewell. Checked only where the
- * fragment rule would otherwise refuse the turn.
+ * fragment rule would otherwise refuse the turn — and, since V8, where the
+ * caller's goodbye arms the hang-up backstop.
  * @param {string} text
  * @returns {boolean}
  */
 export function isFarewellFragment(text) {
   const list = words(text);
-  if (!list.length || list.length > 2) return false;
-  return list.every((w) => FAREWELLS.has(w));
+  if (!list.length || list.length > 4) return false;
+  const meaningful = list.filter((w) => !FAREWELL_FILLERS.has(w));
+  // All filler and no goodbye is «شكرا» — a thank-you, not the end of the call.
+  if (!meaningful.length || meaningful.length > 2) return false;
+  return meaningful.every((w) => FAREWELLS.has(w));
 }
 
 /**

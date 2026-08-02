@@ -110,6 +110,7 @@ import {
 } from './prompt.js';
 import { isAlienScript, describeScript } from './script.js';
 import {
+  words as spokenWords,
   countWords,
   isBackchannelOnly,
   isInterrogativeFragment,
@@ -121,7 +122,8 @@ import {
 import { detectEmergency } from '../../notifications/detector.js';
 import { buildEmergencyReply, buildSpokenEmergencyReply } from '../../notifications/pipeline.js';
 import { isFacilitator } from '../../engine/tenantProfile.js';
-import { normalize } from '../../engine/slots.js';
+import { normalize, detectYesNo } from '../../engine/slots.js';
+import { normalizeDigits } from '../../engine/text.js';
 import { nowString } from '../../engine/humanize/context.js';
 // Aliased: `t` is this file's name for a TURN, in a dozen closures.
 import { t as localized } from '../../engine/responses.js';
@@ -204,6 +206,27 @@ const NO_START_LINE = new Set(['confirm_booking', 'end_call']);
  * firing twice, and the second one used to speak.
  */
 const DEFAULT_TURN_END_DEBOUNCE_MS = 250;
+/**
+ * V8 — THE HANG-UP BACKSTOP. How long after the caller's own goodbye, with our
+ * reply drained and nothing pending, the line is released without waiting for a
+ * model to remember `end_call`. Measured need: four scored rehearsal runs, four
+ * farewells spoken, zero end_call.
+ */
+const DEFAULT_FAREWELL_HANGUP_MS = 3000;
+/**
+ * V8 — how much of what we have actually SAID since a stage is kept while
+ * looking for the recap in it. A recap is one or two sentences; this is four.
+ */
+const RECAP_EVIDENCE_MAX_CHARS = 1200;
+/**
+ * V8 — how much of the staged recap's own vocabulary has to come back out of
+ * our mouth before the read-back counts as read. 0.7 clears every real recap
+ * observed on the rig (a model paraphrases punctuation, a connective and
+ * sometimes the digits) and is far out of reach of any other sentence: nothing
+ * else this agent says contains the patient's full name, the specialty, the day
+ * and the hour at once.
+ */
+const RECAP_MIN_COVERAGE = 0.7;
 /**
  * Generations of reply allowed per utterance. TWO: the answer, and the ONE
  * legitimate restart when the finished sentence contradicts what we answered.
@@ -467,6 +490,10 @@ export function createCascadeLoop({
   const turnEndDebounceMs = Number.isFinite(Number(config.voiceCascadeTurnEndDebounceMs))
     ? Math.max(0, Number(config.voiceCascadeTurnEndDebounceMs))
     : DEFAULT_TURN_END_DEBOUNCE_MS;
+  /** V8 — the caller-farewell hang-up backstop. A deliberate 0 disables it. */
+  const farewellHangupMs = Number.isFinite(Number(config.voiceCascadeFarewellHangupMs))
+    ? Math.max(0, Number(config.voiceCascadeFarewellHangupMs))
+    : DEFAULT_FAREWELL_HANGUP_MS;
   /** The leg we are actually on — the mouth synthesizes for THIS wire. */
   const wireCodec = negotiatedCodecName({ sdpAnswer: media?.sdpAnswer, sdpOffer });
 
@@ -568,6 +595,27 @@ export function createCascadeLoop({
   let hangupTimer = null;
   let hangupQuietSince = 0;
   let hangupBy = null;
+  /** V8 — the caller-farewell backstop's timer (see armFarewellHangup). */
+  let farewellTimer = null;
+  /**
+   * V8 — DID THE CALLER ACTUALLY HEAR THE RECAP?
+   *
+   * `spokenOnWireSinceStage` accumulates the raw text of every sentence of ours
+   * whose LAST FRAME has left for the wire since the booking was staged, and
+   * `recapSpokenAt` is the moment that text was first recognisable as the recap
+   * stage_booking returned. Nothing deterministic may act on a «نعم» before it
+   * is set — a yes the caller gave before hearing the read-back is not consent.
+   */
+  let spokenOnWireSinceStage = '';
+  let recapSpokenAt = 0;
+  /**
+   * True from the instant a deterministic confirm claims the utterance until it
+   * has spoken. The executor and the store are awaited in there, and the ONE
+   * thing that must not happen inside that window is the vendor's trailing flush
+   * frame finding an empty utterance and saying «sorry, it is noisy» over the
+   * most important sentence of the call (the V7-P2.1 failure, from a new door).
+   */
+  let confirmingOnConsent = false;
   let emergencyWindow = '';
   let callerHasFloor = false;
   let dtmfActive = null;
@@ -789,6 +837,15 @@ export function createCascadeLoop({
   let turnEndsDebounced = 0;
   /** Energy barge-ins that fired with nothing of ours actually on the wire. */
   let energyBargeSilent = 0;
+  // ── V8 — the two things the model kept forgetting ─────────────────────────
+  /** confirm_booking fired by THIS loop on a deterministic yes after a recap. */
+  let deterministicConfirms = 0;
+  /** …and the ones the gate still refused. The gate always wins. */
+  let deterministicConfirmsRefused = 0;
+  /** Staged bookings dropped deterministically because the caller said no. */
+  let deterministicDeclines = 0;
+  /** Hang-ups the caller's own goodbye released without a model's end_call. */
+  let farewellHangups = 0;
   /**
    * The last thing WE said out loud. liveEars compares finals against it: a
    * Gemini Live session listening to a phone leg sometimes transcribes our own
@@ -897,6 +954,12 @@ export function createCascadeLoop({
   function noteOutFrame(entry, nowMs) {
     const src = entry.src || 'unknown';
     outBySrc[src] = (outBySrc[src] || 0) + 1;
+    // THE LAST FRAME OF A SENTENCE (V8). Everything before this point is a
+    // sentence that was QUEUED; this is the sentence having left the machine.
+    // killSpeech() throws the queue away, so a sentence the caller was never
+    // going to hear never reaches this line — which is exactly the property the
+    // deterministic confirm rests on.
+    if (entry.said) noteSentenceOnWire(entry.said);
     // The silence ladder (V8-D3 §3) measures from the moment our audio really
     // LEFT, not from the moment it was queued: a five-second reply would
     // otherwise start the caller's ten-second clock five seconds early.
@@ -1238,6 +1301,9 @@ export function createCascadeLoop({
         );
       }
       if (!silent) sentencesSpoken += 1;
+      // The WHOLE of this sentence is now queued. Mark its last frame so the
+      // pacer can report the moment it really leaves (V8, the recap evidence).
+      if (!silent && !filler && !owner?.speculative) noteSentenceQueued(text);
       commitTape();
     } catch (err) {
       // OUR OWN abort is not a provider failure. Ending the call because the
@@ -1379,6 +1445,189 @@ export function createCascadeLoop({
       sampleCount: 0,
       at: Date.now(),
     });
+  }
+
+  // ── V8 §1 — DETERMINISTIC CONFIRM-ON-CONSENT ──────────────────────────────
+  //
+  // THE LAW IS UNCHANGED. brain/tools.js still writes nothing unless (a) every
+  // value survived the deterministic extractors in stage_booking, (b) the recap
+  // was spoken, and (c) the caller said yes after hearing it. What moves here is
+  // WHO JUDGES (c). It used to be the model, and on a scored self-test run
+  // (2026-08-02, run 4) the recap was word-perfect, the caller said «نعم صحيح»,
+  // and `gemini-flash-lite-latest` answered «ثانية برك نأكدلك الحجز…» and never
+  // emitted the tool call. The consent existed; the booking did not.
+  //
+  // So the three conditions become machine-checked, and the evidence for (b)
+  // gets STRONGER rather than weaker: not "the model was told to read it" and
+  // not even "we queued it", but "the last frame of the recap left this process
+  // for the wire" — recorded by the pacer, on the frame, and destroyed by
+  // killSpeech along with the audio if the caller never heard it.
+
+  /** A stage happened, or a booking closed: the recap evidence starts over. */
+  function resetRecapEvidence() {
+    spokenOnWireSinceStage = '';
+    recapSpokenAt = 0;
+  }
+
+  /**
+   * A whole sentence of ours is on the outbound queue. Ride its LAST frame, so
+   * "spoken" means left-the-machine rather than made-it-into-a-buffer. An empty
+   * queue means the pacer has already drained everything: it is out.
+   */
+  function noteSentenceQueued(raw) {
+    if (!callState.staged || recapSpokenAt || !raw) return;
+    const last = outQueue[outQueue.length - 1];
+    if (!last) {
+      noteSentenceOnWire(raw);
+      return;
+    }
+    last.said = last.said ? `${last.said} ${raw}` : String(raw);
+  }
+
+  function noteSentenceOnWire(raw) {
+    if (!callState.staged || recapSpokenAt || !raw) return;
+    spokenOnWireSinceStage = `${spokenOnWireSinceStage} ${raw}`.slice(-RECAP_EVIDENCE_MAX_CHARS);
+    if (!recapWasRead(spokenOnWireSinceStage)) return;
+    recapSpokenAt = Date.now();
+    log('[voice-cascade] the staged recap has been read out loud — a «yes» from here is consent this loop can act on');
+  }
+
+  /**
+   * WAS THAT THE RECAP? Matched against what stage_booking returned, never
+   * guessed at — two ways, because a model reads a recap back in its own
+   * punctuation and the first way alone would almost never fire:
+   *
+   *   1. VERBATIM. The recap string itself appears in what we said.
+   *   2. THE NAME, PLUS COVERAGE. Every token of the staged NAME was read
+   *      aloud, AND at least RECAP_MIN_COVERAGE of the recap's own tokens
+   *      appear in what we said. A sentence carrying the patient's full name,
+   *      the specialty, the day, the hour and the read-back question IS the
+   *      read-back, whatever punctuation the model chose.
+   *
+   * Coverage rather than "the contact digits appear", because a self-test run
+   * (2026-08-02 11:22) caught the obvious version being wrong in the expensive
+   * direction: the model read a perfectly good recap with the phone number
+   * SPELLED OUT — «ورقم التلفون واحد وعشرين تسعة وعشرين…» — and a digit match
+   * saw nothing. Every other token of the recap was there.
+   *
+   * This is not the gate and it cannot become one. brain/tools.js still refuses
+   * anything that was not deterministically validated and staged; all this
+   * decides is whether the ORCHESTRATOR may act on a «yes» instead of hoping a
+   * model does. A recap it fails to recognise costs nothing at all: the model
+   * keeps the floor, exactly as before V8.
+   */
+  function recapWasRead(spoken) {
+    const staged = callState.staged;
+    if (!staged) return false;
+    const said = normalize(String(spoken || '')).replace(/\s+/g, ' ');
+    const recap = normalize(String(staged.recapSpoken || '')).replace(/\s+/g, ' ');
+    if (recap && said.includes(recap)) return true;
+    const nameTokens = spokenWords(staged.name);
+    if (!nameTokens.length) return false;
+    const heard = new Set(spokenWords(spoken));
+    // The number as digits counts as one more token however it was grouped:
+    // «21 29 49 67» and «21294967» are the same number said out loud.
+    const contact = String(staged.contact || '').replace(/\D+/g, '');
+    if (contact && normalizeDigits(String(spoken || '')).replace(/\D+/g, '').includes(contact)) {
+      heard.add(contact);
+    }
+    if (!nameTokens.every((w) => heard.has(w))) return false;
+    const recapTokens = spokenWords(staged.recapSpoken);
+    if (!recapTokens.length) return false;
+    let hit = 0;
+    for (const w of recapTokens) if (heard.has(w)) hit += 1;
+    return hit / recapTokens.length >= RECAP_MIN_COVERAGE;
+  }
+
+  /**
+   * The caller's verdict on a recap they have DEMONSTRABLY heard.
+   * @returns {'yes'|'no'|null} null ⇒ this loop decides nothing; the model does
+   */
+  function consentAfterRecap(text) {
+    if (stopped || callState.emergency || classicOwned) return null;
+    // Every one of the three conditions, and never one of them without the
+    // others: something staged, the recap on the wire, and a yes/no the SAME
+    // deterministic parser the chat flow books on classifies.
+    if (!callState.staged || !recapSpokenAt) return null;
+    const verdict = detectYesNo(text);
+    return verdict === 'yes' || verdict === 'no' ? verdict : null;
+  }
+
+  /** Drop a staged booking without writing anything, and say why in the log. */
+  function clearStaged(why) {
+    if (!callState.staged) return;
+    callState.staged = null;
+    callState.speechSinceStage = '';
+    resetRecapEvidence();
+    log(`[voice-cascade] staged booking dropped (${why}) — nothing was written`);
+  }
+
+  /**
+   * THE CALLER SAID YES. Claim the utterance synchronously — the executor and
+   * the store are awaited below, and an end-of-turn signal landing inside that
+   * window would otherwise hand the same sentence to the model as well.
+   */
+  function fireConfirmOnConsent(text) {
+    const id = utterance.id;
+    confirmingOnConsent = true;
+    // This IS the end of that turn — recorded, so the vendor's own end-of-turn
+    // signal for the same sentence is debounced rather than answered again.
+    claimTurnEnd(id);
+    resetUtterance();
+    clearEot();
+    // ONE reply for this sentence, and it is ours. Same claim refuseBackchannel
+    // makes for an acknowledgment, for the same reason.
+    if (id) noteAnswered(id);
+    if (turn) abortTurn('deterministic_confirm');
+    discardSpec('deterministic_confirm');
+    history.push({ role: 'user', text: String(text) });
+    track(runDeterministicConfirm(id));
+  }
+
+  async function runDeterministicConfirm(id) {
+    deterministicConfirms += 1;
+    // The gate's batch rule (brain/tools.js part 2) asks that the confirm land
+    // in a LATER tool batch than the stage. It does, by construction: this runs
+    // on a later CALLER TURN. The counter is advanced exactly as a model's own
+    // tool round advances it — the rule is satisfied honestly, not bypassed.
+    callState.toolBatchId += 1;
+    toolCalls += 1;
+    let result;
+    try {
+      result = await executor.exec({ name: 'confirm_booking', args: {} });
+    } finally {
+      confirmingOnConsent = false;
+    }
+    if (stopped) return;
+    if (!result?.ok) {
+      deterministicConfirmsRefused += 1;
+      log(
+        `[voice-cascade] the gate REFUSED this loop's confirm (${result?.error}) — ` +
+          `nothing was written and the model keeps the floor`
+      );
+      // The utterance was claimed, so nothing else will answer it: ask the
+      // caller again rather than leaving the call silent on the most important
+      // beat it has.
+      noteUnclear();
+      return;
+    }
+    const when = result.when || formatWhenSpoken(toDate(clock()), L);
+    const line = localized(L, 'callConfirmed', { ref: result.ref, when });
+    log(`[voice-cascade] deterministic confirm_booking (utt ${id || '-'}) → ${result.ref}`);
+    onAgentTurn();
+    appendTranscript('agent', line);
+    // THE MODEL LEARNS IT IS DONE from the sentence it will see us having said —
+    // ref included. A synthetic functionCall row in history would be the other
+    // way to say it and it is NOT safe: Gemini 3.x requires the opaque
+    // `thoughtSignature` echoed alongside every functionCall part, and one we
+    // invented has none (HTTP 400, the bug fixed in 7b75903).
+    history.push({ role: 'assistant', text: line });
+    lastAgentUtterance = line;
+    captureState = null;
+    agentQuestionPending = false;
+    resetRecapEvidence();
+    enqueueSpeak((gen) => speakSentence(line, gen, { src: 'turn' }));
+    scheduleSilence(silenceCheckMs);
   }
 
   // ── the hang-up (V5-T2 semantics, unchanged) ──────────────────────────────
@@ -1537,6 +1786,61 @@ export function createCascadeLoop({
       hangupTimer = null;
     }
     log(`[voice-cascade] end_call cancelled (${why}) — the caller is still speaking`);
+  }
+
+  // ── V8 §2 — THE HANG-UP BACKSTOP ──────────────────────────────────────────
+  /**
+   * `end_call` is the ONE thing that releases a WhatsApp call, and it lives
+   * inside a model turn. On four scored rehearsal runs in a row the model said
+   * its farewell and never called it: «بالسلامة.» and then an open line, billing,
+   * until the caller gave up. A demo cannot ride on a model remembering.
+   *
+   * So the CALLER's own goodbye arms a deterministic release. It is a BACKSTOP
+   * and behaves like one:
+   *   • the model's `end_call` still wins, and still fires sooner — this timer
+   *     returns immediately once `endRequested` is set by anything else;
+   *   • it never cuts anything off. It waits for our reply to drain and for the
+   *     turn (and therefore any executor call) to finish, re-arming rather than
+   *     firing while either is true;
+   *   • it NEVER hangs up mid-booking. A staged, unconfirmed booking means the
+   *     caller is one word away from an appointment, and dropping the line there
+   *     would be the most expensive bug in this file;
+   *   • any real "wait, one more thing" cancels it — the same predicate the
+   *     existing cancelHangup path uses, so a farewell and a nod do not.
+   */
+  function armFarewellHangup() {
+    if (!farewellHangupMs || stopped || callState.emergency) return;
+    if (callState.endRequested) return; // the model already asked; that path owns it
+    clearFarewellHangup();
+    farewellTimer = setTimeout(onFarewellTick, farewellHangupMs);
+    farewellTimer.unref?.();
+    log(`[voice-cascade] the caller said goodbye — arming the hang-up backstop (${farewellHangupMs}ms)`);
+  }
+
+  function clearFarewellHangup(why) {
+    if (!farewellTimer) return;
+    clearTimeout(farewellTimer);
+    farewellTimer = null;
+    if (why) log(`[voice-cascade] hang-up backstop cancelled (${why})`);
+  }
+
+  function onFarewellTick() {
+    farewellTimer = null;
+    if (stopped || callState.emergency || callState.endRequested) return;
+    if (callState.staged) {
+      log('[voice-cascade] hang-up backstop stood down — a booking is staged and unconfirmed');
+      return;
+    }
+    // Still writing, still speaking, or a tool still running: wait, do not cut.
+    if (turn || agentSpeaking()) {
+      farewellTimer = setTimeout(onFarewellTick, farewellHangupMs);
+      farewellTimer.unref?.();
+      return;
+    }
+    farewellHangups += 1;
+    log('[voice-cascade] the goodbye is said and nothing is pending — releasing the line without end_call');
+    callState.endRequested = true;
+    armHangup();
   }
 
   // ── the emergency preflight (the model never gets a vote) ─────────────────
@@ -1753,13 +2057,12 @@ export function createCascadeLoop({
     // held the line open indefinitely. A farewell and a nod are the caller
     // AGREEING the call is over — they are the last thing that should keep it
     // alive. Anything else still cancels, because a real "one more thing" must.
-    if (
-      !callState.emergency &&
-      callState.endRequested &&
-      !isFarewellFragment(text) &&
-      !isBackchannelOnly(text)
-    ) {
-      cancelHangup('the caller spoke again');
+    if (!callState.emergency && !isFarewellFragment(text) && !isBackchannelOnly(text)) {
+      // The SAME predicate governs the V8 backstop: a caller with one more
+      // thing to say cancels the release, a caller agreeing the call is over
+      // does not. Interims count — the cancellation must not wait for a final.
+      clearFarewellHangup('the caller spoke again');
+      if (callState.endRequested) cancelHangup('the caller spoke again');
     }
   }
 
@@ -1994,11 +2297,37 @@ export function createCascadeLoop({
     // Before ANYTHING else: is this speech at all, and is it in a script a
     // caller on this line could have produced?
     if (refuseFinal(text, endOfTurn)) return;
+
+    // ── V8 §1: THE ANSWER TO A RECAP THE CALLER HAS HEARD ───────────────────
+    // Checked BEFORE the backchannel rule, because «نعم» and «صحيح» are both on
+    // the ignore-list and this is the most important word of the call. It fires
+    // on nothing else: no staged booking, or a recap whose audio never left this
+    // process, and consentAfterRecap returns null with the model still holding
+    // the floor.
+    const consent = consentAfterRecap(text);
+    if (consent === 'no') {
+      deterministicDeclines += 1;
+      clearStaged('the caller said no to the recap');
+      // …and then nothing else changes: the final goes to the model exactly as
+      // it does today, and the model re-collects what the caller wants changed.
+    } else if (consent === 'yes') {
+      noteCallerSpeech(text, { final: true });
+      beginUtterance();
+      appendTranscript('patient', text);
+      // The law does not bend for a yes: the detector still runs first.
+      if (emergencyPreflight(text)) return;
+      fireConfirmOnConsent(text);
+      return;
+    }
+
     // …and is it a nod rather than a turn? (V8-D3 §2)
     if (refuseBackchannel(text)) return;
     noteCallerSpeech(text, { final: true });
     beginUtterance(); // a final with no interim before it (Speechmatics, liveEars)
     appendTranscript('patient', text);
+    // V8 §2 — the caller said goodbye. Arm the release, so a model that forgets
+    // end_call cannot hold the line open (four rehearsal runs, four times).
+    if (isFarewellFragment(text)) armFarewellHangup();
 
     // THE PREFLIGHT. Every final goes through OUR deterministic detector BEFORE
     // one byte of it reaches an LLM. This is the line the whole medical
@@ -2234,6 +2563,10 @@ export function createCascadeLoop({
    */
   function noteUnclear() {
     if (stopped || callState.emergency) return;
+    // V8 §1: a deterministic confirm is mid-flight. Whatever signal arrived, it
+    // is not a caller who needs to repeat themselves — it is the endpointer
+    // finishing the sentence we have just acted on.
+    if (confirmingOnConsent) return;
     unclearStrikes += 1;
     const line = unclearStrikes >= 2 ? buildTwoStrikeText(L) : buildUnclearText(L);
     if (unclearStrikes >= 2) unclearStrikes = 0;
@@ -2592,6 +2925,12 @@ export function createCascadeLoop({
           // caller says is a phone number, whatever the model's phrasing was.
           const signal = captureFromTool(call.name, result);
           if (signal) pendingCapture = signal;
+          // V8 §1 — the recap evidence belongs to ONE staging. A new stage (a
+          // corrected day, a re-read number) starts the proof over, and a
+          // written booking ends it.
+          if (result?.ok && (call.name === 'stage_booking' || call.name === 'confirm_booking')) {
+            resetRecapEvidence();
+          }
           messages.push({ role: 'tool', callId: call.id, name: call.name, result });
         }
         if (callState.endRequested) armHangup();
@@ -2939,6 +3278,7 @@ export function createCascadeLoop({
             }
             callState.staged = null;
             callState.speechSinceStage = '';
+            resetRecapEvidence();
           }
         },
       });
@@ -3307,6 +3647,13 @@ export function createCascadeLoop({
         endRequested: !!callState.endRequested,
         hangupArmed: !!hangupTimer,
         endedBy: hangupBy,
+        // V8 — the two things the model kept forgetting, as numbers.
+        recapSpoken: !!recapSpokenAt,
+        deterministicConfirms,
+        deterministicConfirmsRefused,
+        deterministicDeclines,
+        farewellArmed: !!farewellTimer,
+        farewellHangups,
       };
     },
   };
@@ -3324,11 +3671,12 @@ export function createCascadeLoop({
     // tool-only turn) are still logged — a waterfall that is never printed is
     // a measurement nobody can argue with, in the wrong sense.
     for (const t of [...openWaterfalls]) finalizeWaterfall(t);
-    for (const timer of [emergencyTimer, hangupTimer, eotTimer, fillerTimer, silenceTimer]) {
+    for (const timer of [emergencyTimer, hangupTimer, eotTimer, fillerTimer, silenceTimer, farewellTimer]) {
       if (timer) clearTimeout(timer);
     }
     emergencyTimer = null;
     hangupTimer = null;
+    farewellTimer = null;
     eotTimer = null;
     fillerTimer = null;
     silenceTimer = null;

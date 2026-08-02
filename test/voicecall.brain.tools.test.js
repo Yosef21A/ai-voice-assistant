@@ -301,10 +301,19 @@ test('confirm_booking after a stage, a read-back and a yes writes the appointmen
   assert.equal(published[0].appointment.ref, r.ref);
 
   // The stage is consumed: a second confirm cannot double-book the same slot.
+  //
+  // V8 — and it now IDEMPOTENTLY returns the same reference rather than an
+  // error. The orchestrator fires confirm_booking itself the moment the caller
+  // says yes to a recap it heard, so a model that then emits its own
+  // confirm_booking is the ordinary case, not a bug. It must never produce a
+  // second appointment, and it must never be told "nothing is staged" about a
+  // booking it can already read the reference of.
   const again = await s.exec({ name: 'confirm_booking', args: {} });
-  assert.equal(again.ok, false);
-  assert.equal(again.error, 'nothing_staged');
+  assert.equal(again.ok, true);
+  assert.equal(again.already, true, 'a no-op, not a write');
+  assert.equal(again.ref, r.ref, 'the SAME reference, never a new one');
   assert.equal((await appts(s.app, CLINIC)).length, 1);
+  assert.equal(ofType(s.events, 'appointment.created').length, 1, 'and no second publish');
 });
 
 test('a re-stage replaces the previous one (the caller said "no, Friday")', async (t) => {

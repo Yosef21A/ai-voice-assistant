@@ -625,3 +625,376 @@ so the rehearsal cannot depend on a key the VPS lacks) is what closes it.
 
 Also blocked on it: `«قلب»` → `«كلب»` (qaf/kaf) and `«الهادي»` → `«العادي»`,
 both observed again this session.
+## 2026-08-02 11:16 — 1 scenario(s) · 0 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-dddbdd1a-c5da-4f79-931f-61ff9b42e809` · caller clips 8 (0 synthesized, 8 cached, 454 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 6 | 1 | 1048ms / 9470ms / 9470ms | 0 | booked EAS-260802-001 (Thursday) |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                6 utterance(s), 6 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+FAIL  the call ran on the cascade to the end ended=tts_lost on cascade
+PASS  felt median ≤ 1300ms               median 1048ms over 2 turn(s)
+FAIL  no turn > 2000ms                   worst 9470ms
+PASS  booking landed                     ref EAS-260802-001
+PASS  specialty correct (cardiology)     أمراض القلب
+PASS  day correct (Thursday)             Thursday 2026-08-05T23:00:00.000Z
+FAIL  hang-up honored ≤10s               -23308ms BEFORE «بسلامة»
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احز موعد
+AGENT   أهلا بيك في مصحة الأمين سوسة، أنا المساعد الآلي. في أي اختصاص تحب تحجز موعد؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   باهي، طبيب قلب. أي نهار والا وقت يريّحك؟
+CALLER  نهار الخميس الصباح
+AGENT   لحظة وحدة نتثبت…عندي نهار الخميس 6 أوت على الساعة 12 صباحاً، والا 12 و30 دقيقة صباحاً، والا 1 صباحاً — شنهو اللي يناسبك؟
+CALLER  نعم صحيح
+AGENT   لحظة وحدة نتثبت…عندي نهار الخميس 6 أوت على الساعة 12 صباحاً، والا 12 و30 دقيقة صباحاً، والا 1 صباحاً — شنهو اللي يناسبك؟
+CALLER  محمد العادي
+AGENT   ثانية برك نشوفلك… شنوة رقم تلفونك لو سمحت؟
+CALLER  21 29 4 9 6 7
+AGENT   موعد أمراض القلب نهار الخميس 6 أوت على الساعة 12 صباحاً، باسم محمد العادي، ورقم التلفون 21294967 — صحيح؟
+CALLER  نعم صحيح
+AGENT   تم الحجز. رقم الحجز متاعك EAS-260802-001، نهار الخميس 6 أوت على الساعة 12 صباحاً. يعطيك الصحة.
+CALLER  نعم صحيح
+AGENT   يعطيك الصحة، بالسلامة.
+```
+
+## 2026-08-02 11:19 — 1 scenario(s) · 0 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-5a3d8c2b-f3f0-429f-bd24-6b9e9dbeb2a3` · caller clips 8 (0 synthesized, 8 cached, 454 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 8 | 1 | 1258ms / 9947ms / 9947ms | 0 | — |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                8 utterance(s), 8 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=call_ended on cascade
+PASS  felt median ≤ 1300ms               median 1258ms over 5 turn(s)
+FAIL  no turn > 2000ms                   worst 9947ms
+FAIL  booking landed                     no appointment row
+FAIL  specialty correct (cardiology)     n/a
+FAIL  day correct (Thursday)             n/a
+FAIL  hang-up honored ≤10s               the app never terminated
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   أهلا بيك في مصحة الأمين سوسة. في أي اختصاص تحب تحجز موعد؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   تمام، ثانية برك نشوفلك الأوقات المتاحة في اختصاص القلب…عندي الأحد 2 أوت على الساعة 1 و30 دقيقة بعد الظهر، أو 2 بعد الظهر — أي وقت يناسبك؟
+CALLER  نهار الخميس الصباح
+AGENT   أيوا، خليني نتثبت…باهي، نهار الخميس 6 أوت الصباح عندي الساعة 9، الساعة 9 ونصف، وإلا الساعة 10 — أنا هو اللي يساعدك؟
+CALLER  نعم صحيح
+AGENT   تمام، شسمك الكريم؟
+CALLER  محمد الهادي
+AGENT   تمام يا سي محمد، لحظة وحدة نتثبت…
+CALLER  21 29
+AGENT   سامحني، ما سمعتكش بالباهي — تنجم تعطيني رقم تلفونك؟
+CALLER  4967 نعم صحيح
+AGENT   باهي، خليني نثبت الرقم: أربعة، تسعة، ستة، سبعة، صحيح هكا؟
+CALLER  نعم صحيح
+AGENT   موعد طب الأسنان نهار الخميس الصباح، باسم محمد الهادي، ورقم التلفون 214967 — صحيح؟ مازلت معايا؟
+CALLER  بسلامه
+AGENT   شكرا و بالسلامة.
+```
+
+## 2026-08-02 11:22 — 1 scenario(s) · 0 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-cfda8b55-ca7f-461f-9bd2-871a7250b13b` · caller clips 8 (0 synthesized, 8 cached, 454 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 8 | 1 | 409ms / 1008ms / 1008ms | 0 | booked EAS-260802-001 (Thursday) |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                8 utterance(s), 8 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=call_ended on cascade
+PASS  felt median ≤ 1300ms               median 409ms over 2 turn(s)
+PASS  no turn > 2000ms                   worst 1008ms
+PASS  booking landed                     ref EAS-260802-001
+PASS  specialty correct (cardiology)     أمراض القلب
+PASS  day correct (Thursday)             Thursday 2026-08-05T23:00:00.000Z
+FAIL  hang-up honored ≤10s               the app never terminated
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   أهلاً بيك في مصحة الأمين سوسة. أنا مساعد آلي، ونيتي نعاونك. فيا اختصاص تحب تحجز؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   تمام، طب القلب. أي نهار يريّحك؟
+CALLER  نهار الخميس الصباح
+AGENT   ثانية برك نشوفلك… عندي الخميس ستة أوت على الساعة اثنعش صباحاً، ولا اثنعش ونص، ولا وحدة صباحاً — شنوة اللي يناسبك؟
+CALLER  نعم صحيح
+AGENT   ثانية برك نثبت… الاسم الكامل من فضلك؟
+CALLER  محمد الهادي
+AGENT   تمام، محمد الهادي. ورقم تليفونك من فضلك؟
+CALLER  21 29 49 67
+AGENT   خليني نشوف…
+CALLER  نعم صحيح
+AGENT   موعد أمراض القلب نهار الخميس 6 أوت على الساعة اثنعش صباحاً، باسم محمد الهادي، ورقم التلفون واحد وعشرين تسعة وعشرين تسعة وأربعين سبعة وستين — صحيح؟
+CALLER  نعم صحيح
+AGENT   رقم الحجز هو إي إيه إس اثنان ستة صفر ثمانية صفر اثنان صفر صفر واحد، وموعدك الخميس ستة أوت على الساعة اثنعش صباحاً. يعطيك الصحة، بالسلامة. مازلت معايا؟
+```
+
+## 2026-08-02 11:27 — 1 scenario(s) · 0 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-28444b94-68f2-48a0-8759-95d0e2c9c506` · caller clips 8 (0 synthesized, 8 cached, 454 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 7 | 1 | 1021ms / 7921ms / 7921ms | 0 | booked EAS-260802-001 (Thursday) |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                7 utterance(s), 7 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=call_ended on cascade
+PASS  felt median ≤ 1300ms               median 1021ms over 5 turn(s)
+FAIL  no turn > 2000ms                   worst 7921ms
+PASS  booking landed                     ref EAS-260802-001
+PASS  specialty correct (cardiology)     أمراض القلب
+PASS  day correct (Thursday)             Thursday 2026-08-05T23:00:00.000Z
+FAIL  hang-up honored ≤10s               the app never terminated
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   أهلاً بيك في كلينيك الأمان سوسة، أنا المساعد الآلي. في أي اختصاص تحب تحجز موعد؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   مليح برشة. في أي نهار تحب تجينا؟
+CALLER  نهار الخميس الصباح
+AGENT   خليني نشوف… بملي، فما نهار الخميس في الصباح. تحبني نحجزلك؟
+CALLER  نعم صحيح
+AGENT   موعد أمراض القلب نهار الخميس 6 أوت على الساعة 12 صباحاً، باسم محمد الهادي، ورقم التلفون 216SELFTEST01. صحيح؟
+CALLER  محمد الهادي
+AGENT   سامحني، فهمت اسمك محمد الهادي. تحب نأكد الموعد على هكا؟
+CALLER  21 29 49 6 7
+AGENT   ثانية برك نتثبت…
+CALLER  نعم صحيح
+AGENT   تم الحجز. رقم الحجز متاعك EAS-260802-001، نهار الخميس 6 أوت على الساعة 12 صباحاً. يعطيك الصحة.
+CALLER  نعم صحيح
+AGENT   شكرا و بالسلامة. مازلت معايا؟
+```
+
+## 2026-08-02 11:32 — 4 scenario(s) · 2 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-e2a8e62a-ee37-4f91-9e01-a46067576c01` · caller clips 10 (0 synthesized, 10 cached, 606 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 9 | 1 | 1122ms / 3089ms / 3089ms | 2 | — |
+| `backchannel` | FAIL | 4 / 3 | 1 | 1006ms / 8741ms / 8741ms | 1 | backchannel STOPPED THE AGENT |
+| `correction` | PASS | 5 / 4 | 1 | 991ms / 1004ms / 1004ms | 1 | correction stopped it in 2819ms |
+| `silence` | PASS | 0 / 0 | 0 | n/a / n/a / n/a | 0 | silence: 2 utterance(s), terminated YES |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                9 utterance(s), 9 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=call_ended on cascade
+PASS  felt median ≤ 1300ms               median 1122ms over 4 turn(s)
+FAIL  no turn > 2000ms                   worst 3089ms
+FAIL  booking landed                     no appointment row
+FAIL  specialty correct (cardiology)     n/a
+FAIL  day correct (Thursday)             n/a
+FAIL  hang-up honored ≤10s               the app never terminated
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   أهلاً بيك في مصحة الأمان بسوسة. في أي اختصاص تحب تحجز؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   ثانية برك نشوفلك… أيا نهار يريّحك؟
+CALLER  نهار الخميس الصباح
+AGENT   خليني نشوف… عندي نهار الخميس على تسعة متاع الصباح، والا الحشيشة على العشرة؟
+CALLER  نعم صحيح
+AGENT   لحظة وحدة نتثبت… شنوا اسمك الكريم؟
+CALLER  محمد الهادي
+AGENT   تمام. وشنوا رقم تلفونك؟
+CALLER  21 29 49 67
+AGENT   ثانية برك نشوف… موعد في أمراض القلب نهار الخميس على تسعة متاع الصباح باسم محمد الهادي، ورقمك اثنين وعشرين تسعة وعشرين تسعة وأربعين سبعة وستين — صحيح؟
+CALLER  نعم صحيح
+AGENT   ثانية برك نتثبت… موعد في أمراض القلب نهار الخميس على تسعة متاع الصباح باسم محمد الهادي ورقمك اثنين وعشرين تسعة وعشرين تسعة وأربعين سبعة وستين — صحيح؟
+CALLER  نعم صحيح
+AGENT   سامحني، تخلطت عليا الأمور شوي — تنجم تعطيني رقم تليفونك مرة أخرى؟
+CALLER  بسلامه
+AGENT   شكرا و بالسلامة
+```
+
+### backchannel — backchannel immunity («باهي» mid-sentence must not stop the agent)
+
+```
+PASS  zero double-replies                3 utterance(s), 3 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=completed on cascade
+PASS  felt median ≤ 1300ms               median 1006ms over 3 turn(s)
+FAIL  no turn > 2000ms                   worst 8741ms
+FAIL  backchannel survived               0ms of continued speech, 0 barge kill(s)
+PASS  hang-up honored ≤10s               8969ms after «بسلامة»
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   أهلاً بيك في Clinique El Amen — Sousse، أنا مساعد آلي ونجم نعاونك في الحجز. شنوة الاختصاص اللي حاجتك بيه؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   أهلا بك، قلب. خليني نشوفلك الأوقات المتاحة…باهي، فمة نهار الأحد 2 أوت مع الساعتين، والا الساعتين ونص، والا الثلاثة متع العشية. أي وقت يساعدك فيهم؟
+CALLER  بسلامه
+AGENT   شكراً و بالسلامة.
+```
+
+### correction — correction (a real interruption MUST stop the agent)
+
+```
+PASS  zero double-replies                4 utterance(s), 4 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=completed on cascade
+PASS  felt median ≤ 1300ms               median 991ms over 2 turn(s)
+PASS  no turn > 2000ms                   worst 1004ms
+PASS  correction stopped the agent       stopped after 2819ms, 1 kill(s)
+PASS  hang-up honored ≤10s               8951ms after «بسلامة»
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   مرحباً بيك في كلينيك الأمان سوسة. أنا مساعدتك الآلية، فيا اختصاص تحب تحجز موعد؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   أهلاً بك. لحظة وحدة نتثبت من المواعيد المتاحة للقلب…
+CALLER  نهار الخميس الصباح
+AGENT   عندي الخميس 6 أوت على الساعة 12 صباحاً، أو 12 و30 دقيقة صباحاً، أو 1 صباحاً — شكون فيهم يعجبك؟
+CALLER  لا سامحني نحب نبدل النهار.
+AGENT   صار التباس، تنجم تعاودلي الوقت اللي يواتيك؟
+CALLER  بسلامه
+AGENT   بالسلامة وأهلاً بيك في أي وقت.
+```
+
+### silence — silence ladder (25 s of nothing → one check-in → goodbye → hang-up)
+
+```
+PASS  zero double-replies                0 utterance(s), 0 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=completed on cascade
+PASS  one warm check-in                  at +9661ms
+PASS  then a goodbye                     at +19345ms
+PASS  and the line released              at +25637ms
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟ مازلت معايا؟ يظهرلي ما نسمعكش. باش نبعثلك رسالة في الواتساب ونكملو غادي. بالسلامة!
+```
+
+
+
+---
+
+## 2026-08-02 — closing the booking bar (V8 §1 deterministic confirm, §2 hang-up backstop)
+
+Five scored runs (four `booking`, one `--scenario all`) against the same isolated
+rig, after moving the two things the model kept dropping into CODE.
+
+### What changed in `src/`
+
+| fix | file | why |
+|---|---|---|
+| deterministic confirm-on-consent | `brain-cascade/orchestrator.js` (`recapWasRead`, `consentAfterRecap`, `fireConfirmOnConsent`, `runDeterministicConfirm`) | the previous session's run 4: recap word-perfect, caller «نعم صحيح», model answered «ثانية برك نأكدلك الحجز…» and emitted no tool call. The consent existed; the booking did not. Condition (c) of the two-phase gate now has a machine judge. |
+| `recapSpokenAt` — proof the recap left the machine | same file (`noteSentenceQueued` → `noteOutFrame`) | the evidence for condition (b) is no longer "we told the model to read it": the marker rides the LAST FRAME of the recap sentence, so `killSpeech()` destroys it with the audio when the caller never heard it. |
+| idempotent `confirm_booking` | `brain/tools.js` | a model confirm after a deterministic one must be a no-op returning the SAME reference, never a second appointment row. |
+| `callConfirmed` — the spoken reference | `engine/responses.js` | the reference is rendered from the row the store wrote. A reference a model paraphrases is a reference the caller cannot use. |
+| farewell hang-up backstop | `brain-cascade/orchestrator.js` (`armFarewellHangup`) + `voiceCascadeFarewellHangupMs` | `end_call` lives inside a model turn and was skipped on 4 of 4 runs. The caller's own goodbye now releases the line once our reply has drained and nothing is pending. |
+| `isFarewellFragment` covers fr/en | `brain-cascade/turnTaking.js` | «au revoir», «merci, au revoir», «thank you, bye» — the politeness that rides along is stripped, a real farewell token is still required. |
+
+`node --test test/voicecall.cascade.*.test.js test/voicecall.brain.*.test.js`
+→ **359 pass / 0 fail** (baseline 348; +11 new, 2 updated for the new contract).
+
+### Run-by-run
+
+| # | time | scenario | booking | hang-up | verdict |
+|---|---|---|---|---|---|
+| 1 | 11:16 | booking | **LANDED** `EAS-260802-001` — deterministic, right specialty/day/name/number | no | (b) fixed + vendor flake: Fish died after the goodbye (`ended=tts_lost`), so terminate landed 23 s BEFORE the bye clip. |
+| 2 | 11:19 | booking | no | suppressed **correctly** | (c) — liveEars split the number («21 29» then «4967 نعم صحيح»); the model staged contact `214967`. The backstop ARMED on «بسلامه» and STOOD DOWN because a booking was staged-unconfirmed. That is the designed behaviour: never hang up mid-booking. |
+| 3 | 11:22 | booking | **LANDED** — but by the MODEL | no | (b) — the model read the recap with the number SPELLED OUT («ورقم التلفون واحد وعشرين تسعة وعشرين…») and the digit matcher saw nothing. Fixed the same hour: `recapWasRead` now scores TOKEN COVERAGE of the staged recap (≥ 0.7) plus every token of the name. Two regression tests added. |
+| 4 | 11:27 | booking | **LANDED** `EAS-260802-001` — deterministic | no (caller's «بسلامة» never transcribed) | clean deterministic run: «تم الحجز. رقم الحجز متاعك EAS-260802-001، نهار الخميس 6 أوت…» |
+| 5 | 11:32 | all | booking no · backchannel no · **correction PASS** · **silence PASS** | **PASS ×2** | first `hang-up honored ≤10s` PASSes in this document: **8969 ms after «بسلامة»** (backchannel) and **8951 ms after «بسلامة»** (correction), both `ended=completed`, both released by the backstop with no `end_call` anywhere. |
+
+### The booking bar, honestly
+
+**3 of 4 booking runs landed a correct appointment** (right specialty, right
+Thursday-morning slot, right name), and on 2 of those the ORCHESTRATOR wrote it
+on the caller's «نعم صحيح» with the model contributing nothing. The old failure
+mode — the model answering a consent with a filler sentence — can no longer cost
+the booking.
+
+What remains is **recap paraphrase**, and it is a measurement, not a guess. On
+run 5 the model rendered the recap as «موعد في أمراض القلب نهار الخميس على تسعة
+متاع الصباح باسم محمد الهادي، ورقمك اثنين وعشرين…» — no «6 أوت», no «الساعة», no
+number in any notation the staged string contains. Coverage scored **0.56**
+against a 0.70 floor, so the deterministic path correctly stood down and the
+model then lost the thread on its own. The floor is a knob
+(`RECAP_MIN_COVERAGE`); it is deliberately NOT lowered, because a read-back
+missing the day and the number is not something a caller can consent to.
+
+### Still blocked on the Deepgram key
+
+* **Run 2**: «21 29» → «4967 نعم صحيح». Same digit fragmentation as the previous
+  session, still the single largest cause of a lost booking.
+* **Runs 3 and 4**: the caller's `bye` clip produced NO transcript line at all —
+  no patient row, no farewell — so neither `end_call` (needs a model turn) nor
+  the backstop (needs a caller farewell) could fire, and only the silence ladder
+  released the line at ~18 s, past the 10 s bar. When the ears DID hear the
+  goodbye (run 5, twice) the backstop passed the bar by ~1 s of margin.
+* `«القلب»` → `«الحشيشة»`, `«الهادي»` → `«العادي»`, `«21»` → `«اثنين وعشرين»`:
+  all observed again this session.
