@@ -255,3 +255,97 @@ CALLER  بسلامه
 AGENT   بالسلامة، نهارك سعيد!
 ```
 
+## 2026-08-02 06:38 — 1 scenario(s) · 0 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-d5b9212b-246a-4cd8-b988-39372ab4b94e` · caller clips 8 (0 synthesized, 8 cached, 454 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 9 | 1 | 1117ms / 1981ms / 1981ms | 0 | — |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                9 utterance(s), 9 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=call_ended on cascade
+PASS  felt median ≤ 1300ms               median 1117ms over 3 turn(s)
+PASS  no turn > 2000ms                   worst 1981ms
+FAIL  booking landed                     no appointment row
+FAIL  specialty correct (cardiology)     n/a
+FAIL  day correct (Thursday)             n/a
+FAIL  hang-up honored ≤10s               the app never terminated
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احز موعد
+AGENT   تمام، أهلا بيك في مصحة الأمين سوسة. في أي اختصاص تحب تحجز موعد؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   مليح، في طب القلب. أي نهار تحب تجينا؟
+CALLER  نهار الخميس الصباح
+AGENT   لحظة وحدة نتثبت…عندي نهار الخميس 6 أوت على الساعة 12 صباحاً، ولا 12 و30 دقيقة صباحاً، ولا 1 صباحاً. يناسبوك؟
+CALLER  نعم صحيح
+AGENT   خليني نشوف… بالهداوة، شسمك الكامل؟
+CALLER  محمد العادي
+AGENT   ثانية برك نشوفلك… شنوة رقم تلفونك؟
+CALLER  21 29 49 67
+AGENT   ثانية برك نشوفلك… تأكيد موعد في اختصاص طب القلب يوم الخميس 6 أوت على الساعة 12 صباحاً، باسم محمد العادي ورقم التلفون 21294967. صحيح؟
+CALLER  نعم صحيح
+AGENT   لحظة برك…سامحني، عاود قولي، في أي نهار والوقت تحب بالضبط؟
+CALLER  نعم صحيح
+AGENT   طلبك موش واضح بالمرة. تنحب نحولك فريقنا على الواتساب يكمل معاك؟
+CALLER  بسلام
+AGENT   يعطيك الصحة، بالسلامة. سامحني، فما حس برشة — تنجم تعاود آخر حاجة؟
+```
+
+## 2026-08-02 06:44 — 1 scenario(s) · 0 passed
+
+Chain: liveEars → gemini-flash-lite-latest → fish · runtime `C:\Users\SEVTECH\AppData\Local\Temp\omen-v8-selftest-5ba7f6e9-662c-47c0-8baf-6ed18074147c` · caller clips 8 (0 synthesized, 8 cached, 454 KB)
+
+| scenario | verdict | utt played / answered | max replies/utt | felt p50 / p95 / worst | barge kills | notes |
+|---|---|---:|---:|---:|---:|---|
+| `booking` | FAIL | 10 / 8 | 1 | 1082ms / 1093ms / 1093ms | 0 | — |
+
+### booking — booking happy path (through spell-back to a confirmed reference)
+
+```
+PASS  zero double-replies                8 utterance(s), 8 reply run(s)
+PASS  no speculative audio on the wire   outBySrc.spec = 0
+PASS  no stale frames                    0 dropped
+PASS  no process-level faults            clean
+PASS  the call ran on the cascade to the end ended=call_ended on cascade
+PASS  felt median ≤ 1300ms               median 1082ms over 2 turn(s)
+PASS  no turn > 2000ms                   worst 1093ms
+FAIL  booking landed                     no appointment row
+FAIL  specialty correct (cardiology)     n/a
+FAIL  day correct (Thursday)             n/a
+FAIL  hang-up honored ≤10s               the app never terminated
+```
+
+Transcript:
+
+```
+AGENT   أهلا بيك في Clinique El Amen — Sousse. معاك المساعد الآلي متاع العيادة، كيفاش نجم نعاونك؟
+CALLER  اهلا نحب ان احجز موعد
+AGENT   أهلا بيك في مصحة الأمين سوسة. أنا مساعدتك الآلية، تحب تحجز موعد في أي اختصاص؟
+CALLER  نحب نشوف طبيب القلب
+AGENT   مليح، في أي نهار تحب تحجز موعد للقلب؟
+CALLER  نهار الخميس الصباح
+AGENT   لحظة وحدة نتثبت…عندنا نهار الخميس 6 أوت على الساعة 12 صباحاً، ولا 12 و30 دقيقة صباحاً، ولا 1 صباحاً — شنية المرة اللي تعجبك؟
+CALLER  نعم صحيح
+AGENT   تمام، باش نسجللك موعد في طب القلب نهار الخميس 6 أوت على الساعة 12 صباحاً. تحب نأكد الحجز؟
+CALLER  محمد الهادي
+AGENT   أيوا، الموعد الخميس 6 أوت على الساعة 12 صباحاً باسم محمد الهادي — صحيح؟
+CALLER  21 29 49 67
+AGENT   ثانية برك نشوفلك…موعد أمراض القلب نهار الخميس 6 أوت على الساعة 12 صباحاً، باسم محمد الهادي، ورقم التلفون 21294967. صحيح؟ مازلت معايا؟
+CALLER  نعم صحيح
+AGENT   خليني نشوف…
+CALLER  بسلامه
+AGENT   بالسلامة!
+```
+

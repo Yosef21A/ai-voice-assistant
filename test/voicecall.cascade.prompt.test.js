@@ -113,8 +113,15 @@ test('D4 #5 — read-backs are scoped to exact data, never a general statement',
 
 // ── D4 pace hint ──────────────────────────────────────────────────────────────
 
-test('D4 — an elderly-sounding caller gets a pace hint (prompt-level; no rate plumbing)', () => {
-  assert.match(HUMAN_POLISH_POLICY, /[Ee]lderly-sounding caller: slow down/);
+test('D4 — the confirm-after-yes rule is imperative (self-test found the model looping back after «نعم»)', () => {
+  // The elderly-pace hint (V5-T2, prompt-only, no rate control) was traded out
+  // of the budget for this: the 2026-08-02 rehearsal booked nothing because
+  // flash-lite got a perfect recap + «نعم صحيح» and then re-asked the day
+  // instead of calling confirm_booking. The rule that fixes it must be present.
+  const clinic = getClinic(CLINIC);
+  const p = buildVoiceTurnPrompt({ clinic, lang: 'ar' });
+  assert.match(p, /confirm_booking/);
+  assert.match(p, /VERY NEXT action is confirm_booking/);
 });
 
 // ── D4 is never conditional: present on every persona (clinic, cabinet, facilitator) ──
