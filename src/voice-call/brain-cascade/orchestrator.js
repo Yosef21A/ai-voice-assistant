@@ -113,6 +113,8 @@ import {
   countWords,
   isBackchannelOnly,
   isInterrogativeFragment,
+  isFarewellFragment,
+  isDigitFragment,
   detectCaptureAsk,
   captureFromTool,
 } from './turnTaking.js';
@@ -1741,9 +1743,24 @@ export function createCascadeLoop({
     // the check-in is not a caller who walked away, and the next silence starts
     // its count from zero rather than from where the last one left off.
     if (silenceStage) silenceStage = 0;
-    // "بالسلامة" — "wait, one more thing!". They spoke after the goodbye, so
-    // there is no goodbye.
-    if (!callState.emergency && callState.endRequested) cancelHangup('the caller spoke again');
+    // "wait, one more thing!" — they spoke after the goodbye, so there is no
+    // goodbye.
+    //
+    // …EXCEPT when what they said IS the goodbye (V8 self-test, 2026-08-02, run
+    // 3). The agent said «شكرا و بالسلامة!» and armed the hang-up; the caller's
+    // own «بسلام» came back through the ears and cancelled it; nothing ever
+    // re-armed it, so the agent then asked the caller to repeat themselves and
+    // held the line open indefinitely. A farewell and a nod are the caller
+    // AGREEING the call is over — they are the last thing that should keep it
+    // alive. Anything else still cancels, because a real "one more thing" must.
+    if (
+      !callState.emergency &&
+      callState.endRequested &&
+      !isFarewellFragment(text) &&
+      !isBackchannelOnly(text)
+    ) {
+      cancelHangup('the caller spoke again');
+    }
   }
 
   function onInterim(ev) {
@@ -2122,12 +2139,22 @@ export function createCascadeLoop({
     //   • A ONE-WORD QUESTION — «وقتاش؟», «قداش», «وين» carry a trailing «؟» or
     //     are a closed interrogative word (review minor 7). Two of these in a
     //     row used to fall through to the WhatsApp degrade unanswered.
+    //   • A ONE-WORD GOODBYE — «بسلامة», and the «بسلام» the ears actually
+    //     return for it. Refused as a fragment, the last beat of the call became
+    //     "sorry, it's noisy, say that again" and the line was never released,
+    //     because end_call only exists inside a turn the model never got.
+    //   • DIGITS — «21» is a caller reading a number off a card. `dataCapture()`
+    //     is supposed to cover this and does not when the agent's own last turn
+    //     was a bare disfluency with no question and no tool; the digits are
+    //     data either way, so they never depend on that state.
     // A keypad phrase (utterance id 0) and an emergency never reach here.
     if (
       countWords(text) < minTurnWords &&
       !dataCapture() &&
       !agentQuestionPending &&
-      !isInterrogativeFragment(text)
+      !isInterrogativeFragment(text) &&
+      !isFarewellFragment(text) &&
+      !isDigitFragment(text)
     ) {
       fragmentsRefused += 1;
       log(`[voice-cascade] «${text.slice(0, 24)}» is a fragment, not a turn — asking rather than guessing`);

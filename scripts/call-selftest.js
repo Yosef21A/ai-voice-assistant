@@ -192,6 +192,20 @@ function stopCapture() {
 /** Log lines emitted inside [from, to). */
 const linesBetween = (from, to = Infinity) => logLines.filter((l) => l.at >= from && l.at < to);
 
+/** `[rtp-out] src=X utt=Y frames=N` — logged when a segment FINISHES sending. */
+const RTP_OUT_RE = /\[rtp-out\] src=(\S+) utt=(\S+) frames=(\d+)/;
+/** Cover audio: the agent asking the caller to hold on, not answering them. */
+const HOLD_ON_SRCS = new Set(['toolstart', 'filler']);
+
+/** The source tag of the last agent segment the app finished sending. */
+function lastOutSrc() {
+  for (let i = logLines.length - 1; i >= 0; i -= 1) {
+    const m = RTP_OUT_RE.exec(logLines[i].text);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 // PROCESS-LEVEL SAFETY NETS. The V7-P2.1 killer was an unhandled rejection from
 // a cancelled TTS body taking the whole server down mid-call. Registering these
 // suppresses the default fatal exit — which is exactly why every one caught here
@@ -304,6 +318,8 @@ async function postWebhook(base, body) {
 //   sayInto                  wait for the agent to START speaking, then talk
 //                            over it at +afterMs. `probe` names what it tests.
 //   quiet                    say nothing at all for ms — the silence ladder
+//   settle                   say NOTHING until the agent has finished a whole
+//                            multi-beat answer (see the step's own note)
 //   bye                      the farewell, then wait for the app to hang up
 const SCENARIOS = {
   booking: {
@@ -349,6 +365,27 @@ const SCENARIOS = {
       // harmless; one who never reaches confirm_booking scores a false FAIL.
       { kind: 'say', clip: 'confirm' },
       { kind: 'say', clip: 'confirm' },
+      // ── THE HARNESS ARTEFACT THIS CLOSES (2026-08-02, run 06:44) ───────────
+      // The flow was already CORRECT: the agent staged, read a full recap with
+      // the name and the eight digits, and on «نعم صحيح» said «خليني نشوف…» —
+      // it was in the middle of confirm_booking. 700 ms later this script said
+      // «بسلامة», the agent obediently ended the call, and the booking bar was
+      // scored on a call the caller had hung up on mid-write.
+      //
+      // The `say` step's turn detector is right for an ordinary turn and wrong
+      // for this one: `confirm_booking` is deliberately the ONE tool with no
+      // request-start line (NO_START_LINE, orchestrator.js), so the beat is
+      // «…» → SILENCE while the executor writes and the model takes a second
+      // round → «تم الحجز، الرقم متاعك…». That silence is ~1–1.5 s, which the
+      // 700 ms "your turn" detector reads as the floor coming back.
+      //
+      // A real caller does not say goodbye into that gap. They have just said
+      // "yes, correct" and heard "let me have a look" — they WAIT for the
+      // reference. So does this step: it holds the floor until the agent has
+      // been quiet for `quietMs` (a person's "he's finished" threshold, well
+      // clear of a tool round-trip), and the 12 s cap means a confirm that
+      // never comes back still FAILS the bar instead of hanging the run.
+      { kind: 'settle', quietMs: 2500, capMs: 12000 },
       { kind: 'bye' },
     ],
   },
@@ -594,13 +631,29 @@ async function placeCall({ werift, name, scenario, clips, callerRate, appBase, p
       return rec;
     };
 
-    /** Wait until the agent has been quiet for `silenceMs`. Never blocks forever. */
+    /**
+     * Wait until the agent has been quiet for `silenceMs`. Never blocks forever.
+     *
+     * …EXCEPT while the agent is holding the floor on purpose. «ثانية نشوفلك…»
+     * (`src=toolstart`) and «ثانية برك…» (`src=filler`) are the product SAYING
+     * "hold on, I'm looking" — and then going quiet for as long as the executor
+     * and the next model round take. A person who has just been asked to wait
+     * does not start talking 700 ms later; this harness used to, and on run 1 of
+     * 2026-08-02 it cost three barge-ins and two whole LLM turns the agent had
+     * to throw away («gemini-flash-lite-latest produced no text this turn»),
+     * i.e. the script was measuring damage it was causing itself.
+     *
+     * The tell is the app's own `[rtp-out] src=` line — the same instrument this
+     * script already uses to count replies — and it is read only to decide when
+     * the CALLER speaks, never to score a bar.
+     */
+    const holdingOn = () => HOLD_ON_SRCS.has(lastOutSrc());
     const waitQuiet = async (silenceMs = QUIET_MS, timeoutMs = TURN_TIMEOUT_MS) => {
       const until = Date.now() + timeoutMs;
       for (;;) {
         const last = lastAgentAt();
-        if (last && Date.now() - last >= silenceMs) return true;
         if (!last) return true; // it has never spoken; the floor is already ours
+        if (Date.now() - last >= silenceMs && !holdingOn()) return true;
         if (Date.now() > until || capped()) return false;
         await sleep(20);
       }
@@ -687,6 +740,36 @@ async function placeCall({ werift, name, scenario, clips, callerRate, appBase, p
         continue;
       }
 
+      if (step.kind === 'settle') {
+        // Hold the floor until the agent has been continuously quiet for
+        // `quietMs`. Any agent frame restarts the clock, so a filler + tool
+        // round-trip + the real answer is ONE settle, however many beats it
+        // takes. Bounded by `capMs` so a brain that never comes back fails the
+        // bar rather than stalling the harness.
+        const quietMs = step.quietMs ?? 2500;
+        const cap = Date.now() + (step.capMs ?? 12000);
+        const from = Date.now();
+        const framesBefore = wire.agentPackets.length;
+        let cappedOut = false;
+        for (;;) {
+          const last = lastAgentAt();
+          if (last && Date.now() - last >= quietMs) break;
+          if (!last) break; // it has never spoken; there is nothing to wait for
+          if (Date.now() > cap || capped()) {
+            cappedOut = true;
+            break;
+          }
+          await sleep(20);
+        }
+        wire.settles = wire.settles || [];
+        wire.settles.push({
+          waitedMs: Date.now() - from,
+          agentFrames: wire.agentPackets.length - framesBefore,
+          cappedOut,
+        });
+        continue;
+      }
+
       if (step.kind === 'quiet') {
         const from = Date.now();
         wire.probes.push({ probe: step.probe, quietFrom: from, quietMs: step.ms });
@@ -769,7 +852,6 @@ function agentSegments(packets, gapMs = SEG_GAP_MS) {
   return segs;
 }
 
-const RTP_OUT_RE = /\[rtp-out\] src=(\S+) utt=(\S+) frames=(\d+)/;
 const KILLED_RE = /\[rtp-out\] killed (\d+) queued frames \(([^)]+)\)/;
 const STALE_RE = /\[rtp-out\] dropped (\d+) frames: stale gen/;
 
@@ -863,6 +945,27 @@ function readAppointments(runtimeDir) {
   } catch {
     return [];
   }
+}
+
+/**
+ * The appointment row can land AFTER the call record does.
+ *
+ * `confirm_booking` writes through store.createAppointment() on the tool round,
+ * while the call record is written by finish() on the terminate webhook — and
+ * on the JSON store those are two independent writes to two files, with a
+ * debounced flush between them. Reading appointments.json once, immediately
+ * after the record appears, therefore scores the booking bar on a file that may
+ * be one flush behind. Poll instead, for a bounded window, and take the first
+ * read that shows growth.
+ */
+async function waitForAppointment(runtimeDir, before, forMs = 5000) {
+  const until = Date.now() + forMs;
+  let rows = readAppointments(runtimeDir);
+  while (rows.length <= before && Date.now() < until) {
+    await sleep(250);
+    rows = readAppointments(runtimeDir);
+  }
+  return rows;
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -1055,6 +1158,7 @@ function scoreCall({ wire, record, appointments, lines, scenario }) {
       agentUtterances: agentSegments(wire.agentPackets).length,
       durationMs: (wire.endedAt || Date.now()) - wire.startedAt,
       graphActions: wire.graphActions || [],
+      settles: wire.settles || [],
       replyLatencies: wire.utterances.filter((u) => u.replyLatencyMs != null).map((u) => ({ clip: u.clip, ms: u.replyLatencyMs })),
     },
     record: brain
@@ -1108,6 +1212,12 @@ function printScorecard(s) {
   line('duration / graph', `${Math.round(s.wire.durationMs / 1000)}s · ${s.wire.graphActions.join(' → ') || 'none'}`);
   line('brain / chain', s.record ? `${s.record.mode} · ${s.record.providers?.stt} → ${s.record.providers?.llm} → ${s.record.providers?.tts}` : 'NO CALL RECORD FOUND');
   line('greeting (felt / record)', `${ms(s.wire.greetingMs)} / ${ms(s.record?.greeting)} (${s.record?.greetingSource || 'n/a'})`);
+  if (s.wire.settles?.length) {
+    line(
+      'settle (waited for the agent)',
+      s.wire.settles.map((x) => `${x.waitedMs}ms, ${x.agentFrames} agent frame(s)${x.cappedOut ? ' !! CAPPED' : ''}`).join(' · ')
+    );
+  }
   out('');
   out('  REPLIES PER UTTERANCE  (from the app\'s own [rtp-out] src= lines)');
   line('utterances played', String(s.wire.utterancesPlayed));
@@ -1373,6 +1483,7 @@ async function main() {
   for (const name of names) {
     const scenario = SCENARIOS[name];
     const from = Date.now();
+    const apptsBefore = readAppointments(runtimeDir).length;
     stopCapture();
     out(`\n[selftest] ▶ ${name} — ${scenario.title}`);
     startCapture();
@@ -1391,12 +1502,15 @@ async function main() {
     await composed.voiceCalls?.settled?.();
     await sleep(600);
     const record = await readCallRecord(runtimeDir, wire.callId);
+    const appointments = scenario.bars.includes('booking')
+      ? await waitForAppointment(runtimeDir, apptsBefore)
+      : readAppointments(runtimeDir);
     const to = Date.now() + 1;
     results.push(
       scoreCall({
         wire,
         record,
-        appointments: readAppointments(runtimeDir),
+        appointments,
         lines: linesBetween(from, to),
         scenario,
       })

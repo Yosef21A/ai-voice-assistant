@@ -36,6 +36,8 @@ import {
   isBackchannelOnly,
   detectCaptureAsk,
   captureFromTool,
+  isFarewellFragment,
+  isDigitFragment,
 } from '../src/voice-call/brain-cascade/turnTaking.js';
 // Aliased: `t` is node:test's TestContext in every case below.
 import { t as localized } from '../src/engine/responses.js';
@@ -970,4 +972,120 @@ test('REGRESSION: a trailing «باهي» never destroys the pending real uttera
   assert.equal(s.llm.turns.length, 1, 'exactly one turn');
   const userText = s.llm.turns[0].messages.filter((m) => m.role === 'user').map((m) => m.text).join(' ');
   assert.ok(userText.includes('نحب نحجز موعد غدوة'), `the booking request survived, got: ${userText}`);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE SELF-TEST'S OWN FINDINGS (2026-08-02) — three ways the last beat of a
+// booking call was lost, every one of them reproduced from a scored run.
+// ════════════════════════════════════════════════════════════════════════════
+
+test('the fragment exemptions: a goodbye and a run of digits are turns, everything else is not', () => {
+  // Farewells — including the truncation the ears actually returned («بسلام»)
+  // and the Latin spellings liveEars emits for derja.
+  assert.equal(isFarewellFragment('بسلامة'), true);
+  assert.equal(isFarewellFragment('بسلام'), true, 'the ears drop the ة — that is the observed final');
+  assert.equal(isFarewellFragment('bslama'), true);
+  assert.equal(isFarewellFragment('bye'), true);
+  // "au revoir" is TWO words, so the fragment rule never looks at it at all —
+  // only the truncation a streaming transcriber leaves behind needs the set.
+  assert.equal(isFarewellFragment('revoir'), true);
+  assert.equal(isFarewellFragment('au revoir'), false, 'two words is already a turn — nothing to exempt');
+  assert.equal(isFarewellFragment('نحب'), false, 'half a word is still half a word');
+  assert.equal(isFarewellFragment('نحب نبدل النهار'), false);
+  assert.equal(isFarewellFragment(''), false);
+
+  // Digits — a transcriber emits half-WORDS, never a spurious number.
+  assert.equal(isDigitFragment('21'), true);
+  assert.equal(isDigitFragment('4 9 6 7'), true);
+  assert.equal(isDigitFragment('٢١'), true, 'Arabic-Indic digits are digits');
+  assert.equal(isDigitFragment('21 ماي'), false, 'a number plus a word is a sentence');
+  assert.equal(isDigitFragment('نحب'), false);
+  assert.equal(isDigitFragment(''), false);
+});
+
+test('a one-word «بسلام» is a goodbye, not a fragment — the model gets the turn that ends the call', async (t) => {
+  const s = await setup({ llm: fakeLlm([says('شكرا و بالسلامة.')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.stt.final('بسلام', true);
+  await waitFor(() => s.llm.turns.length === 1, 'the farewell to become a turn');
+  assert.equal(s.loop.stats().fragmentsRefused, 0, 'the last beat of the call is never an artefact');
+  assert.equal(s.llm.turns[0].messages.at(-1).text, 'بسلام');
+});
+
+test('digits are data even when nothing said we were collecting them', async (t) => {
+  // The reproduced shape: the agent answered with a bare disfluency — no
+  // question, no tool — so `captureState` was null and the number the caller
+  // read off a card arrived into a state that called it noise.
+  const s = await setup({ llm: fakeLlm([says('لحظة وحدة نتثبت…'), says('وباقي الرقم؟')]) });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.stt.final('نحب نحجز موعد', true);
+  await waitFor(() => s.llm.turns.length === 1, 'the opening turn');
+  await s.loop.settled();
+  assert.equal(s.loop.stats().captureState, null, 'a disfluency asks for nothing — this is the bad state');
+
+  s.stt.final('21', true);
+  await waitFor(() => s.llm.turns.length === 2, 'the digits to become a turn anyway');
+  assert.equal(s.loop.stats().fragmentsRefused, 0);
+  assert.equal(s.llm.turns[1].messages.at(-1).text, '21');
+});
+
+test('the caller saying goodbye back does NOT cancel the hang-up', async (t) => {
+  const ended = [];
+  const s = await setup({
+    ended,
+    config: { voiceCallHangupGraceMs: 3000 },
+    llm: fakeLlm([
+      async function* () {
+        yield { type: 'text', delta: 'شكرا و بالسلامة!' };
+        yield { type: 'toolCall', call: { id: 'c1', name: 'end_call', args: {} } };
+        yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+      },
+    ]),
+  });
+  t.after(() => {
+    s.unsub();
+    s.loop.stop('test');
+  });
+  await s.loop.start();
+
+  s.stt.final('بسلامة', true);
+  await waitFor(() => s.loop.stats().endRequested === true, 'end_call to arm the hang-up');
+
+  // The caller's own «بسلام» comes back through the ears. It is them AGREEING
+  // the call is over — cancelling on it held the line open forever (run 3).
+  s.stt.final('بسلام', true);
+  await waitFor(() => ended.length === 1, 'the line to drop anyway', 6000);
+  assert.equal(s.loop.stats().endRequested, true, 'the hang-up was never cancelled');
+
+  // …and a real "wait, one more thing" still cancels it.
+  const s2 = await setup({
+    config: { voiceCallHangupGraceMs: 3000 },
+    llm: fakeLlm([
+      async function* () {
+        yield { type: 'text', delta: 'شكرا و بالسلامة!' };
+        yield { type: 'toolCall', call: { id: 'c1', name: 'end_call', args: {} } };
+        yield { type: 'done', usage: {}, provider: 'gemini-flash-lite-latest' };
+      },
+      says('أيوا، نسمعك.'),
+    ]),
+  });
+  t.after(() => {
+    s2.unsub();
+    s2.loop.stop('test');
+  });
+  await s2.loop.start();
+  s2.stt.final('بسلامة', true);
+  await waitFor(() => s2.loop.stats().endRequested === true, 'the second hang-up to arm');
+  s2.stt.final('استنى، عندي سؤال آخر', true);
+  await waitFor(() => s2.loop.stats().endRequested === false, 'a real "one more thing" to cancel it');
 });

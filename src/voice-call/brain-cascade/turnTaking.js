@@ -248,6 +248,95 @@ export function isInterrogativeFragment(text) {
 }
 
 /**
+ * ONE-WORD GOODBYES ARE REAL TURNS TOO (V8 self-test, 2026-08-02).
+ *
+ * Found on a scored booking run: the caller said «بسلامة», the ears returned
+ * «بسلام», the fragment rule threw it away as an artefact — and the agent
+ * answered the last beat of the call with «سامحني، فما حس برشة — تنجم تعاود آخر
+ * حاجة؟» and then the two-strike WhatsApp offer. The booking had just been
+ * written. The caller was asked to repeat their own goodbye, twice, and the line
+ * was never released: `end_call` is the only thing that hangs up, and the model
+ * never got the turn in which to call it.
+ *
+ * A farewell is the one utterance a caller is MOST likely to say in a single
+ * word, and it is the one utterance where guessing wrong is free: answering a
+ * mis-heard «بسلامة» costs a warm goodbye, while refusing a real one costs the
+ * hang-up. So the same closed-set treatment the interrogatives get.
+ *
+ * The set is closed and it is spellings-of-goodbye ONLY — including the Latin
+ * forms liveEars emits for derja, and the truncations a streaming transcriber
+ * produces («بسلام» for «بسلامة»), which is precisely what was observed.
+ */
+export const FAREWELLS = Object.freeze(
+  new Set([
+    // ── derja / Arabic (and the truncations the ears actually return) ──
+    'بسلامة',
+    'بسلامه',
+    'بسلام',
+    'سلامة',
+    'سلامه',
+    'السلامة',
+    'السلامه',
+    'سلام',
+    // ── derja, WRITTEN IN LATIN — same reason as BACKCHANNELS above ──
+    'bslama',
+    'beslama',
+    'besslema',
+    'bislama',
+    'slama',
+    'salam',
+    // ── French ──
+    'revoir',
+    'aurevoir',
+    'salut',
+    'ciao',
+    // ── English ──
+    'bye',
+    'byebye',
+    'goodbye',
+  ])
+);
+
+/**
+ * True when a short final is nothing but a farewell. Checked only where the
+ * fragment rule would otherwise refuse the turn.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isFarewellFragment(text) {
+  const list = words(text);
+  if (!list.length || list.length > 2) return false;
+  return list.every((w) => FAREWELLS.has(w));
+}
+
+/**
+ * DIGITS ARE DATA, NEVER AN ARTEFACT (V8 self-test, 2026-08-02).
+ *
+ * The fragment rule's own docstring already names "a group of digits" as
+ * something it must not eat — but it only knows that through `dataCapture()`,
+ * which is state the agent has to have entered. On a scored booking run it had
+ * not: asked for the name, the model answered with a bare disfluency («لحظة
+ * وحدة نتثبت…»), no tool ran, no question was asked, so nothing marked the call
+ * as collecting a phone number. The caller then read their number off a card,
+ * the ears returned it as «21» · «29» · «4 9 6 7», and the first two were
+ * refused as fragments — two strikes, the WhatsApp degrade, and a booking that
+ * could never land.
+ *
+ * A streaming transcriber emits half-WORDS on its way to a sentence. It does
+ * not emit a spurious number: «21» is a caller reading digits, or an hour, and
+ * on a clinic line it is always data the agent asked for. So a final made only
+ * of digit runs is a turn regardless of what the capture state believes.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isDigitFragment(text) {
+  const list = words(text);
+  if (!list.length) return false;
+  return list.every((w) => /^\p{N}+$/u.test(w));
+}
+
+/**
  * …and what a TOOL just told us the agent is missing. This is the other half of
  * the signal: `stage_booking` refusing for a missing name is proof that the
  * next thing the caller says is a name, whatever phrasing the model chose.
