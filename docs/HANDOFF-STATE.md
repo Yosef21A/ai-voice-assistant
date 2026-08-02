@@ -63,6 +63,26 @@ cloudflared tunnel --url http://localhost:3000   # public tunnel
 - `npm start` must be restarted whenever `.env` changes.
 - Keep `npm test` green (530 pass / 2 skip baseline as of 2026-07-31) before/after every change.
 
+## Session 2026-08-02 (overnight) — V8 WAR PLAN SHIPPED D1→D5, SELF-TEST RUNNING
+All five phases committed: D1 double-reply fix `6e1a2c9` (single-writer wire,
+utterance ledger, prepare-only speculation, barge-in crash root-caused to a
+rejected-stream cancel()) · D2+D3 `1642dfe` (400/900ms state endpointing,
+pre-warm, word-gated barge-in, backchannel immunity + the four review-caught
+real-caller bugs: half-number flush, goodbye-on-نعم, trailing-باهي booking
+loss, tool-start splice) · D4 `6e038e9` (mined-transcript fewshots, turn
+shape, honest budget) · D5 `691394e` (npm run demo:preflight + DEMO-DAY.md).
+Suite: 760 tests / 752 pass / 6 known-dirty-hours / 2 PG-skips (pristine-
+equivalent green). TWO agent session-limit deaths recovered by hand-finishing
+(Speechmatics tests, V8 regressions — always audit the tree before assuming
+loss). LIVE: line on V8 HEAD, cascade mode, fresh token (~1h class!), tunnel
+`https://incident-toward-amp-remain.trycloudflare.com/webhook` console-set by
+founder. scripts/call-selftest.js (speech-driven rehearsal robot, Fish-
+synthesized derja caller vs isolated app) building/running — results land in
+docs/V8-SELFTEST.md. clinics.json carries UNCOMMITTED 24/7 weekend test hours
+(the 6 dirty-suite fails) — revert before production. Founder actions open:
+live ear-test + 10 rehearsal calls, Deepgram/Cerebras/Groq signups, derja
+sheet grading, System-User permanent token before Monday.
+
 ## Session 2026-07-31 (part 2) — LIVE CALLS DEBUGGED + V5 T0/T1 SHIPPED
 LIVE: first real calls answered (media connect 3.1s). Three live bugs found by
 ear and fixed: Gemini Live model id (rolling alias `gemini-2.5-flash-native-audio-latest`,
