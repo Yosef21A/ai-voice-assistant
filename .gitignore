@@ -1,0 +1,14 @@
+node_modules/
+data/runtime/
+data/runtime-sim/
+backups/
+.env
+*.log
+npm-debug.log*
+.DS_Store
+web/dist/
+web/.probe_sync
+
+claudechat.md
+cloudflare_terminal.md
+data/media/
