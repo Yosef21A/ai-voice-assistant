@@ -135,6 +135,7 @@ export function createGeminiTextLlm({
   temperature = 0.7,
   maxOutputTokens = MAX_OUTPUT_TOKENS,
   timeoutMs = LLM_TIMEOUT_MS,
+  captureModelVersion = false,
   fetchImpl,
   logger,
 } = {}) {
@@ -211,6 +212,7 @@ export function createGeminiTextLlm({
 
       let usage = { tokensIn: 0, tokensOut: 0 };
       let said = false;
+      let resolvedModel = null;
       for await (const frame of postSse({
         fetchImpl,
         url,
@@ -223,6 +225,7 @@ export function createGeminiTextLlm({
           body: JSON.stringify(body),
         },
       })) {
+        if (frame?.modelVersion) resolvedModel = String(frame.modelVersion);
         const u = frame?.usageMetadata;
         if (u) {
           usage = {
@@ -261,7 +264,11 @@ export function createGeminiTextLlm({
         }
       }
       if (!said) log(`[voice-cascade] ${model} produced no text this turn`);
-      yield { type: 'done', usage };
+      yield {
+        type: 'done',
+        usage,
+        ...(captureModelVersion ? { requestedModel: model, resolvedModel: resolvedModel || model } : {}),
+      };
     },
   };
 }

@@ -64,6 +64,7 @@ import {
   safetyBlock,
   voiceStyleBlock,
   buildKbDigest,
+  languagePolicyBlock,
 } from '../brain/prompts.js';
 import { hoursBlock, specialtiesBlock, pricingBlock } from '../../engine/humanize/prompt.js';
 import { topKbEntries } from '../../engine/humanize/context.js';
@@ -122,9 +123,12 @@ export function needsPricing(text) {
  * BEFORE it reaches a mouth. This block just means the model rarely has to be
  * overruled — which is cheaper, and sounds better, than being overruled often.
  */
-export function languageLockBlock(lang = 'ar', dialect = '') {
+export function languageLockBlock(lang = 'ar', dialect = '', { languagePolicy = '' } = {}) {
   const L = ['ar', 'fr', 'en'].includes(lang) ? lang : 'ar';
   const derja = dialect || 'Tunisian/Libyan colloquial Arabic (Derja), in Arabic script';
+  if (languagePolicy === 'tunisian-first') {
+    return `LANGUAGE LOCK — ABSOLUTE: ${languagePolicyBlock(L, derja, languagePolicy)} NEVER imitate an unrelated script emitted by transcription; ask the caller to repeat.`;
+  }
   const name = L === 'ar' ? `Arabic — ${derja}, warm and colloquial, never stiff MSA` : LANG_NAME[L];
   return `LANGUAGE LOCK — ABSOLUTE: reply ONLY in ${name}. Follow the caller ONLY if THEY switch to French or English. NEVER any other language, for any reason: a transcript that looks like one is a TRANSCRIPTION ERROR, not a caller — never imitate it, say you did not hear well and ask them to repeat.`;
 }
@@ -252,6 +256,7 @@ export function buildVoiceTurnPrompt({
 } = {}) {
   const L = ['ar', 'fr', 'en'].includes(lang) ? lang : 'ar';
   const dialect = clinic.dialect || 'Tunisian/Libyan colloquial Arabic (Derja), in Arabic script';
+  const languagePolicy = clinic.voiceLanguagePolicy || clinic.languagePolicy || '';
   const city = clinic.city || 'Tunisia';
   const fewshots = buildFewshotBlock({ lang: L, clinic, patientWaId });
   const facts = factsBlock(clinic, L, kbText);
@@ -262,9 +267,9 @@ export function buildVoiceTurnPrompt({
 
 THE AGENCY BOOKS NOTHING. You have NO calendar and NO appointment slots. Never propose a time, never confirm a booking, never claim a clinic has accepted anyone. You have no booking tools at all.
 
-${voiceStyleBlock(L, dialect, { compact: true })}
+${voiceStyleBlock(L, dialect, { compact: true, languagePolicy })}
 
-${languageLockBlock(L, dialect)}
+${languageLockBlock(L, dialect, { languagePolicy })}
 
 ${NOISE_POLICY}
 
@@ -298,9 +303,9 @@ ${fewshots}`;
 
   return `${identity} Today is ${nowStr}.
 
-${voiceStyleBlock(L, dialect, { compact: true })}
+${voiceStyleBlock(L, dialect, { compact: true, languagePolicy })}
 
-${languageLockBlock(L, dialect)}
+${languageLockBlock(L, dialect, { languagePolicy })}
 
 ${NOISE_POLICY}
 

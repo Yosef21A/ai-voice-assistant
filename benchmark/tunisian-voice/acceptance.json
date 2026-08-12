@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "stt": {
+      "overallWerMax": 0.18,
+      "darijaWerMax": 0.20,
+      "codeSwitchWerMax": 0.22,
+      "criticalEntityAccuracyMin": 0.95
+    },
+    "latency": {
+      "firstAudioP50MsMax": 1200,
+      "firstAudioP95MsMax": 2000,
+      "turnP50MsMax": 1800,
+      "turnP95MsMax": 3000
+    },
+    "booking": {
+      "slotAccuracyMin": 0.95,
+      "endToEndSuccessMin": 0.90,
+      "unsafeWriteRateMax": 0
+    },
+    "interruption": {
+      "stopP95MsMax": 200,
+      "resumeSuccessMin": 0.90
+    },
+    "naturalness": {
+      "nativeTunisianMosMin": 4.0,
+      "languageAppropriatenessMin": 4.2,
+      "nonTunisianDriftRateMax": 0.05
+    }
+  }
+}

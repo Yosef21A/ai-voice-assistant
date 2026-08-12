@@ -19,6 +19,7 @@
     "media:purge": "node scripts/purge-media.js",
     "backup": "node scripts/backup-data.js",
     "demo:preflight": "node scripts/demo-preflight.js",
+    "benchmark:voice": "node scripts/voice-baseline.js",
     "web:dev": "vite --config web/vite.config.js",
     "web:build": "vite build --config web/vite.config.js"
   },

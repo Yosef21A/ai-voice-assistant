@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "clinics": [{
+    "id": "benchmark-ar-tn",
+    "name": "عيادة الاختبار التونسية",
+    "city": "Tunis",
+    "country": "Tunisia",
+    "timezone": "Africa/Tunis",
+    "currency": "TND",
+    "whatsapp": { "phoneNumberId": "BENCHMARK_AR_TN", "displayPhone": "+216 00 000 000" },
+    "handoff": { "name": "Benchmark operator", "phone": "+216 00 000 001" },
+    "notifications": { "recipients": [], "lang": "fr" },
+    "languages": ["ar", "fr", "en"],
+    "dialect": "Tunisian Arabic (ar-TN), in Arabic script",
+    "voiceLanguagePolicy": "tunisian-first",
+    "voiceBrain": "cascade",
+    "voice": {
+      "provider": "azure",
+      "azureVoice": "ar-TN-ReemNeural"
+    },
+    "workingHours": {
+      "mon": ["00:00", "23:59"],
+      "tue": ["00:00", "23:59"],
+      "wed": ["00:00", "23:59"],
+      "thu": ["00:00", "23:59"],
+      "fri": ["00:00", "23:59"],
+      "sat": ["00:00", "23:59"],
+      "sun": ["00:00", "23:59"]
+    },
+    "specialties": [
+      { "id": "dental", "labels": { "ar": "طب الأسنان", "fr": "Dentaire", "en": "Dental" } },
+      { "id": "cardiology", "labels": { "ar": "أمراض القلب", "fr": "Cardiologie", "en": "Cardiology" } },
+      { "id": "dermatology", "labels": { "ar": "جلدية", "fr": "Dermatologie", "en": "Dermatology" } }
+    ],
+    "benchmarkSlots": [
+      "2026-09-14T09:00:00+01:00",
+      "2026-09-14T11:30:00+01:00",
+      "2026-09-15T15:00:00+01:00"
+    ]
+  }]
+}

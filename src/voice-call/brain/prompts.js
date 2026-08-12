@@ -126,7 +126,15 @@ export const HUMAN_TOUCHES = {
  *   could be harmed by is abbreviated — the medical law is safetyBlock() and it
  *   is never compacted.
  */
-export function voiceStyleBlock(lang, dialect, { compact = false } = {}) {
+export function languagePolicyBlock(lang, dialect, policy = '') {
+  const langName = LANG_NAME[lang] || LANG_NAME.ar;
+  if (policy === 'tunisian-first') {
+    return `LANGUAGE: Tunisian Darija is the home language. Use ${dialect || 'Tunisian Arabic (ar-TN), in Arabic script'} — warm, local and colloquial, never stiff MSA and never Libyan, Gulf or Levantine Arabic. Preserve ordinary French or English loanwords naturally inside Darija. ONE isolated foreign word or medical term is code-switching, not a request to change the whole conversation. Switch fully only when the caller explicitly asks or sustains French or English for a complete turn; if they return to Darija, return with them. Keep Arabic words in Arabic script and preserve the caller's own spelling of names.`;
+  }
+  return `LANGUAGE: start in ${langName}. Arabic means ${dialect} — warm and colloquial, never stiff MSA. Switch instantly and completely to whatever language the caller uses, and stay there.`;
+}
+
+export function voiceStyleBlock(lang, dialect, { compact = false, languagePolicy = '' } = {}) {
   const langName = LANG_NAME[lang] || LANG_NAME.ar;
   const touch = HUMAN_TOUCHES[lang] || HUMAN_TOUCHES.ar;
   if (compact) {
@@ -167,7 +175,7 @@ HANGING UP — YOU are the one who ends the call:
 - NEVER call end_call in the middle of a task, and NEVER right after you have asked the caller a question — they have not answered you yet. If you are unsure whether they are finished, do not call it: wait.
 - If the caller speaks again after you have said goodbye, the call continues normally. Answer them.
 
-LANGUAGE: start in ${langName}. Arabic means ${dialect} — warm and colloquial, never stiff MSA. Switch instantly and completely to whatever language the caller uses, and stay there.`;
+${languagePolicyBlock(lang, dialect, languagePolicy)}`;
 }
 
 /**
@@ -182,6 +190,7 @@ LANGUAGE: start in ${langName}. Arabic means ${dialect} — warm and colloquial,
 export function buildVoiceSystemPrompt({ clinic = {}, lang = 'ar', nowStr = '' } = {}) {
   const L = ['ar', 'fr', 'en'].includes(lang) ? lang : 'ar';
   const dialect = clinic.dialect || 'Tunisian/Libyan colloquial Arabic (Derja), in Arabic script';
+  const languagePolicy = clinic.voiceLanguagePolicy || clinic.languagePolicy || '';
   const city = clinic.city || 'Tunisia';
   const kb = buildKbDigest(clinic, L);
   const facts = `CLINIC FACTS — the ONLY facts you may state out loud:
@@ -201,7 +210,7 @@ ${kb}`;
 
 THE AGENCY BOOKS NOTHING. You have NO calendar and NO appointment slots. Never propose a time, never confirm a booking, never claim a clinic has accepted anyone. You have no booking tools at all — asking for one is not possible.
 
-${voiceStyleBlock(L, dialect)}
+${voiceStyleBlock(L, dialect, { languagePolicy })}
 
 YOUR GOAL IS QUALIFICATION, and it ends in ONE tool call. Conversationally, never as an interrogation, find out: (1) the treatment they want, (2) where they are travelling from, (3) roughly when they can travel. The number they are calling from is already on file, so ask for another only if they offer one.
 
@@ -230,7 +239,7 @@ ${facts}`;
 
   return `${identity} Today is ${nowStr}.
 
-${voiceStyleBlock(L, dialect)}
+${voiceStyleBlock(L, dialect, { languagePolicy })}
 
 ${specialtyRule}
 

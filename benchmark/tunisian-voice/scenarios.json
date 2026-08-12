@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    { "id": "booking-happy-darija", "turns": ["tn-greet-02", "tn-darija-01", "tn-name-01", "tn-date-01", "tn-book-01"], "expect": { "specialty": "dental", "name": "آية بن يوسف", "date": "2026-09-14", "time": "11:30", "confirmedWrites": 1 } },
+    { "id": "booking-code-switch", "turns": ["tn-code-fr-01", "tn-name-02", "tn-number-01", "tn-book-01"], "expect": { "specialty": "dental", "name": "محمد أمين الجلاصي", "phone": "92354721", "confirmedWrites": 1 } },
+    { "id": "booking-correction", "turns": ["tn-date-01", "tn-correct-01", "tn-book-01"], "expect": { "date": "2026-09-15", "time": "15:00", "confirmedWrites": 1 } },
+    { "id": "name-correction", "turns": ["tn-name-02", "tn-correct-02"], "expect": { "name": "سارة بن عمر", "confirmedWrites": 0 } },
+    { "id": "no-confirm-no-write", "turns": ["tn-book-02"], "expect": { "confirmedWrites": 0 } },
+    { "id": "barge-in-correction", "turns": ["tn-barge-01", "tn-correct-01"], "events": [{ "type": "barge_in", "offsetMs": 450 }], "expect": { "date": "2026-09-15", "time": "15:00", "confirmedWrites": 0, "resume": true } },
+    { "id": "silence-reprompt", "turns": ["tn-silence-01"], "expect": { "reprompts": 1, "confirmedWrites": 0 } },
+    { "id": "natural-disfluency", "turns": ["tn-noise-01", "tn-natural-01"], "expect": { "confirmedWrites": 0, "language": "ar-TN" } },
+    { "id": "french-switch", "turns": ["tn-fr-full-01"], "expect": { "language": "fr", "confirmedWrites": 0 } },
+    { "id": "english-switch", "turns": ["tn-en-full-01"], "expect": { "language": "en", "confirmedWrites": 0 } },
+    { "id": "goodbye", "turns": ["tn-goodbye-01"], "expect": { "endCall": true, "confirmedWrites": 0 } },
+    { "id": "arabizi-text-control", "turns": ["tn-arabizi-01", "tn-arabizi-02", "tn-arabizi-03", "tn-arabizi-04"], "expect": { "specialty": "dental", "name": "Aya Ben Youssef", "phone": "92354721", "date": "2026-09-15", "time": "15:00", "confirmedWrites": 1 } }
+  ]
+}

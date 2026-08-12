@@ -273,21 +273,57 @@ export function resolveVoiceBrainMode({ config = {}, clinic } = {}) {
   if (requested !== 'cascade') return { mode: 'live', requested, source, reason: null };
 
   const voice = (clinic?.voice ?? clinic?.config?.voice) || {};
-  const named = String(voice.provider || config.voiceTtsProvider || '')
+  const named = String(
+    config.voiceBenchmarkMode
+      ? config.voiceBenchmarkTtsProvider || ''
+      : voice.provider || config.voiceTtsProvider || ''
+  )
     .trim()
     .toLowerCase();
-  const mouth =
-    ttsCredentialPresent('fish', config) ||
-    ttsCredentialPresent('elevenlabs', config) ||
-    (!!named && named !== 'gemini' && ttsCredentialPresent(named, config));
+  const mouth = config.voiceBenchmarkMode
+    ? !!named && named !== 'gemini' && ttsCredentialPresent(named, config)
+    : ttsCredentialPresent('fish', config) ||
+      ttsCredentialPresent('elevenlabs', config) ||
+      (!!named && named !== 'gemini' && ttsCredentialPresent(named, config));
   // liveEars — a Gemini Live session used ONLY as ears — is the free STT leg the
   // cascade falls through to, so a Gemini key counts as ears on its own.
-  const ears = !!(config.deepgramApiKey || config.speechmaticsApiKey || config.geminiApiKey);
+  const pinnedStt = String(config.voiceBenchmarkSttProvider || '').trim();
+  const ears = config.voiceBenchmarkMode
+    ? pinnedStt === 'deepgram'
+      ? !!config.deepgramApiKey
+      : pinnedStt === 'speechmatics'
+        ? !!config.speechmaticsApiKey
+        : pinnedStt === 'liveEars'
+          ? !!config.geminiApiKey
+          : false
+    : !!(config.deepgramApiKey || config.speechmaticsApiKey || config.geminiApiKey);
 
   const missing = [];
-  if (!mouth) missing.push('no TTS credential — set FISH_AUDIO_API or ELEVENLABS_API_KEY');
-  if (!ears) missing.push('no STT credential — set DEEPGRAM_API_KEY, SPEECHMATICS_API_KEY or GEMINI_API_KEY');
-  if (missing.length) return { mode: 'live', requested, source, reason: missing.join('; ') };
+  if (!mouth) {
+    missing.push(
+      config.voiceBenchmarkMode
+        ? `benchmark TTS ${named || '(unset)'} has no usable credential`
+        : 'no TTS credential — set FISH_AUDIO_API or ELEVENLABS_API_KEY'
+    );
+  }
+  if (!ears) {
+    missing.push(
+      config.voiceBenchmarkMode
+        ? `benchmark STT ${pinnedStt || '(unset)'} has no usable credential`
+        : 'no STT credential — set DEEPGRAM_API_KEY, SPEECHMATICS_API_KEY or GEMINI_API_KEY'
+    );
+  }
+  if (missing.length) {
+    // A benchmark that silently becomes the incumbent is mislabeled evidence.
+    // Keep the requested brain so startup fails/degrades the call visibly;
+    // ordinary calls retain the product's availability-first Live fallback.
+    return {
+      mode: config.voiceBenchmarkMode ? 'cascade' : 'live',
+      requested,
+      source,
+      reason: missing.join('; '),
+    };
+  }
   return { mode: 'cascade', requested, source, reason: null };
 }
 
@@ -820,7 +856,11 @@ export function createVoiceCallService({
     if (r.reason) {
       // LOUD, and never dead air: the caller still gets a working phone line,
       // and whoever set VOICE_BRAIN=cascade gets told exactly what is missing.
-      console.warn(`[voice-call] cascade unavailable (${r.reason}) — live mode for this call`);
+      console.warn(
+        config.voiceBenchmarkMode
+          ? `[voice-call] benchmark cascade invalid (${r.reason}) — fallback is disabled for this sample`
+          : `[voice-call] cascade unavailable (${r.reason}) — live mode for this call`
+      );
     }
     entry.brainKind = r.mode;
     return entry.brainKind;

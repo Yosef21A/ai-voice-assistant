@@ -121,6 +121,7 @@ import { isFacilitator } from '../../engine/tenantProfile.js';
 // patient is booked on the wrong day.
 import { nowString } from '../../engine/humanize/context.js';
 import { sendAs } from '../../api/outbound.js';
+import { createAcousticClock } from '../acoustic.js';
 
 const LANG_NAME = { ar: 'Arabic', fr: 'French', en: 'English' };
 const FRAME_MS = 20;
@@ -277,6 +278,10 @@ export function createBrainLoop({
   // VOICE_GREETING_CACHE=off kills the tape instantly (config.js maps the env).
   // An explicit `false` disables it; anything else, including absent, leaves it on.
   const greetingCacheOn = config.voiceGreetingCache !== false;
+  const acousticClock = createAcousticClock({
+    rmsThreshold: Number(config.voiceBenchmarkSpeechRms) || 1200,
+    episodeGapMs: Number(config.voiceBenchmarkSpeechGapMs) || 600,
+  });
 
   /**
    * THE MOUTH (V5-T1). Built once, up front, and never allowed to throw: a
@@ -365,12 +370,15 @@ export function createBrainLoop({
   /** Tee of the FIRST agent turn, for the greeting cache. */
   const tee = { active: false, frames: [], samples: 0 };
   let greetingText = '';
-  // Turn latency: caller's last transcription fragment → first frame of the
-  // reply actually handed to media.sendRtp.
+  // Turn latency: caller's last voiced inbound PCM frame → first meaningful
+  // reply frame actually handed to media.sendRtp.
   let callerStopAt = 0;
   let awaitingReply = false;
   let markTurnFrame = false;
   const turnLatencies = [];
+  const turnMeasurements = [];
+  let pendingTurnMeasurement = null;
+  const interruptionTimings = [];
   // Barge-in.
   let bargeIns = 0;
   let bargeFramesDropped = 0;
@@ -502,6 +510,16 @@ export function createBrainLoop({
         awaitingReply = false;
         if (callerStopAt) {
           if (turnLatencies.length < MAX_LATENCY_SAMPLES) turnLatencies.push(nowMs - callerStopAt);
+        }
+        if (pendingTurnMeasurement && turnMeasurements.length < MAX_LATENCY_SAMPLES) {
+          pendingTurnMeasurement.first_any_audio_at = nowMs;
+          pendingTurnMeasurement.first_semantic_audio_at = nowMs;
+          pendingTurnMeasurement.first_audio_ms = Math.max(0, nowMs - pendingTurnMeasurement.speech_stop_at);
+          pendingTurnMeasurement.first_any_audio_ms = pendingTurnMeasurement.first_audio_ms;
+          pendingTurnMeasurement.endpointing_ms = null;
+          pendingTurnMeasurement.post_eot_first_audio_ms = null;
+          turnMeasurements.push(pendingTurnMeasurement);
+          pendingTurnMeasurement = null;
         }
       }
       try {
@@ -904,7 +922,19 @@ export function createBrainLoop({
     callState.lastCallerSpeechAt = toDate(clock()).getTime();
     if (callState.staged) callState.speechSinceStage += String(text || '');
     // Latency clock: the LAST fragment before we answer is the caller stopping.
-    callerStopAt = Date.now();
+    const acoustic = acousticClock.snapshot();
+    callerStopAt = acoustic.lastSpeechAt || Date.now();
+    if (!pendingTurnMeasurement) {
+      pendingTurnMeasurement = {
+        speech_start_at: acoustic.speechStartAt || null,
+        speech_stop_at: callerStopAt,
+        first_any_audio_at: null,
+        first_semantic_audio_at: null,
+        first_audio_ms: null,
+      };
+    } else {
+      pendingTurnMeasurement.speech_stop_at = callerStopAt;
+    }
     awaitingReply = true;
 
     // A GREETING TURN THE CALLER WAS PART OF IS NOT A GREETING. The media path
@@ -1174,7 +1204,17 @@ export function createBrainLoop({
       // A greeting the caller talked over is a HALF greeting. Never cache it.
       abortTee();
       endAgentTurn();
+      const acoustic = acousticClock.snapshot();
+      const stoppedAt = Date.now();
       flushOutbound('barge_in');
+      if (interruptionTimings.length < MAX_LATENCY_SAMPLES) {
+        const onsetAt = acoustic.speechStartAt || stoppedAt;
+        interruptionTimings.push({
+          speech_onset_at: onsetAt,
+          stop_at: stoppedAt,
+          stop_ms: Math.max(0, stoppedAt - onsetAt),
+        });
+      }
     });
     live.on('inputTranscription', (text) => {
       if (stopped) return;
@@ -1504,7 +1544,10 @@ export function createBrainLoop({
         // are already paged and the call ends on a timer.
         if (callState.emergency) return;
         const pcm = codec.decodeIn(payload);
-        if (pcm.length) live?.sendAudioChunk(pcm);
+        if (pcm.length) {
+          acousticClock.observe(pcm);
+          live?.sendAudioChunk(pcm);
+        }
       } catch (err) {
         log('[voice-brain] inbound RTP handling failed:', err?.message || err);
       }
@@ -1609,6 +1652,23 @@ export function createBrainLoop({
       bargeIns,
       latency: latencySummary(),
       voice: voiceSummary(),
+      brain: 'live',
+      providers: {
+        stt: 'gemini-live',
+        llm: config.geminiLiveModel,
+        tts: voiceSummary().provider,
+        ...(config.voiceBenchmarkMode
+          ? {
+              llmRequestedModel: config.geminiLiveModel,
+              // Gemini Live's setup response currently exposes no concrete
+              // alias resolution. Keep this explicit instead of inventing it.
+              llmResolvedModel: null,
+              ttsVoice: voiceSummary().voice,
+            }
+          : {}),
+      },
+      waterfalls: turnMeasurements.map((row) => ({ ...row })),
+      interruptions: interruptionTimings.map((row) => ({ ...row })),
     };
   }
 

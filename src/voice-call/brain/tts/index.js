@@ -172,7 +172,15 @@ export function createTtsChain({
   const requested = String(tenantVoice.provider || config.voiceTtsProvider || 'gemini')
     .trim()
     .toLowerCase();
-  let wanted = requested;
+  let wanted = config.voiceBenchmarkMode
+    ? String(config.voiceBenchmarkTtsProvider || '').trim().toLowerCase()
+    : requested;
+  if (config.voiceBenchmarkMode && !wanted) {
+    throw new TtsError('benchmark mode requires VOICE_BENCHMARK_TTS_PROVIDER', {
+      provider: 'benchmark',
+      kind: 'config',
+    });
+  }
   if (!TTS_PROVIDERS.has(wanted)) {
     log(
       `[voice-brain] unknown TTS provider ${JSON.stringify(requested)} — expected one of ` +
@@ -312,7 +320,11 @@ export function createTtsChain({
   //   • anything else ⇒ that provider first, then the doctrine order.
   // Deduped so a tenant that asked for fish is not asked about it twice.
   const nativeIsAnswer = wanted === 'gemini' && !requireMouth;
-  const candidates = nativeIsAnswer
+  const candidates = config.voiceBenchmarkMode
+    ? wanted === 'gemini'
+      ? []
+      : [wanted]
+    : nativeIsAnswer
     ? []
     : wanted === 'gemini'
       ? [...TTS_FALLBACK_ORDER]
@@ -320,6 +332,13 @@ export function createTtsChain({
   for (const name of candidates) {
     impl = build(name, name === wanted);
     if (impl) break;
+  }
+
+  if (config.voiceBenchmarkMode && wanted !== 'gemini' && !impl) {
+    throw new TtsError(`benchmark TTS ${wanted} is pinned but unavailable; fallback is disabled`, {
+      provider: wanted,
+      kind: 'config',
+    });
   }
 
   if (impl) {

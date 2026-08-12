@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "recording": {
+    "nativeSpeakersMin": 6,
+    "regions": ["Greater Tunis", "Sahel or Sfax", "other Tunisian region"],
+    "speakersPerRegionMin": 2,
+    "recordingsPerSpeechCaseMin": 3,
+    "format": { "container": "wav", "encoding": "pcm_s16le", "channels": 1, "sampleRatesHz": [16000, 24000] },
+    "consentRequired": true,
+    "patientDataForbidden": true
+  },
+  "providerRuns": {
+    "warmupRunsDiscarded": 1,
+    "measuredRepetitionsPerRecording": 3,
+    "runOrder": "seeded alternating by provider and speaker",
+    "cachePolicy": "report cold and warm separately",
+    "network": "same host and connection for both paths",
+    "fallbackPolicy": "fail sample; never relabel fallback output"
+  },
+  "humanNaturalness": {
+    "phase": 7,
+    "status": "not-started",
+    "nativeTunisianRatersMin": 5,
+    "blindLabels": true,
+    "randomizedOrder": true,
+    "scale": { "min": 1, "max": 5 },
+    "dimensions": ["nativeTunisianRating", "languageAppropriateness", "voiceNaturalness", "conversationCoherence"],
+    "pairedPreference": true,
+    "commentsRequiredBelow": 3
+  }
+}

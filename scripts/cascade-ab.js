@@ -73,6 +73,8 @@
 //   --pnid ID             tenant phone_number_id (must exist in clinics.json)
 //   --from WAID           the synthetic caller's id
 //   --talk-ms N           uplink tone per call, after the greeting      (2500)
+//   --audio WAV           replace the tone with a real PCM16 recording
+//   --artifacts DIR       save decoded agent audio as one WAV per call
 //   --settle-ms N         quiet time waited for a reply before hanging up (6000)
 //   --gap-ms N            pause between calls                           (1500)
 //   --runtime DIR         where the app persists its JSON store   (data/runtime)
@@ -80,10 +82,11 @@
 //                         cross-check (optional — the store is the source)
 //   --no-write            print the summary, do not touch docs/V7-AB-RESULTS.md
 import express from 'express';
-import { readFileSync, existsSync, appendFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCodecBridge } from '../src/voice-call/brain/codec.js';
+import { decodeWavPcm16, encodeWavPcm16, sha256 } from '../src/voice-call/benchmark.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RESULTS_FILE = path.join(ROOT, 'docs', 'V7-AB-RESULTS.md');
@@ -126,6 +129,16 @@ const RUNTIME_DIR = path.resolve(String(args.runtime || process.env.AB_RUNTIME |
 const EMAIL = args.email || process.env.AB_EMAIL || '';
 const PASSWORD = args.password || process.env.AB_PASSWORD || '';
 const WRITE = args.write !== false;
+const AUDIO_FILE = args.audio ? path.resolve(String(args.audio)) : null;
+const ARTIFACT_DIR = args.artifacts ? path.resolve(String(args.artifacts)) : null;
+
+let callerAudio = null;
+let callerAudioHash = null;
+if (AUDIO_FILE) {
+  const source = readFileSync(AUDIO_FILE);
+  callerAudio = decodeWavPcm16(source, TONE_RATE).pcm;
+  callerAudioHash = sha256(source);
+}
 
 if (!['cascade', 'live'].includes(MODE)) {
   console.error(`--mode must be cascade|live (got ${JSON.stringify(MODE)})`);
@@ -334,6 +347,8 @@ async function placeCall(n, werift) {
     greetingMs: null,
     turnMs: null,
     rtpIn: 0,
+    audioSource: AUDIO_FILE ? path.basename(AUDIO_FILE) : 'synthetic-440hz',
+    audioSha256: callerAudioHash,
     error: null,
   };
 
@@ -355,10 +370,12 @@ async function placeCall(n, werift) {
   let lastInboundAt = 0;
   let uplinkEndedAt = 0;
   let replyAt = 0;
+  let codec = null;
+  const heard = [];
   // Subscribe BEFORE setRemoteDescription — werift fires onTrack synchronously
   // while applying the remote SDP (the lesson already written into media.js).
   pc.onTrack.subscribe((track) => {
-    track.onReceiveRtp.subscribe(() => {
+    track.onReceiveRtp.subscribe((packet) => {
       const at = Date.now();
       row.rtpIn += 1;
       if (!firstInboundAt) firstInboundAt = at;
@@ -367,6 +384,10 @@ async function placeCall(n, werift) {
       // still arriving within one frame of our last uplink packet is the tail
       // of the greeting, not an answer.
       if (uplinkEndedAt && !replyAt && at - uplinkEndedAt > FRAME_MS) replyAt = at;
+      if (codec && packet?.payload) {
+        const pcm = codec.decodeIn(packet.payload);
+        if (pcm?.length) heard.push(Int16Array.from(pcm));
+      }
     });
   });
 
@@ -402,6 +423,7 @@ async function placeCall(n, werift) {
     if (!entry.sdpAnswer) throw new Error('no pre_accept within 25s — is the app on VOICE_CALL_GRAPH_BASE?');
     row.connectMs = entry.at.pre_accept - startedAt;
 
+    codec = createCodecBridge({ sdpOffer: offer, sdpAnswer: entry.sdpAnswer, logger: () => {} });
     await pc.setRemoteDescription({ type: 'answer', sdp: entry.sdpAnswer });
 
     while (!entry.accepted && !entry.ended && Date.now() < until) await sleep(10);
@@ -424,8 +446,7 @@ async function placeCall(n, werift) {
     }
 
     // ── one uplink turn ─────────────────────────────────────────────────────
-    const codec = createCodecBridge({ sdpOffer: offer, sdpAnswer: entry.sdpAnswer, logger: () => {} });
-    const frames = codec.encodeOut(tone(TALK_MS), TONE_RATE);
+    const frames = codec.encodeOut(callerAudio || tone(TALK_MS), TONE_RATE);
     let seq = rand16();
     let ts = rand32();
     const ssrc = rand32();
@@ -464,6 +485,19 @@ async function placeCall(n, werift) {
       /* best effort — the app's own watchdog closes the books either way */
     }
   } finally {
+    if (ARTIFACT_DIR && heard.length) {
+      mkdirSync(ARTIFACT_DIR, { recursive: true });
+      const size = heard.reduce((sum, chunk) => sum + chunk.length, 0);
+      const joined = new Int16Array(size);
+      let offset = 0;
+      for (const chunk of heard) {
+        joined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      const artifact = path.join(ARTIFACT_DIR, `${callId}__agent.wav`);
+      writeFileSync(artifact, encodeWavPcm16(joined, 16000), { flag: 'wx' });
+      row.agentAudioArtifact = artifact;
+    }
     try {
       outTrack.stop();
     } catch {

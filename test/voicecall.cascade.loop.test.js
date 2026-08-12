@@ -322,7 +322,7 @@ test('a cascade call: composed greeting, a caller turn, a spoken answer, a full 
   const w = oc.waterfalls[0];
   // WATERFALL COMPLETENESS: every hop is a number and every leg is named, or
   // "the agent feels slow" stays an argument instead of a measurement.
-  for (const k of ['vad_ms', 'stt_final_ms', 'llm_ttft_ms', 'tts_ttfb_ms', 'first_audio_ms', 'stt', 'llm', 'tts']) {
+  for (const k of ['vad_ms', 'stt_final_ms', 'llm_ttft_ms', 'tts_ttfb_ms', 'first_audio_ms', 'first_any_audio_ms', 'post_eot_first_audio_ms', 'endpointing_ms', 'speech_start_at', 'speech_stop_at', 'stt', 'llm', 'tts']) {
     assert.ok(k in w, `waterfall is missing ${k}`);
   }
   assert.equal(w.stt, 'deepgram');

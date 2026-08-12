@@ -361,6 +361,20 @@ export function getConfig(overrides = {}) {
     // mid-demo. Past this soft cap the fallback stops choosing it; a tenant who
     // named ElevenLabs explicitly is never blocked (they may be paying for it).
     voiceElMonthlySoftCap: Number(process.env.VOICE_EL_MONTHLY_SOFT_CAP) || 8000,
+    // ── Tunisian voice benchmark (read-only unless explicitly enabled) ──────
+    // Benchmark runs must fail closed instead of silently rotating to another
+    // provider and poisoning an A/B label. Normal calls keep their resilient
+    // fallback chains because this flag is off by default.
+    voiceBenchmarkMode:
+      process.env.VOICE_BENCHMARK_MODE === '1' || process.env.VOICE_BENCHMARK_MODE === 'on',
+    voiceBenchmarkSttProvider: process.env.VOICE_BENCHMARK_STT_PROVIDER || '',
+    voiceBenchmarkLlmProvider: process.env.VOICE_BENCHMARK_LLM_PROVIDER || '',
+    voiceBenchmarkTtsProvider: process.env.VOICE_BENCHMARK_TTS_PROVIDER || '',
+    // Passive caller-energy clock used for honest speech-offset → reply timing.
+    // It affects metrics only; endpointing and barge-in retain their own knobs.
+    voiceBenchmarkSpeechRms: Number(process.env.VOICE_BENCHMARK_SPEECH_RMS) || 1200,
+    voiceBenchmarkSpeechGapMs: Number(process.env.VOICE_BENCHMARK_SPEECH_GAP_MS) || 600,
+    voiceBenchmarkCaptureDir: process.env.VOICE_BENCHMARK_CAPTURE_DIR || '',
     // ── ops (P2-F) ─────────────────────────────────────────────────────────
     // One JSON line per request (skips /health). On in production; opt-in
     // elsewhere with LOG_REQUESTS=1 so tests/dev stay quiet.
@@ -368,8 +382,17 @@ export function getConfig(overrides = {}) {
       process.env.LOG_REQUESTS === '1' ||
       (process.env.NODE_ENV === 'production' && process.env.LOG_REQUESTS !== 'off'),
     dataDir: DATA_DIR,
-    runtimeDir: RUNTIME_DIR,
-    clinicsFile: CLINICS_FILE,
+    runtimeDir:
+      process.env.VOICE_BENCHMARK_MODE === '1' || process.env.VOICE_BENCHMARK_MODE === 'on'
+        ? path.resolve(process.env.VOICE_BENCHMARK_RUNTIME_DIR || path.join(RUNTIME_DIR, 'voice-benchmark-app'))
+        : RUNTIME_DIR,
+    clinicsFile:
+      process.env.VOICE_BENCHMARK_MODE === '1' || process.env.VOICE_BENCHMARK_MODE === 'on'
+        ? path.resolve(
+            process.env.VOICE_BENCHMARK_CLINICS_FILE ||
+              path.join(ROOT_DIR, 'benchmark', 'tunisian-voice', 'clinic.json')
+          )
+        : CLINICS_FILE,
     ...overrides,
   };
 }

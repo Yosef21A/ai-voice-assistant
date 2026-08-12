@@ -128,6 +128,9 @@ import { nowString } from '../../engine/humanize/context.js';
 // Aliased: `t` is this file's name for a TURN, in a dozen closures.
 import { t as localized } from '../../engine/responses.js';
 import { sendAs } from '../../api/outbound.js';
+import { createAcousticClock, frameRms } from '../acoustic.js';
+
+export { frameRms } from '../acoustic.js';
 
 const FRAME_MS = 20;
 /** Rolling window of ONE uninterrupted caller utterance the detector sees. */
@@ -386,13 +389,6 @@ function abortQuietly(controller, reason) {
  * @param {Int16Array} int16
  * @returns {number} 0 … 32767
  */
-export function frameRms(int16) {
-  if (!int16 || !int16.length) return 0;
-  let sum = 0;
-  for (let i = 0; i < int16.length; i += 1) sum += int16[i] * int16[i];
-  return Math.sqrt(sum / int16.length);
-}
-
 /** The stable-prefix test two consecutive interims must pass to be speculated on. */
 export function sharedPrefixLength(a = '', b = '') {
   const s = normalize(String(a)).replace(/\s+/g, ' ').trim();
@@ -486,6 +482,10 @@ export function createCascadeLoop({
   const energyBargeOn = config.voiceCascadeEnergyBarge !== false;
   const bargeRms = Number(config.voiceCascadeBargeRms) || DEFAULT_BARGE_RMS;
   const bargeRmsMs = Number(config.voiceCascadeBargeRmsMs) || DEFAULT_BARGE_RMS_MS;
+  const acousticClock = createAcousticClock({
+    rmsThreshold: Number(config.voiceBenchmarkSpeechRms) || bargeRms,
+    episodeGapMs: Number(config.voiceBenchmarkSpeechGapMs) || 600,
+  });
   /** Two end-of-turn signals inside this window are ONE turn-end (V7-P2.1). */
   const turnEndDebounceMs = Number.isFinite(Number(config.voiceCascadeTurnEndDebounceMs))
     ? Math.max(0, Number(config.voiceCascadeTurnEndDebounceMs))
@@ -559,6 +559,7 @@ export function createCascadeLoop({
   let sttStartedAt = 0;
   let sttProvider = null;
   let llmProvider = null;
+  let llmResolvedModel = null;
   /** The scripted engine has taken this call over for good (see llm/index.js). */
   let classicOwned = false;
 
@@ -673,7 +674,16 @@ export function createCascadeLoop({
    * the old turn and never answered.
    */
   let uttId = 0;
-  let utterance = { id: 0, startedAt: 0, prevInterim: '', lastInterim: '', finalText: '', finalAt: 0 };
+  let utterance = {
+    id: 0,
+    startedAt: 0,
+    prevInterim: '',
+    lastInterim: '',
+    finalText: '',
+    finalAt: 0,
+    speechStartAt: 0,
+    speechStopAt: 0,
+  };
   /**
    * THE UTTERANCE LEDGER (V7-P2.1). uttId → what this call has already done
    * about that sentence. It is the memory the double-reply bug proved this loop
@@ -773,10 +783,22 @@ export function createCascadeLoop({
     if (utterance.startedAt) return;
     utterance.startedAt = Date.now();
     utterance.id = uttId += 1;
+    const acoustic = acousticClock.snapshot();
+    utterance.speechStartAt = acoustic.speechStartAt || 0;
+    utterance.speechStopAt = acoustic.lastSpeechAt || 0;
   }
 
   function resetUtterance() {
-    utterance = { id: 0, startedAt: 0, prevInterim: '', lastInterim: '', finalText: '', finalAt: 0 };
+    utterance = {
+      id: 0,
+      startedAt: 0,
+      prevInterim: '',
+      lastInterim: '',
+      finalText: '',
+      finalAt: 0,
+      speechStartAt: 0,
+      speechStopAt: 0,
+    };
   }
 
   // ── instrumentation ───────────────────────────────────────────────────────
@@ -806,8 +828,10 @@ export function createCascadeLoop({
   let energyHits = 0;
   /** Consecutive milliseconds of caller energy over the threshold. */
   let bargeHotMs = 0;
+  let bargeSpeechStartAt = 0;
   /** When the last energy episode fired, in real ms (see ENERGY_EVIDENCE_MS). */
   let energyHotAt = 0;
+  const interruptionTimings = [];
   // ── V8-D3 — the interruption counters ─────────────────────────────────────
   /** Utterances that were nothing but «أيوا»/«ok». They never stop the agent. */
   let backchannels = 0;
@@ -969,6 +993,9 @@ export function createCascadeLoop({
       outSeg = { src, uttId: entry.uttId, frames: 0, startedAt: nowMs };
     }
     outSeg.frames += 1;
+    if (entry.owner && !entry.owner.firstAnyAudioAt && entry.src !== 'greeting' && entry.src !== 'silence') {
+      entry.owner.firstAnyAudioAt = nowMs;
+    }
   }
 
   function tick() {
@@ -1068,7 +1095,7 @@ export function createCascadeLoop({
       audioOwner = owner;
     }
     for (const payload of frames) {
-      outQueue.push({ p: payload, src, uttId: frameUtt });
+      outQueue.push({ p: payload, src, uttId: frameUtt, owner });
       if (!tapeable) continue;
       if (activeTape && activeTape.frames.length < MAX_GREETING_FRAMES) activeTape.frames.push(payload);
       else if (activeTape) activeTape.overflow = true;
@@ -1364,7 +1391,7 @@ export function createCascadeLoop({
    *   would never be worth having.
    * @returns {boolean} true ⇒ played from tape, inside one pacing tick
    */
-  function speakTaped(text, kind, { variant = 0 } = {}) {
+  function speakTaped(text, kind, { variant = 0, owner = null } = {}) {
     if (!text) return false;
     // Everything that is not the greeting is COVER: audio whose whole job is
     // that the caller does not hear silence while something else happens.
@@ -1398,7 +1425,7 @@ export function createCascadeLoop({
         if (speechInFlight() || outQueue.length) {
           enqueueSpeak((gen) => {
             if (stopped || gen !== speakGen) return;
-            const q = pushFrames(tape.frames, { src, gen, tapeable: false });
+            const q = pushFrames(tape.frames, { src, gen, owner, tapeable: false });
             tapePending += q;
           });
           return true;
@@ -1410,6 +1437,7 @@ export function createCascadeLoop({
         const queued = pushFrames(tape.frames, {
           src,
           gen: speakGen,
+          owner,
           tapeable: false,
         });
         tapePending += queued;
@@ -1423,6 +1451,7 @@ export function createCascadeLoop({
         // the wire log and the frame counters call it.
         filler: cover,
         src,
+        owner,
         tape: greetingCacheOn ? { key, text } : null,
       })
     );
@@ -1905,12 +1934,15 @@ export function createCascadeLoop({
     if (!energyBargeOn || stopped || callState.emergency) return;
     if (!agentSpeaking()) {
       bargeHotMs = 0;
+      bargeSpeechStartAt = 0;
       return;
     }
     if (frameRms(pcm) < bargeRms) {
       bargeHotMs = 0;
+      bargeSpeechStartAt = 0;
       return;
     }
+    if (!bargeSpeechStartAt) bargeSpeechStartAt = Date.now();
     bargeHotMs += (pcm.length / BRAIN_IN_RATE) * 1000;
     if (bargeHotMs < bargeRmsMs) return;
     bargeHotMs = 0;
@@ -1969,8 +2001,19 @@ export function createCascadeLoop({
       `[voice-cascade] barge-in confirmed by the ears (${emergent ? 'EMERGENCY, 0 words needed' : `${countWords(text)} words`}` +
         `${corroborated ? ', energy corroborated' : ''}) — stopping`
     );
+    const stopAt = Date.now();
+    const onsetAt = bargeSpeechStartAt || acousticClock.snapshot().speechStartAt || stopAt;
     abortTurn('barge_in');
     killSpeech('barge_in');
+    if (interruptionTimings.length < MAX_LATENCY_SAMPLES) {
+      interruptionTimings.push({
+        speech_onset_at: onsetAt,
+        stop_at: stopAt,
+        stop_ms: Math.max(0, stopAt - onsetAt),
+        energy_corroborated: !!corroborated,
+      });
+    }
+    bargeSpeechStartAt = 0;
     return true;
   }
 
@@ -2040,7 +2083,12 @@ export function createCascadeLoop({
   function noteCallerSpeech(text, { final }) {
     callState.lastCallerSpeechAt = toDate(clock()).getTime();
     if (final && callState.staged) callState.speechSinceStage += String(text || '');
-    callerStopAt = Date.now();
+    const acoustic = acousticClock.snapshot();
+    callerStopAt = acoustic.lastSpeechAt || Date.now();
+    if (utterance.startedAt) {
+      if (!utterance.speechStartAt) utterance.speechStartAt = acoustic.speechStartAt || 0;
+      utterance.speechStopAt = acoustic.lastSpeechAt || utterance.speechStopAt || 0;
+    }
     lastCallerSpeechMs = callerStopAt;
     awaitingReply = true;
     // THE SILENCE LADDER RESETS ON EVERY WORD (V8-D3 §3). A caller who answered
@@ -2449,6 +2497,10 @@ export function createCascadeLoop({
     const vadMs = utterance.startedAt ? Date.now() - utterance.startedAt : null;
     const sttFinalMs = utterance.sttFinalMs ?? null;
     const id = utterance.id;
+    const acoustic = acousticClock.snapshot();
+    const speechStartAt = utterance.speechStartAt || acoustic.speechStartAt || 0;
+    const speechStopAt = utterance.speechStopAt || acoustic.lastSpeechAt || 0;
+    const eotAt = Date.now();
     resetUtterance();
     if (!text) return;
     if (countSpeakable(text) < MIN_MEANINGFUL_CHARS) {
@@ -2500,7 +2552,7 @@ export function createCascadeLoop({
     if (pendingSpec && pendingSpec.uttId === id) {
       const guess = pendingSpec;
       if (!materialDrift(guess.text, text)) {
-        promoteTurn(guess, { text, vadMs, sttFinalMs, eotAt: Date.now() });
+        promoteTurn(guess, { text, vadMs, sttFinalMs, eotAt, speechStartAt, speechStopAt });
         return;
       }
       speculativeRestarts += 1;
@@ -2527,7 +2579,7 @@ export function createCascadeLoop({
     // too, and it never needed the caller to pause for us to check.
     if (turn && turn.speculative && turn.uttId === id) {
       if (!materialDrift(turn.text, text)) {
-        promoteTurn(turn, { text, vadMs, sttFinalMs, eotAt: Date.now() });
+        promoteTurn(turn, { text, vadMs, sttFinalMs, eotAt, speechStartAt, speechStopAt });
         turn.locked = true;
         armFiller(turn);
         return;
@@ -2542,12 +2594,23 @@ export function createCascadeLoop({
       // utterance, not to this one.
       turn.vadMs = vadMs;
       turn.sttFinalMs = sttFinalMs;
-      turn.eotAt = Date.now();
+      turn.eotAt = eotAt;
+      turn.speechStartAt = speechStartAt;
+      turn.speechStopAt = speechStopAt;
       turn.locked = true;
       armFiller(turn);
       return;
     }
-    startTurn(text, { speculative: false, vadMs, sttFinalMs, uttId: id, reuseEntry });
+    startTurn(text, {
+      speculative: false,
+      vadMs,
+      sttFinalMs,
+      uttId: id,
+      reuseEntry,
+      eotAt,
+      speechStartAt,
+      speechStopAt,
+    });
   }
 
   function countSpeakable(text) {
@@ -2613,9 +2676,12 @@ export function createCascadeLoop({
    * until somebody confirmed it was answering the right sentence.
    *
    * @param {object} t
-   * @param {object} [p] { text, vadMs, sttFinalMs, eotAt }
+   * @param {object} [p] { text, vadMs, sttFinalMs, eotAt, speechStartAt, speechStopAt }
    */
-  function promoteTurn(t, { text = '', vadMs = null, sttFinalMs = null, eotAt = 0 } = {}) {
+  function promoteTurn(
+    t,
+    { text = '', vadMs = null, sttFinalMs = null, eotAt = 0, speechStartAt = 0, speechStopAt = 0 } = {}
+  ) {
     if (!t || !t.speculative) return false;
     const e = t.uttId ? ledgerFor(t.uttId) : null;
     if (e && e.generations >= MAX_GENERATIONS_PER_UTT) {
@@ -2631,6 +2697,8 @@ export function createCascadeLoop({
     if (vadMs != null) t.vadMs = vadMs;
     if (sttFinalMs != null) t.sttFinalMs = sttFinalMs;
     if (eotAt) t.eotAt = eotAt;
+    if (speechStartAt) t.speechStartAt = speechStartAt;
+    if (speechStopAt) t.speechStopAt = speechStopAt;
     if (pendingSpec === t) pendingSpec = null;
     if (e) e.generations += 1;
     for (const piece of t.heldTranscript) appendTranscript('agent', piece);
@@ -2678,7 +2746,7 @@ export function createCascadeLoop({
       // "one second" is worse than the silence it was meant to cover.
       if (outQueue.length || speechInFlight()) return;
       fillersPlayed += 1;
-      speakTaped(buildFillerText(L), 'filler');
+      speakTaped(buildFillerText(L), 'filler', { owner: t });
     }, fillerTtftMs);
     fillerTimer.unref?.();
   }
@@ -2735,7 +2803,16 @@ export function createCascadeLoop({
 
   function startTurn(
     text,
-    { speculative = false, vadMs = null, sttFinalMs = null, uttId: id = 0, reuseEntry = null } = {}
+    {
+      speculative = false,
+      vadMs = null,
+      sttFinalMs = null,
+      uttId: id = 0,
+      reuseEntry = null,
+      eotAt = 0,
+      speechStartAt = 0,
+      speechStopAt = 0,
+    } = {}
   ) {
     if (stopped || callState.emergency || !hasMouth) return;
     const said = String(text || '').trim();
@@ -2788,9 +2865,12 @@ export function createCascadeLoop({
       reuseEntry,
       abort: new AbortController(),
       startedAt: Date.now(),
-      eotAt: speculative ? 0 : Date.now(),
+      eotAt: speculative ? 0 : eotAt || Date.now(),
+      speechStartAt,
+      speechStopAt,
       ttftMs: null,
       ttsTtfbMs: null,
+      firstAnyAudioAt: 0,
       firstAudioAt: 0,
       /** The waterfall row this turn owns, once it has one, and whether it is closed. */
       row: null,
@@ -2868,6 +2948,7 @@ export function createCascadeLoop({
           }
           if (ev.type === 'done') {
             llmProvider = ev.provider || llmProvider;
+            llmResolvedModel = ev.resolvedModel || llmResolvedModel;
             t.usage.tokensIn += Number(ev.usage?.tokensIn) || 0;
             t.usage.tokensOut += Number(ev.usage?.tokensOut) || 0;
           }
@@ -3065,12 +3146,21 @@ export function createCascadeLoop({
    * it is complete or when the call ends — whichever comes first.
    */
   function noteWaterfall(t) {
+    const speechStopAt = t.speechStopAt || t.eotAt || 0;
     const row = {
       vad_ms: t.vadMs ?? null,
       stt_final_ms: t.sttFinalMs ?? null,
       llm_ttft_ms: t.ttftMs ?? null,
       tts_ttfb_ms: t.ttsTtfbMs ?? null,
-      first_audio_ms: t.firstAudioAt && t.eotAt ? t.firstAudioAt - t.eotAt : null,
+      // `first_audio_ms` is now the caller-visible number: last voiced inbound
+      // frame → first meaningful reply frame. The old post-EOT number remains
+      // alongside it so historical runs can be compared without ambiguity.
+      first_audio_ms: t.firstAudioAt && speechStopAt ? t.firstAudioAt - speechStopAt : null,
+      first_any_audio_ms: t.firstAnyAudioAt && speechStopAt ? t.firstAnyAudioAt - speechStopAt : null,
+      post_eot_first_audio_ms: t.firstAudioAt && t.eotAt ? t.firstAudioAt - t.eotAt : null,
+      endpointing_ms: speechStopAt && t.eotAt ? Math.max(0, t.eotAt - speechStopAt) : null,
+      speech_start_at: t.speechStartAt || null,
+      speech_stop_at: t.speechStopAt || null,
       speculative: !!t.wasSpeculative,
       stt: sttProvider,
       llm: llmProvider,
@@ -3102,13 +3192,21 @@ export function createCascadeLoop({
     t.rowLogged = true;
     openWaterfalls.delete(t);
     if (row.tts_ttfb_ms == null && t.ttsTtfbMs != null) row.tts_ttfb_ms = t.ttsTtfbMs;
-    if (row.first_audio_ms == null && t.firstAudioAt && t.eotAt) {
-      row.first_audio_ms = t.firstAudioAt - t.eotAt;
+    const speechStopAt = t.speechStopAt || t.eotAt || 0;
+    if (row.first_any_audio_ms == null && t.firstAnyAudioAt && speechStopAt) {
+      row.first_any_audio_ms = t.firstAnyAudioAt - speechStopAt;
+    }
+    if (row.first_audio_ms == null && t.firstAudioAt && speechStopAt) {
+      row.first_audio_ms = t.firstAudioAt - speechStopAt;
+    }
+    if (row.post_eot_first_audio_ms == null && t.firstAudioAt && t.eotAt) {
+      row.post_eot_first_audio_ms = t.firstAudioAt - t.eotAt;
     }
     log(
       `[voice-cascade] waterfall vad=${row.vad_ms ?? 'n/a'}ms stt=${row.stt_final_ms ?? 'n/a'}ms ` +
         `llm_ttft=${row.llm_ttft_ms ?? 'n/a'}ms tts_ttfb=${row.tts_ttfb_ms ?? 'n/a'}ms ` +
-        `first_audio=${row.first_audio_ms ?? 'n/a'}ms eot=${row.eot_ms ?? 'n/a'}ms · ` +
+        `first_any=${row.first_any_audio_ms ?? 'n/a'}ms first_semantic=${row.first_audio_ms ?? 'n/a'}ms ` +
+        `post_eot=${row.post_eot_first_audio_ms ?? 'n/a'}ms endpointing=${row.endpointing_ms ?? 'n/a'}ms · ` +
         `${row.stt || 'n/a'} → ${row.llm || 'n/a'} → ${row.tts || 'n/a'}` +
         `${row.clamped ? ` · clamped:${row.clamped}` : ''}`
     );
@@ -3448,8 +3546,20 @@ export function createCascadeLoop({
       // because "why did this call sound different?" must be answerable from
       // the record, not from a log nobody kept.
       classicOwned,
-      providers: { stt: sttProvider, llm: llmProvider, tts: ttsChain?.provider ?? null },
+      providers: {
+        stt: sttProvider,
+        llm: llmProvider,
+        tts: ttsChain?.provider ?? null,
+        ...(config.voiceBenchmarkMode
+          ? {
+              llmRequestedModel: config.voiceBenchmarkLlmProvider || llmProvider,
+              llmResolvedModel: llmResolvedModel || llm?.stats?.().resolvedModel || llmProvider,
+              ttsVoice: ttsChain?.voice ?? null,
+            }
+          : {}),
+      },
       waterfalls: waterfalls.map((w) => ({ ...w })),
+      interruptions: interruptionTimings.map((row) => ({ ...row })),
       usage: meter(),
     };
   }
@@ -3551,6 +3661,11 @@ export function createCascadeLoop({
         if (callState.emergency) return;
         const pcm = codec.decodeIn(payload);
         if (!pcm.length) return;
+        const acoustic = acousticClock.observe(pcm);
+        if (acoustic.voiced && utterance.startedAt) {
+          if (!utterance.speechStartAt) utterance.speechStartAt = acoustic.speechStartAt;
+          utterance.speechStopAt = acoustic.lastSpeechAt;
+        }
         // BEFORE the ears, and independent of them: the caller's own loudness
         // is the one interruption signal no transcriber can get wrong.
         noteEnergy(pcm);

@@ -45,7 +45,18 @@ export function availableStt(config = {}, { liveFactory } = {}) {
   // liveEars needs the Gemini key the product already has — or an injected
   // factory, which is how the suite exercises it with no key at all.
   if (String(config.geminiApiKey || '') || typeof liveFactory === 'function') out.push('liveEars');
-  return STT_ORDER.filter((n) => out.includes(n));
+  const available = STT_ORDER.filter((n) => out.includes(n));
+  if (!config.voiceBenchmarkMode) return available;
+  const pinned = String(config.voiceBenchmarkSttProvider || '').trim();
+  if (!pinned) throw new Error('benchmark mode requires VOICE_BENCHMARK_STT_PROVIDER');
+  if (!STT_ORDER.includes(pinned)) {
+    throw new Error(`unsupported benchmark STT provider ${JSON.stringify(pinned)}; expected ${STT_ORDER.join('|')}`);
+  }
+  if (!available.includes(pinned)) {
+    const key = pinned === 'deepgram' ? 'DEEPGRAM_API_KEY' : pinned === 'speechmatics' ? 'SPEECHMATICS_API_KEY' : 'GEMINI_API_KEY';
+    throw new Error(`benchmark STT ${pinned} is pinned but ${key} is missing`);
+  }
+  return [pinned];
 }
 
 /**

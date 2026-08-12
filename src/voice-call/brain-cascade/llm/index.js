@@ -70,7 +70,21 @@ export function availableLlm(config = {}) {
   if (String(config.cerebrasApiKey || '')) out.push('cerebras');
   if (String(config.groqApiKey || '')) out.push('groq');
   out.push('classic'); // no key, no network, no quota — it is always there
-  return LLM_ORDER.filter((n) => out.includes(n));
+  const available = LLM_ORDER.filter((n) => out.includes(n));
+  if (!config.voiceBenchmarkMode) return available;
+  const pinned = String(config.voiceBenchmarkLlmProvider || '').trim();
+  if (!pinned) throw new Error('benchmark mode requires VOICE_BENCHMARK_LLM_PROVIDER');
+  if (pinned === 'classic') {
+    throw new Error('benchmark mode requires a pinned remote LLM; classic would contaminate provider measurements');
+  }
+  if (!LLM_ORDER.includes(pinned)) {
+    throw new Error(`unsupported benchmark LLM provider ${JSON.stringify(pinned)}; expected ${LLM_ORDER.join('|')}`);
+  }
+  if (!available.includes(pinned)) {
+    const key = pinned.startsWith('gemini') ? 'GEMINI_API_KEY' : pinned === 'cerebras' ? 'CEREBRAS_API_KEY' : pinned === 'groq' ? 'GROQ_API_KEY' : null;
+    throw new Error(`benchmark LLM ${pinned} is pinned but ${key || 'its required configuration'} is missing`);
+  }
+  return [pinned];
 }
 
 /** Longest slice of a vendor's own error body we put in a rotation log line. */
@@ -157,6 +171,7 @@ export function createLlmChain({
   const built = new Map();
   const counts = { turns: 0, rotations: 0, byProvider: {}, clamped: 0, prewarmed: 0 };
   let answering = order[0] || 'classic';
+  let resolvedModel = null;
   /**
    * STICKY CLASSIC (review decision). Once the scripted engine has answered a
    * turn, it owns the REST of this call.
@@ -183,6 +198,7 @@ export function createLlmChain({
           tools,
           fetchImpl,
           logger: log,
+          captureModelVersion: Boolean(config.voiceBenchmarkMode),
         });
       } else if (name === 'cerebras' || name === 'groq') {
         impl = createOpenAiCompatLlm({
@@ -292,6 +308,7 @@ export function createLlmChain({
           // guards the pure-clamp path), so this no longer demotes a call for a
           // transient slow window.
           if (name === 'classic') sticky = true;
+          if (doneEv?.resolvedModel) resolvedModel = doneEv.resolvedModel;
           yield { ...(doneEv || { type: 'done', usage: { tokensIn: 0, tokensOut: 0 } }), provider: answering };
           return { done: true };
         } catch (err) {
@@ -437,7 +454,13 @@ export function createLlmChain({
     },
 
     stats() {
-      return { provider: answering, order, classicOwned: sticky, ...counts };
+      return {
+        provider: answering,
+        order,
+        ...(config.voiceBenchmarkMode ? { resolvedModel } : {}),
+        classicOwned: sticky,
+        ...counts,
+      };
     },
   };
 }
